@@ -1,0 +1,28 @@
+[Unit]
+Description=nufe-kebiao (南财课表, unofficial)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kebiao
+Group=kebiao
+WorkingDirectory=/opt/nufe-kebiao
+# 只监听本机，由反向代理（如 Apache / Nginx）把 https://example.com/kebiao/ 转发到这里。
+# 只能 1 个 worker：后台刷新线程跑在进程内。
+ExecStart=/opt/nufe-kebiao/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8010 \
+    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nufe-kebiao/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

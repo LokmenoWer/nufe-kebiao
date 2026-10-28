@@ -1,0 +1,572 @@
+{
+  "_comment": "脱敏示例：结构与 app.jwxt.fetch_timetable() 返回值一致；姓名、学号、personId、教师姓名均为虚构。",
+  "person_id": 0,
+  "semester_id": 161,
+  "semester_name": "2026-2027-1",
+  "current_semester_id": 161,
+  "semesters": [
+    {
+      "id": 161,
+      "name": "2026-2027-1"
+    },
+    {
+      "id": 141,
+      "name": "2025-2026-2"
+    },
+    {
+      "id": 101,
+      "name": "2025-2026-1"
+    },
+    {
+      "id": 81,
+      "name": "2024-2025-2"
+    },
+    {
+      "id": 52,
+      "name": "2023-2024-2"
+    },
+    {
+      "id": 51,
+      "name": "2023-2024-1"
+    },
+    {
+      "id": 50,
+      "name": "2022-2023-2"
+    },
+    {
+      "id": 49,
+      "name": "2022-2023-1"
+    }
+  ],
+  "semester_detail": {
+    "startDate": "2026-09-07"
+  },
+  "student": {
+    "name": "示例同学",
+    "code": "2020000000",
+    "department": "示例学院",
+    "major": "示例专业",
+    "adminclass": "示例班级",
+    "grade": null,
+    "credits": 25.25
+  },
+  "activities": [
+    {
+      "courseName": "高等数学",
+      "teachers": [
+        "教师A"
+      ],
+      "weekday": 4,
+      "startUnit": 6,
+      "endUnit": 7,
+      "weeksStr": "6",
+      "weekIndexes": [
+        6
+      ],
+      "room": "德正楼Z3-117",
+      "building": "德正楼",
+      "campus": "仙林校区",
+      "startTime": "13:30",
+      "endTime": "14:55",
+      "credits": 2
+    },
+    {
+      "courseName": "大学英语",
+      "teachers": [
+        "教师B"
+      ],
+      "weekday": 1,
+      "startUnit": 7,
+      "endUnit": 9,
+      "weeksStr": "1~3,5~7(单),8~12",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "room": "德业楼Z4-118",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "14:15",
+      "endTime": "16:35",
+      "credits": 2
+    },
+    {
+      "courseName": "线性代数",
+      "teachers": [
+        "教师C"
+      ],
+      "weekday": 3,
+      "startUnit": 7,
+      "endUnit": 9,
+      "weeksStr": "1~3,5~6,8~13,16~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        16,
+        17
+      ],
+      "room": "德业楼Z4-108",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "14:15",
+      "endTime": "16:35",
+      "credits": 3
+    },
+    {
+      "courseName": "概率论与数理统计",
+      "teachers": [
+        "教师D"
+      ],
+      "weekday": 3,
+      "startUnit": 3,
+      "endUnit": 5,
+      "weeksStr": "6",
+      "weekIndexes": [
+        6
+      ],
+      "room": "食工楼203",
+      "building": "工科楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "12:15",
+      "credits": 3
+    },
+    {
+      "courseName": "线性代数",
+      "teachers": [
+        "教师C"
+      ],
+      "weekday": 4,
+      "startUnit": 6,
+      "endUnit": 8,
+      "weeksStr": "17",
+      "weekIndexes": [
+        17
+      ],
+      "room": "德业楼Z4-106",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "13:30",
+      "endTime": "15:50",
+      "credits": 3
+    },
+    {
+      "courseName": "微观经济学",
+      "teachers": [
+        "教师E"
+      ],
+      "weekday": 1,
+      "startUnit": 11,
+      "endUnit": 13,
+      "weeksStr": "1~3,5~12",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "room": "德济楼Z2S206",
+      "building": "德济楼",
+      "campus": "仙林校区",
+      "startTime": "18:30",
+      "endTime": "20:50",
+      "credits": 2
+    },
+    {
+      "courseName": "宏观经济学",
+      "teachers": [
+        "教师F"
+      ],
+      "weekday": 2,
+      "startUnit": 3,
+      "endUnit": 5,
+      "weeksStr": "1~3,5~13,16~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        16,
+        17
+      ],
+      "room": "德经楼Z1-101",
+      "building": "德经楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "12:15",
+      "credits": 3
+    },
+    {
+      "courseName": "会计学原理",
+      "teachers": [
+        "教师G"
+      ],
+      "weekday": 3,
+      "startUnit": 2,
+      "endUnit": 5,
+      "weeksStr": "10~13",
+      "weekIndexes": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "room": "仙Y-103",
+      "building": "艺术楼",
+      "campus": "仙林校区",
+      "startTime": "9:05",
+      "endTime": "12:15",
+      "credits": 1
+    },
+    {
+      "courseName": "统计学",
+      "teachers": [
+        "教师H"
+      ],
+      "weekday": 5,
+      "startUnit": 11,
+      "endUnit": 12,
+      "weeksStr": "6",
+      "weekIndexes": [
+        6
+      ],
+      "room": "德业楼Z4-111",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "18:30",
+      "endTime": "20:00",
+      "credits": 2
+    },
+    {
+      "courseName": "管理学",
+      "teachers": [
+        "教师I"
+      ],
+      "weekday": 2,
+      "startUnit": 11,
+      "endUnit": 12,
+      "weeksStr": "14~17",
+      "weekIndexes": [
+        16,
+        17,
+        14,
+        15
+      ],
+      "room": "博远楼JC105",
+      "building": "博远楼",
+      "campus": "仙林校区",
+      "startTime": "18:30",
+      "endTime": "20:00",
+      "credits": 0.25
+    },
+    {
+      "courseName": "概率论与数理统计",
+      "teachers": [
+        "教师D"
+      ],
+      "weekday": 1,
+      "startUnit": 3,
+      "endUnit": 5,
+      "weeksStr": "1~13(单),16~17",
+      "weekIndexes": [
+        16,
+        1,
+        17,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13
+      ],
+      "room": "德业楼Z4-118",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "12:15",
+      "credits": 3
+    },
+    {
+      "courseName": "大学英语",
+      "teachers": [
+        "教师B"
+      ],
+      "weekday": 2,
+      "startUnit": 11,
+      "endUnit": 13,
+      "weeksStr": "7~8",
+      "weekIndexes": [
+        7,
+        8
+      ],
+      "room": "德业楼Z4-118",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "18:30",
+      "endTime": "20:50",
+      "credits": 2
+    },
+    {
+      "courseName": "高等数学",
+      "teachers": [
+        "教师A"
+      ],
+      "weekday": 4,
+      "startUnit": 6,
+      "endUnit": 7,
+      "weeksStr": "8",
+      "weekIndexes": [
+        8
+      ],
+      "room": "德业楼Z4-114",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "13:30",
+      "endTime": "14:55",
+      "credits": 2
+    },
+    {
+      "courseName": "高等数学",
+      "teachers": [
+        "教师A"
+      ],
+      "weekday": 1,
+      "startUnit": 1,
+      "endUnit": 2,
+      "weeksStr": "1~3,5~6,8~13,16~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        16,
+        17
+      ],
+      "room": "德业楼Z4-106",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "8:20",
+      "endTime": "9:45",
+      "credits": 2
+    },
+    {
+      "courseName": "金融学",
+      "teachers": [
+        "教师J"
+      ],
+      "weekday": 5,
+      "startUnit": 6,
+      "endUnit": 7,
+      "weeksStr": "1~3,6~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "room": "德业楼Z4-117",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "13:30",
+      "endTime": "14:55",
+      "credits": 2
+    },
+    {
+      "courseName": "概率论与数理统计",
+      "teachers": [
+        "教师D"
+      ],
+      "weekday": 1,
+      "startUnit": 3,
+      "endUnit": 5,
+      "weeksStr": "2,6~12(双)",
+      "weekIndexes": [
+        2,
+        6,
+        8,
+        10,
+        12
+      ],
+      "room": "食工楼203",
+      "building": "工科楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "12:15",
+      "credits": 3
+    },
+    {
+      "courseName": "市场营销",
+      "teachers": [
+        "教师K"
+      ],
+      "weekday": 4,
+      "startUnit": 6,
+      "endUnit": 9,
+      "weeksStr": "10~11,16",
+      "weekIndexes": [
+        16,
+        10,
+        11
+      ],
+      "room": "博观楼JB301",
+      "building": "博观楼",
+      "campus": "仙林校区",
+      "startTime": "13:30",
+      "endTime": "16:35",
+      "credits": 1
+    },
+    {
+      "courseName": "统计学",
+      "teachers": [
+        "教师H"
+      ],
+      "weekday": 2,
+      "startUnit": 8,
+      "endUnit": 9,
+      "weeksStr": "1~3,5~13,16~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        16,
+        17
+      ],
+      "room": "德业楼Z4-117",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "15:10",
+      "endTime": "16:35",
+      "credits": 2
+    },
+    {
+      "courseName": "数据结构",
+      "teachers": [
+        "教师L"
+      ],
+      "weekday": 5,
+      "startUnit": 3,
+      "endUnit": 4,
+      "weeksStr": "1~13,16~17",
+      "weekIndexes": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        16,
+        17
+      ],
+      "room": "博文楼JA108",
+      "building": "博文楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "11:25",
+      "credits": 2
+    },
+    {
+      "courseName": "线性代数",
+      "teachers": [
+        "教师C"
+      ],
+      "weekday": 4,
+      "startUnit": 7,
+      "endUnit": 9,
+      "weeksStr": "12",
+      "weekIndexes": [
+        12
+      ],
+      "room": "德业楼Z4-106",
+      "building": "德业楼",
+      "campus": "仙林校区",
+      "startTime": "14:15",
+      "endTime": "16:35",
+      "credits": 3
+    },
+    {
+      "courseName": "宏观经济学",
+      "teachers": [
+        "教师F"
+      ],
+      "weekday": 3,
+      "startUnit": 3,
+      "endUnit": 5,
+      "weeksStr": "8",
+      "weekIndexes": [
+        8
+      ],
+      "room": "仙Y-103",
+      "building": "艺术楼",
+      "campus": "仙林校区",
+      "startTime": "10:00",
+      "endTime": "12:15",
+      "credits": 3
+    }
+  ]
+}
