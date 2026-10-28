@@ -343,7 +343,10 @@ button, input, select { font: inherit; color: inherit; }
   border: 1px dashed var(--line-strong); border-radius: var(--radius-lg); background: var(--surface);
 }
 .empty strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 15px; }
-.foot { margin-top: 28px; text-align: center; font-size: 12px; color: var(--text-3); }
+.foot { display: flex; flex-direction: column; gap: 4px; margin-top: 28px; text-align: center; font-size: 12px; color: var(--text-3); }
+.auth .foot { margin-top: 20px; }
+.foot a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.foot a:hover { color: var(--accent); text-decoration-color: currentColor; }
 
 /* ============ Dialogs ============ */
 dialog { color: var(--text); padding: 0; border: 0; }
