@@ -568,7 +568,7 @@ def test_widget_colors_match_frontend():
 
 def test_refresh_policy_targets():
     from app import refresh_policy as P
-    now = 1_000_000_000.0
+    now = 1_000_000_000.0  # 2001-09-09 09:46 北京时间
     H, D, M = 3600, 86400, 60
     soon_class = now + 5 * D  # 一周内有课，但还远
 
@@ -580,22 +580,60 @@ def test_refresh_policy_targets():
     assert t(last_seen_at=now - 10 * D).seconds == 6 * H
     assert t(last_seen_at=now - 30 * D).seconds == 24 * H
     assert t(last_seen_at=now - 90 * D, next_class_at=now + 10 * D).seconds == 7 * D
-    # 很久没用但这周有课：按距上课时间的 1/3 提速
-    assert t(last_seen_at=now - 90 * D).seconds == 5 * D / 3 and t(last_seen_at=now - 90 * D).reason == "这周有课"
-    # 临近上课：间隔不超过距上课时间的 1/3，最短 30 分钟
-    assert t(last_seen_at=now - H, next_class_at=now + 2 * H).seconds == 40 * M
-    assert t(last_seen_at=now - H, next_class_at=now + H).seconds == 30 * M
-    assert t(last_seen_at=now - H, next_class_at=now + H).reason == "临近上课"
-    # 半夜离早课还有 6 小时：2 小时一刷；不活跃的人临近上课也会提速
-    assert t(last_seen_at=now - H, next_class_at=now + 6 * H).seconds == 2 * H
-    assert t(last_seen_at=now - 30 * D, next_class_at=now + 18 * H).seconds == 6 * H
+    # 很久没用但这周有课：至少一天一刷（不再跟着上课时间越刷越密）
+    assert t(last_seen_at=now - 90 * D).seconds == D and t(last_seen_at=now - 90 * D).reason == "这周有课"
+    # 基础间隔与离上课多远无关：临近上课靠检查点
+    assert t(last_seen_at=now - H, next_class_at=now + H).seconds == 4 * H
     # 近期没课（假期 / 开学前 / 结课后）：至少一天一刷
     assert t(last_seen_at=now - H, next_class_at=None).seconds == 24 * H
     assert t(last_seen_at=now - H, next_class_at=now + 20 * D).reason == "近期没有课"
-    # 刚调过课：减半，但不低于 15 分钟
-    changed = t(last_seen_at=now - H, next_class_at=now + H, last_change_at=now - D)
-    assert changed.seconds == 15 * M and "变动" in changed.reason
-    assert t(last_seen_at=now - H, last_change_at=now - D).seconds == 2 * H
+    # 刚调过课：减半
+    changed = t(last_seen_at=now - H, last_change_at=now - D)
+    assert changed.seconds == 2 * H and "变动" in changed.reason
+
+
+def test_refresh_policy_checkpoint_before_class():
+    from app import refresh_policy as P
+    now = 1_000_000_000.0
+    H, M = 3600, 60
+    cls = now + 2 * H  # 11:46 上课：检查点 11:16，窗口从 11:06 开始
+    sig = P.Signals(last_seen_at=now, last_success_at=now - H, next_class_at=cls)
+    assert P.overdue(sig, now) < 1
+    assert P.next_due(sig, now) == cls - P.CHECK_LEAD - P.CHECK_WINDOW
+    assert "出门前" in P.reason(sig, now)
+    # 进了窗口：排在基础间隔前面，越接近上课越急
+    opens = cls - P.CHECK_LEAD - P.CHECK_WINDOW
+    assert P.CHECKPOINT_BOOST <= P.overdue(sig, opens) < P.overdue(sig, opens + 10 * M) < P.REQUESTED_BOOST
+    assert P.reason(sig, opens) == "上课前确认"
+    # 窗口里刷过一次就够了，直到上课都不再刷
+    done = P.Signals(**{**sig.__dict__, "last_success_at": opens + 60})
+    assert P.overdue(done, cls - M) < 1
+    # 同班同学在窗口里刷过（没发现变动）：也算检查过
+    peer = P.Signals(**{**sig.__dict__, "peer_checked_at": opens + 60})
+    assert P.overdue(peer, opens + 5 * M) < 1
+    stale_peer = P.Signals(**{**sig.__dict__, "peer_checked_at": opens - 60})
+    assert P.overdue(stale_peer, opens + 5 * M) >= P.CHECKPOINT_BOOST
+    # 很久没用的人不做检查点；订阅了变动邮件的仍然做
+    idle = P.Signals(last_seen_at=now - 30 * 86400, last_success_at=now - H, next_class_at=cls)
+    assert P.overdue(idle, opens + 5 * M) < 1
+    mailed = P.Signals(**{**idle.__dict__, "subscribed": True})
+    assert P.overdue(mailed, opens + 5 * M) >= P.CHECKPOINT_BOOST
+
+
+def test_refresh_policy_quiet_hours():
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from app import refresh_policy as P
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, m=0: dt.datetime(2026, 10, 27, h, m, tzinfo=tz).timestamp()  # noqa: E731
+    # 23:00 刷过，4 小时后本该 3:00 再刷：推迟到 6:30
+    sig = P.Signals(last_seen_at=at(1), last_success_at=at(0) - 3600, next_class_at=at(14))
+    assert P.overdue(sig, at(3)) < 1 and P.overdue(sig, at(6)) < 1
+    assert P.next_due(sig, at(3)) == at(6, 30)
+    assert P.overdue(sig, at(6, 31)) >= 1
+    # 早课的检查点不受深夜影响：7:00 上课，6:20 起就要确认
+    early = P.Signals(last_seen_at=at(1), last_success_at=at(0) - 3600, next_class_at=at(7))
+    assert P.overdue(early, at(6, 21)) >= P.CHECKPOINT_BOOST
 
 
 def test_refresh_policy_overdue_and_requests():

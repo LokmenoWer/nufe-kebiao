@@ -42,6 +42,7 @@ class FakeUpstream:
         self.fetches = 0
         self.course_override = None
         self.room_override = None
+        self.extra_activities = {}  # 学号 -> 额外排课（补课 / 加课）
 
     def login(self, session, username, password, device_id=None):
         self.devices.append(device_id)
@@ -71,6 +72,7 @@ class FakeUpstream:
             if tgc and tgc.removeprefix("tgc-") not in self.expired:
                 data = _timetable(tgc.removeprefix("tgc-"), self.course_override)
                 data["activities"][0]["room"] = self.room_override or "A101"
+                data["activities"] += self.extra_activities.get(tgc.removeprefix("tgc-"), [])
                 return data
         tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
         sid = tgc.removeprefix("tgc-") if tgc else None
@@ -540,6 +542,10 @@ def test_captcha_stops_retry(up):
 def _queued(far_future=False):
     now = db.now() + (60 * 86400 if far_future else 0)
     return [uid for _score, uid in service.candidates(now)]
+
+
+def _queued_at(at):
+    return [uid for _score, uid in service.candidates(at)]
 
 
 def _budget(tokens=10):
@@ -1456,6 +1462,83 @@ def test_change_alerts_classmates(up):
     b.post("/api/refresh", headers=_csrf(b), json={})
     assert _row("2023002", "refresh_requested_at")[0] is None
     assert _row("2023001", "refresh_requested_at")[0] is None
+
+
+def test_makeup_class_alerts_classmates(up):
+    """补课 / 加课：没有旧安排被改掉，按课程找同学，还没有这条新排课的人排到队首。"""
+    up.course_override = "高数"
+    a, b = TestClient(app), TestClient(app)
+    _login(a, "2023001")
+    _login(b, "2023002")
+    makeup = {"courseName": "高数", "teachers": ["T"], "weekday": 6, "startUnit": 1, "endUnit": 2,
+              "weeksStr": "9", "weekIndexes": [9], "room": "C303", "building": "", "campus": "",
+              "startTime": "8:20", "endTime": "9:45", "credits": 2}
+    up.extra_activities["2023001"] = [makeup]
+    a.post("/api/refresh", headers=_csrf(a), json={})
+    assert _row("2023002", "refresh_request_reason")[0] == "同班同学的课表有变动"
+    # 同学刷到了补课：清掉请求；再有人刷新也不会被反复叫醒
+    up.extra_activities["2023002"] = [makeup]
+    b.post("/api/refresh", headers=_csrf(b), json={})
+    assert _row("2023002", "refresh_requested_at")[0] is None
+    assert service.alert_classmates(service_uid("2023001"), 161, [], [makeup]) == 0
+
+
+def test_classmate_covers_pre_class_check(up):
+    """出门前检查点：同一节课的同学刚刷过，就不用再替我向学校要一次。"""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from app import refresh_policy as P
+    tz = ZoneInfo("Asia/Shanghai")
+    up.course_override = "高数"
+    a, b = TestClient(app), TestClient(app)
+    _login(a, "2023001")
+    _login(b, "2023002")
+    now = db.now()
+    today = dt.datetime.fromtimestamp(now, tz).date()
+    _set_week1((today - dt.timedelta(days=today.weekday())).isoformat())
+    a_id, b_id = service_uid("2023001"), service_uid("2023002")
+    for uid in (a_id, b_id):
+        with db.tx() as conn:
+            service._store_next_class(conn, uid, now)
+    cls = _row("2023001", "next_class_at")[0]
+    assert cls and _row("2023002", "next_class_at")[0] == cls
+    window = cls - P.CHECK_LEAD - P.CHECK_WINDOW + 60
+    with db.tx() as conn:  # 两个人都在窗口开始前刷过
+        conn.execute("UPDATE users SET last_success_at=?, last_seen_at=?", (window - 3600, window))
+        conn.execute("UPDATE timetables SET fetched_at=?", (window - 3600,))
+    assert set(_queued_at(window)) == {a_id, b_id}
+    with db.tx() as conn:  # A 在窗口里刷到了：B 的这节课也算检查过
+        conn.execute("UPDATE users SET last_success_at=? WHERE id=?", (window, a_id))
+        conn.execute("UPDATE timetables SET fetched_at=? WHERE user_id=?", (window, a_id))
+    assert _queued_at(window + 60) == []
+    assert service.still_due(b_id, window + 60) is False
+
+
+def test_widget_marks_changed_and_cancelled_lessons(up):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    today = dt.datetime.now(tz).date()
+    monday = today - dt.timedelta(days=today.weekday())
+    _set_week1(monday.isoformat())  # 本周第 1 周；示例课每周一 8:20
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    up.course_override = "高数"
+    up.room_override = "B202"  # 改教室
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    feed = TestClient(app).get(path).json()
+    mon = feed["week"]["days"][0]["lessons"][0]
+    assert mon["changed"] is True and mon["was"] == "原 A101"
+    assert feed["changed_at"] and abs(feed["changed_at"] - db.now()) < 30
+    assert feed["next_week"]["days"][0]["lessons"][0]["changed"] is True  # 整条排课都改了
+
+    # 这门课停了、同一时间换成另一门：新课标“调”，旧课列进 cancelled
+    up.course_override, up.room_override = "线代", None
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    mon = TestClient(app).get(path).json()["week"]["days"][0]
+    assert [(x["name"], x.get("changed")) for x in mon["lessons"]] == [("线代", True)]
+    assert [x["name"] for x in mon["cancelled"]] == ["高数"]
 
 
 def test_unrelated_users_not_alerted(up):

@@ -46,13 +46,16 @@ CREATE TABLE IF NOT EXISTS users (
     next_class_at    REAL,             -- 下一节课的开始时刻（按已存课表算，过期后惰性重算）
     next_class_checked_at REAL,
     refresh_requested_at  REAL,        -- 有人请求尽快刷新（打开了过期的页面 / 同班同学课表有变动）
-    refresh_request_reason TEXT
+    refresh_request_reason TEXT,
+    next_class_slots TEXT,             -- 下一节课的 slot_key 列表（JSON）：同班同学刚刷过就算检查过
+    recent_changes_json TEXT           -- 最近 7 天发现的调课（改动前后的排课），小组件据此标出“调”和“停”
 );
 -- 谁上同一节课：一个人发现调课，同班其他人立刻排到队首
 CREATE TABLE IF NOT EXISTS lesson_slots (
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     semester_id INTEGER NOT NULL,
     slot_key    TEXT NOT NULL,
+    course_key  TEXT,                  -- 同一门课（课程 + 教师）：补课 / 加课没有旧安排可比，按课程找同学
     PRIMARY KEY (user_id, semester_id, slot_key)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -160,12 +163,16 @@ def init() -> None:
                      ("notify_changes", "INTEGER NOT NULL DEFAULT 1"), ("widget_token_hash", "TEXT"),
                      ("enc_widget_token", "BLOB"), ("last_seen_at", "REAL"), ("last_change_at", "REAL"),
                      ("next_class_at", "REAL"), ("next_class_checked_at", "REAL"),
-                     ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT")):
+                     ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT"),
+                     ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+    if "course_key" not in {r["name"] for r in conn.execute("PRAGMA table_info(lesson_slots)")}:
+        conn.execute("ALTER TABLE lesson_slots ADD COLUMN course_key TEXT")
     # 老库是 ALTER 补的列，唯一索引只能在补完列之后建
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget ON users(widget_token_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slots_key ON lesson_slots(semester_id, slot_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_slots_course ON lesson_slots(semester_id, course_key)")
     session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
     if "persistent" not in session_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")

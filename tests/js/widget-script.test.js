@@ -242,23 +242,44 @@ test("参数里的提醒分钟：默认 10，0 关闭，过大则封顶", () => 
   assert.deepEqual(param("week 999", "large"), { mode: "week", remindMinutes: 180 });
 });
 
-test("主动刷新：快上课且数据已旧、或服务端标记 due 时才再请求", () => {
+test("调课：改过的课标“调”并附原安排，停掉的课单独列出", () => {
   const now = W.shanghaiNow(NOW);
-  assert.equal(W.shouldPushRefresh(PAYLOAD, now), false); // 下一节 14:15，还早
-  const soon = {
+  const payload = {
     ...PAYLOAD,
-    updated_at: NOW / 1000 - 3600,
-    refresh: { pending: false, due: false, fresh: false },
-    today: day("2026-10-26", 1, [L("大学英语", "11:00", "12:15")]),
+    changed_at: NOW / 1000 - 600,
+    today: {
+      ...PAYLOAD.today,
+      lessons: PAYLOAD.today.lessons.map((l) => (l.name === "大学英语" ? { ...l, room: "B305", changed: true, was: "原 A101" } : l)),
+      cancelled: [{ name: "高等数学", start: "08:20", end: "09:45", room: "A101", color: "#4b63e0" },
+        { name: "体育", start: "16:45", end: "18:20", room: "", color: "#0f8b8d" }],
+    },
   };
-  assert.equal(W.classSoon(soon, now), true);
-  assert.equal(W.shouldPushRefresh(soon, now), true);
-  assert.equal(W.shouldPushRefresh({ ...soon, updated_at: NOW / 1000 - 14 * 60 }, now), false);
-  assert.equal(W.shouldPushRefresh({ ...soon, refresh: { fresh: true } }, now), false);
-  assert.equal(W.shouldPushRefresh({ ...soon, refresh: { pending: true } }, now), false);
-  assert.equal(W.shouldPushRefresh({ ...soon, status: "needs_rebind" }, now), false);
-  assert.equal(W.shouldPushRefresh({ ...PAYLOAD, refresh: { due: true } }, now), true);
-  assert.equal(W.refreshUrl("https://s/widget/a.json"), "https://s/widget/a.json?refresh=1");
+  const plan = W.buildPlan(payload, "today", now);
+  assert.deepEqual(plan.cancelled.map((c) => c.name), ["体育"]); // 早上那节已经过去，不再提
+  assert.ok(W.planHasChanges(plan));
+  assert.ok(!W.planHasChanges(W.buildPlan(PAYLOAD, "today", now)));
+  assert.equal(W.headerNote(payload, false, payload.today, "medium", { changed: true, nowMs: NOW }).text, "有调课");
+  // 一天之前的调课、且画面上没有标记：不再提示
+  const old = { ...PAYLOAD, changed_at: NOW / 1000 - 2 * 86400 };
+  assert.equal(W.headerNote(old, false, PAYLOAD.today, "medium", { nowMs: NOW }).text, "第 8 周");
+  // 提醒里写明已调课
+  const english = W.reminderPlan(payload, now, 10, "").find((x) => x.title === "大学英语");
+  assert.equal(english.subtitle, "10 分钟后上课 · 已调课");
+  assert.equal(english.body, "14:15–16:35 · B305 · （原 A101）");
+});
+
+test("课表在排提醒之后变过：提示到 Scriptable 里重排", () => {
+  const payload = { ...PAYLOAD, changed_at: 2000 };
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 1000 }, 10), true);
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 3000 }, 10), false);
+  assert.equal(W.needsReminderResync(payload, null, 10), false); // 从没排过提醒
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 1000 }, 0), false); // 关了提醒
+  assert.equal(W.headerNote(payload, false, PAYLOAD.today, "medium", { resync: true, changed: true, nowMs: NOW }).text, "点按更新提醒");
+});
+
+test("下次重画：服务器出门前确认完课表后（课前 25 分钟）画一次", () => {
+  const at1340 = W.shanghaiNow(Date.UTC(2026, 9, 26, 5, 40)); // 13:40，14:15 上课
+  assert.equal(W.nextRefreshMs(PAYLOAD, at1340), at1340.ms + 10 * 60000); // 13:50
 });
 
 test("上课提醒：未来的课提前通知，已开始和不足 1 分钟的不响", () => {
@@ -330,19 +351,62 @@ test("更新中：标题栏提示，并大约 2 分钟后再画", async () => {
   assert.equal(widget.refreshAfterDate.getTime(), NOW + 2 * 60000);
 });
 
-test("快上课时小组件会再请求一次刷新", async () => {
+test("小组件每次只请求一次：快上课的确认交给服务器", async () => {
   const soon = {
     ...PAYLOAD,
     updated_at: NOW / 1000 - 3600,
-    refresh: { pending: false, due: false, fresh: false },
+    refresh: { pending: false, due: true, fresh: false },
     today: day("2026-10-26", 1, [L("大学英语", "11:00", "12:15")]),
   };
   const run = await runWidgetScript({ payload: soon, url: URL_OK, nowMs: NOW });
-  assert.deepEqual(run.requests.map((u) => u.replace(URL_OK, "")), ["", "?refresh=1"]);
+  assert.deepEqual(run.requests, [URL_OK]);
   assert.ok(run.widget.texts().includes("更新中") && run.widget.texts().includes("大学英语"));
-  const fresh = { ...soon, refresh: { fresh: true, pending: false, due: false } };
-  const once = await runWidgetScript({ payload: fresh, url: URL_OK, nowMs: NOW });
-  assert.equal(once.requests.length, 1);
+});
+
+test("小组件画出调课和停课；提醒过期时点按回到 Scriptable", async () => {
+  const payload = {
+    ...PAYLOAD,
+    changed_at: NOW / 1000 - 600,
+    today: {
+      ...PAYLOAD.today,
+      lessons: PAYLOAD.today.lessons.map((l) => (l.name === "概率论" ? { ...l, room: "B305", changed: true, was: "原 B202" } : l)),
+      cancelled: [{ name: "体育", start: "16:45", end: "18:20", room: "", color: "#0f8b8d" }],
+    },
+  };
+  const cache = new Map();
+  const first = await runWidgetScript({ payload, family: "medium", url: URL_OK, nowMs: NOW, cache });
+  const t = first.widget.texts();
+  assert.ok(t.includes(" 调") && t.includes("10:00–12:15 · B305（原 B202）"), t.join("|"));
+  assert.ok(t.includes("停课：体育 16:45") && t.includes("有调课"));
+  assert.ok(first.widget.url.startsWith("https://kb.example.com/#"));
+
+  // 之前在 Scriptable 里排过提醒，之后课表又变了：提示重排，点按直接运行脚本
+  await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW - 3600000, cache, inApp: true });
+  const stale = await runWidgetScript({ payload, family: "medium", url: URL_OK, nowMs: NOW, cache });
+  assert.ok(stale.widget.texts().includes("点按更新提醒"));
+  assert.equal(stale.widget.url, `scriptable:///run/${encodeURIComponent("南财课表")}`);
+  // 重排之后恢复正常
+  await runWidgetScript({ payload, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  const ok = await runWidgetScript({ payload, family: "medium", url: URL_OK, nowMs: NOW + 60000, cache });
+  assert.ok(!ok.widget.texts().includes("点按更新提醒"));
+
+  for (const family of ["small", "large", "accessoryRectangular", "accessoryInline", "accessoryCircular"]) {
+    for (const parameter of ["today", "week"]) {
+      const { widget } = await runWidgetScript({ payload, family, parameter, url: URL_OK, nowMs: NOW });
+      assert.ok(widget.texts().length > 0, `${family}/${parameter}`);
+    }
+  }
+  const small = await runWidgetScript({ payload, family: "small", url: URL_OK, nowMs: NOW });
+  assert.ok(small.widget.texts().includes(" · 调课") && small.widget.texts().includes("B305（原 B202）"));
+  const inline = await runWidgetScript({ payload, family: "accessoryInline", url: URL_OK, nowMs: NOW });
+  assert.deepEqual(inline.widget.texts(), ["10:00 概率论（调） @B305"]);
+});
+
+test("服务器返回的不是 JSON（如反向代理错误页）：按离线处理，用缓存", async () => {
+  const cache = new Map();
+  await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache });
+  const run = await runWidgetScript({ payload: "<html>502 Bad Gateway</html>", status: 502, url: URL_OK, nowMs: NOW, cache });
+  assert.ok(run.widget.texts().includes("离线") && run.widget.texts().includes("概率论"));
 });
 
 test("桌面刷新只画小组件，不排通知", async () => {

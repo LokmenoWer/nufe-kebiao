@@ -160,9 +160,14 @@ export async function runWidgetScript({
       requests.push(u);
     }
 
-    async loadJSON() {
+    async loadString() {
       if (fail) throw new Error("offline");
+      if (String(this.url).endsWith(".js")) {
+        this.response = { statusCode: scriptStatus };
+        return scriptBody;
+      }
       this.response = { statusCode: status };
+      if (typeof payload === "string") return payload; // 原样返回（比如反向代理的 HTML 错误页）
       const data = JSON.parse(JSON.stringify(payload));
       if (String(this.url).includes("refresh=1")) {
         // 替身不跑服务器：刚同步过就保持 fresh，否则视为已经排队
@@ -170,13 +175,7 @@ export async function runWidgetScript({
           ? { ...data.refresh, pending: false, due: false }
           : { ...(data.refresh || {}), pending: true, due: false, fresh: false };
       }
-      return data;
-    }
-
-    async loadString() {
-      if (fail) throw new Error("offline");
-      this.response = { statusCode: scriptStatus };
-      return scriptBody;
+      return JSON.stringify(data);
     }
   }
 
@@ -281,6 +280,7 @@ export async function runWidgetScript({
     Safari: { open: (u) => presented.push(`safari:${u}`) },
     module: { filename: "/Documents/南财课表.js" },
     Script: {
+      name: () => "南财课表",
       setWidget: (w) => { result = w; },
       complete: () => done(),
     },

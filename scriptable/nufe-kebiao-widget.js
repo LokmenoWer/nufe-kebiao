@@ -13,25 +13,28 @@
  *      几块小组件请写同一个数字，后刷新的那块会改掉已经安排的提醒。
  *   锁屏小组件同样可用：显示下一节课和倒计时。
  *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站。
- *   课表过期或快上课时，小组件会请服务器向学校拉取，标题栏显示“更新中”，大约两分钟后再画一次。
- *   上课提醒是本机通知，只在 Scriptable 里运行脚本时安排（小组件进程里排通知会被系统掐掉）。
- *   第一次运行时允许 Scriptable 发通知；课表变了，再运行一次脚本就会改掉旧提醒。
+ *
+ * 调课：服务器每节课出门前（上课前半小时）会替你向学校确认一次课表，小组件在那之后重画。
+ *   改了教室 / 时间的课标“调”（附原来的安排），当天停掉的课列在“停课”里，标题栏提示“有调课”。
+ *   上课提醒是本机通知，只能在 Scriptable 里运行脚本时安排（小组件进程里排通知会被系统掐掉）；
+ *   课表变了而提醒还是旧的，标题栏会提示“点按更新提醒”，点一下小组件就会在 Scriptable 里重排。
  *
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
  */
 const WIDGET_URL = "__WIDGET_URL__";
-const SCRIPT_VERSION = "2026.11.03";
+const SCRIPT_VERSION = "2026.11.04";
 
-const TZ_OFFSET_MINUTES = 8 * 60; // 北京时间，学校课表按它算
-const STALE_SECONDS = 2 * 86400;  // 课表超过这么久没更新就提示
+const TZ_OFFSET_MINUTES = 8 * 60;      // 北京时间，学校课表按它算
+const STALE_SECONDS = 2 * 86400;       // 课表超过这么久没更新就提示
+const CHANGE_NOTE_SECONDS = 86400;     // 一天内发现过调课：标题栏提示（看得到调课标记时一直提示）
 const DEFAULT_REMIND_MINUTES = 10;
 const MAX_REMIND_MINUTES = 180;
-const REMIND_HORIZON_DAYS = 7;    // 安排未来这么多天的提醒；更远的等下次刷新
-const MAX_REMINDERS = 40;         // iOS 待发送通知上限是 64，留出余量
+const REMIND_HORIZON_DAYS = 7;         // 安排未来这么多天的提醒；更远的等下次运行
+const MAX_REMINDERS = 40;              // iOS 待发送通知上限是 64，留出余量
 const REMIND_MIN_GAP_MS = 60 * 1000;
-const SOON_CLASS_MINUTES = 90;    // 下一节课在这么久之内，且数据已旧，就主动拉一次
-const SOON_CLASS_MAX_AGE = 15 * 60;
-const PENDING_REFRESH_MS = 2 * 60000;
+const MAX_REDRAW_MS = 30 * 60000;      // 最长 30 分钟重画一次
+const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两分钟后再看
+const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const MODE_ALIASES = {
   today: "today", 今天: "today", 今日: "today", "": "today",
@@ -39,7 +42,11 @@ const MODE_ALIASES = {
   week: "week", 本周: "week", 周: "week", 全部: "week", all: "week",
 };
 
-// ---------- 纯逻辑（不依赖 Scriptable，可在 Node 里测试） ----------
+// ======================================================================
+// 纯逻辑（不依赖 Scriptable，可在 Node 里测试）
+// ======================================================================
+
+// ---- 参数与时间 ----
 
 function parseMode(param, family) {
   const raw = String(param || "").trim();
@@ -95,14 +102,18 @@ function isNewer(latest, current) {
   return Boolean(latest) && String(latest) > String(current);
 }
 
-/** 每个链接一份离线缓存：同一台手机上不同账号 / 不同脚本的小组件互不覆盖。 */
-function cacheName(url) {
+function fnv(text) {
   let h = 2166136261;
-  for (const ch of String(url)) {
+  for (const ch of String(text)) {
     h ^= ch.codePointAt(0);
     h = Math.imul(h, 16777619) >>> 0;
   }
-  return `nufe-kebiao-${h.toString(16)}.json`;
+  return h.toString(16);
+}
+
+/** 每个链接一份离线缓存：同一台手机上不同账号 / 不同脚本的小组件互不覆盖。 */
+function cacheName(url) {
+  return `nufe-kebiao-${fnv(url)}.json`;
 }
 
 /** 网站上对应的视图：今天 / 明天 → 日视图那一天；本周 → 周视图。 */
@@ -114,6 +125,12 @@ function siteLink(base, payload, day, view = "day") {
   if (view === "day" && day && day.weekday) params.push(`d=${day.weekday - 1}`);
   return `${base}#${params.join("&")}`;
 }
+
+function refreshUrl(url) {
+  return `${url}${String(url).includes("?") ? "&" : "?"}refresh=1`;
+}
+
+// ---- 要画什么 ----
 
 /** 缓存可能是昨天拿的：跨过午夜后把“明天”当成今天用；更旧的数据不再显示具体课程。 */
 function resolveDays(payload, now) {
@@ -151,6 +168,11 @@ function annotate(lessons, nowMinutes, markNext = true) {
   });
 }
 
+/** 当天停掉的课；今天的只留还没到下课时间的（已经过去的停课不用再提）。 */
+function cancelledOn(day, nowMinutes = -1) {
+  return ((day && day.cancelled) || []).filter((c) => toMinutes(c.end) > nowMinutes);
+}
+
 /** 学期阶段：before 开学前 / after 课程已结束 / during 学期中（含中间的假期）。 */
 function termState(payload, now) {
   const term = payload && payload.term;
@@ -182,8 +204,12 @@ function dayLabel(day, now) {
   return `下次上课 · 周${WEEKDAY[day.weekday]} ${shortDate(day.date)}`;
 }
 
+function previewOf(day, now) {
+  return { title: dayLabel(day, now), day, lessons: annotate(day.lessons, -1, false), cancelled: cancelledOn(day) };
+}
+
 /**
- * 要画的内容：标题、课程列表、空状态文案。
+ * 今天 / 明天模式要画的内容：标题、课程列表、停课、空状态文案。
  * 当天课上完 / 周末 / 假期里会顺带预告下次上课，避免看到一块空白。
  */
 function buildPlan(payload, mode, now) {
@@ -194,26 +220,29 @@ function buildPlan(payload, mode, now) {
       title: "明天",
       day,
       lessons: day ? annotate(day.lessons, -1, false) : [],
+      cancelled: cancelledOn(day),
       empty: emptyText(day, payload, now, "tomorrow"),
     };
     const next = day && !plan.lessons.length ? nextClassDay(payload, now, null) : null;
-    if (next) plan.preview = { title: dayLabel(next, now), day: next, lessons: annotate(next.lessons, -1, false) };
+    if (next) plan.preview = previewOf(next, now);
     return plan;
   }
-  if (!today) return { title: "今天", day: null, lessons: [], empty: "数据过旧，点开刷新" };
+  if (!today) return { title: "今天", day: null, lessons: [], cancelled: [], empty: "数据过旧，点开刷新" };
   const all = annotate(today.lessons, now.minutes);
   const remaining = all.filter((l) => l.state !== "past");
+  const cancelled = cancelledOn(today, now.minutes);
   if (remaining.length) {
-    return { title: "今天", day: today, lessons: remaining, total: all.length, empty: "" };
+    return { title: "今天", day: today, lessons: remaining, total: all.length, cancelled, empty: "" };
   }
   const plan = {
     title: "今天",
     day: today,
     lessons: [],
+    cancelled,
     empty: all.length ? "今天的课都上完了" : emptyText(today, payload, now, "today"),
   };
   const next = nextClassDay(payload, now, tomorrow);
-  if (next) plan.preview = { title: dayLabel(next, now), day: next, lessons: annotate(next.lessons, -1, false) };
+  if (next) plan.preview = previewOf(next, now);
   return plan;
 }
 
@@ -236,32 +265,59 @@ function weekColumns(block, now) {
     isToday: d.date === now.date,
     lessons: annotate(d.lessons, d.date === now.date ? now.minutes : d.date < now.date ? 24 * 60 : -1,
       d.date === now.date),
+    cancelled: d.date < now.date ? [] : cancelledOn(d, d.date === now.date ? now.minutes : -1),
   }));
 }
 
-/** 标题栏右侧只放一条最要紧的提示。 */
-function headerNote(payload, offline, day, family) {
+/** 画面上有没有调课 / 停课标记。 */
+function showsChanges(lessons, cancelled) {
+  return (cancelled && cancelled.length > 0) || (lessons || []).some((l) => l.changed && l.state !== "past");
+}
+
+function planHasChanges(plan) {
+  return showsChanges(plan.lessons, plan.cancelled) || Boolean(plan.preview && showsChanges(plan.preview.lessons, plan.preview.cancelled));
+}
+
+/** 课表在上次排提醒之后变过：已经排好的本机提醒可能是旧的。 */
+function needsReminderResync(payload, state, remindMinutes) {
+  if (!remindMinutes || !payload || !payload.changed_at) return false;
+  if (!state || !state.remindSyncedAt) return false; // 从没在 Scriptable 里排过提醒
+  return payload.changed_at > state.remindSyncedAt;
+}
+
+/**
+ * 标题栏右侧只放一条最要紧的提示：
+ * 登录失效 > 数据过旧 > 离线 > 更新中 > 提醒要重排 > 有调课 > 脚本可更新 > 周次。
+ */
+function headerNote(payload, offline, day, family, extra = {}) {
   if (payload && payload.status && payload.status !== "ok") return { text: "需重新登录", tone: "warn" };
-  const age = payload && payload.updated_at ? Date.now() / 1000 - payload.updated_at : 0;
+  const nowSec = (extra.nowMs || Date.now()) / 1000;
+  const age = payload && payload.updated_at ? nowSec - payload.updated_at : 0;
   if (age > STALE_SECONDS) return { text: `${Math.floor(age / 86400)} 天未更新`, tone: "warn" };
   if (offline) return { text: "离线", tone: "faint" };
   if (payload && payload.refresh && (payload.refresh.pending || payload.refresh.due)) {
     return { text: "更新中", tone: "accent" };
   }
+  if (extra.resync) return { text: "点按更新提醒", tone: "warn" };
+  const recent = payload && payload.changed_at && nowSec - payload.changed_at < CHANGE_NOTE_SECONDS;
+  if (extra.changed || recent) return { text: "有调课", tone: "warn" };
   if (payload && isNewer(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
   if (day && day.week && family !== "small") return { text: `第 ${day.week} 周`, tone: "faint" };
   return null;
 }
 
-/** 下次刷新：最近的上下课时刻、北京时间零点后一分钟、最多 30 分钟，三者取最早（至少 1 分钟后）。
- *  课表正在向学校拉取时改为大约 2 分钟后再看一眼，好把新课表画上去。 */
+/**
+ * 下次重画：最近的上下课时刻、服务器确认完下一节课之后（课前 25 分钟）、北京时间零点后一分钟、
+ * 最多 30 分钟，取最早（至少 1 分钟后）。课表正在向学校拉取时改为大约 2 分钟后再看一眼。
+ */
 function nextRefreshMs(payload, now) {
-  const candidates = [now.ms + 30 * 60000];
+  const candidates = [now.ms + MAX_REDRAW_MS];
   const minutesToMidnight = 24 * 60 - now.minutes;
   candidates.push(now.ms + (minutesToMidnight + 1) * 60000);
   const { today } = resolveDays(payload, now);
   for (const lesson of (today && today.lessons) || []) {
-    for (const t of [toMinutes(lesson.start), toMinutes(lesson.end)]) {
+    const start = toMinutes(lesson.start);
+    for (const t of [start - AFTER_CHECK_MINUTES, start, toMinutes(lesson.end)]) {
       if (t > now.minutes) candidates.push(now.ms + (t - now.minutes) * 60000);
     }
   }
@@ -269,6 +325,8 @@ function nextRefreshMs(payload, now) {
   if (refresh && (refresh.pending || refresh.due)) candidates.push(now.ms + PENDING_REFRESH_MS);
   return Math.max(now.ms + 60000, Math.min(...candidates));
 }
+
+// ---- 上课提醒（本机通知） ----
 
 /** 未来几天有课的日子（去重）。今天 / 明天会按缓存日期纠正，避免把昨天的“今天”排进提醒。 */
 function lessonDays(payload, now) {
@@ -293,44 +351,9 @@ function lessonDays(payload, now) {
   return out;
 }
 
-function classSoon(payload, now, withinMinutes = SOON_CLASS_MINUTES) {
-  const horizon = withinMinutes * 60000;
-  for (const day of lessonDays(payload, now)) {
-    for (const lesson of day.lessons) {
-      const until = lessonDate(day.date, lesson.start).getTime() - now.ms;
-      if (until > 0 && until <= horizon) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 要不要再请求一次 `?refresh=1`。
- * 普通打开时服务端已经会把“超过目标间隔”的人排队；这里补两种脚本自己能判断的情况：
- * 响应里明确写了 due，或下一节课快到了但课表已经超过 15 分钟没更新。
- * 正在排队、两分钟内刚同步过、或需要重新登录时不再请求。
- */
-function shouldPushRefresh(payload, now) {
-  if (!payload || (payload.status && payload.status !== "ok")) return false;
-  const refresh = payload.refresh || {};
-  if (refresh.pending || refresh.fresh) return false;
-  if (refresh.due) return true;
-  const age = payload.updated_at ? now.ms / 1000 - payload.updated_at : Infinity;
-  return age >= SOON_CLASS_MAX_AGE && classSoon(payload, now);
-}
-
-function refreshUrl(url) {
-  return `${url}${String(url).includes("?") ? "&" : "?"}refresh=1`;
-}
-
+/** 提醒 ID 带上教室和下课时间：调了课，旧提醒的 ID 对不上，会被删掉重排。 */
 function reminderId(date, lesson) {
-  let h = 2166136261;
-  const raw = `${lesson.end}|${lesson.name}|${lesson.room || ""}`;
-  for (const ch of raw) {
-    h ^= ch.codePointAt(0);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return `nufe-kb-${date}-${lesson.start}-${h.toString(16)}`;
+  return `nufe-kb-${date}-${lesson.start}-${fnv(`${lesson.end}|${lesson.name}|${lesson.room || ""}`)}`;
 }
 
 /** 本地通知计划：每节未来的课一条，提前 leadMinutes 分钟。已经开始、或不足 1 分钟的不再响。 */
@@ -342,19 +365,19 @@ function reminderPlan(payload, now, leadMinutes, base) {
   for (const day of lessonDays(payload, now)) {
     for (const lesson of day.lessons) {
       const startMs = lessonDate(day.date, lesson.start).getTime();
-      const until = startMs - now.ms;
-      if (until < REMIND_MIN_GAP_MS) continue;
+      if (startMs - now.ms < REMIND_MIN_GAP_MS) continue;
       const when = Math.max(now.ms + 5000, startMs - lead * 60000);
       if (when >= startMs) continue;
       const id = reminderId(day.date, lesson);
       if (seen.has(id)) continue;
       seen.add(id);
       const mins = Math.max(1, Math.round((startMs - when) / 60000));
+      const soon = mins <= 1 ? "即将上课" : `${mins} 分钟后上课`;
       items.push({
         id,
         title: lesson.name,
-        subtitle: mins <= 1 ? "即将上课" : `${mins} 分钟后上课`,
-        body: [`${lesson.start}–${lesson.end}`, lesson.room].filter(Boolean).join(" · "),
+        subtitle: lesson.changed ? `${soon} · 已调课` : soon,
+        body: [`${lesson.start}–${lesson.end}`, lesson.room, lesson.was ? `（${lesson.was}）` : ""].filter(Boolean).join(" · "),
         when,
         url: base ? siteLink(base, payload, day) : "",
       });
@@ -376,7 +399,23 @@ function reminderUnchanged(existing, item) {
   return Number.isFinite(ms) && Math.abs(ms - item.when) < 20000;
 }
 
-// ---------- Scriptable 渲染 ----------
+/** 已排的提醒和新计划对比：没变的留下，多出来的删掉，新的补上。 */
+function reminderDiff(pending, plan) {
+  const ours = (pending || []).filter((n) => String(n.identifier || "").startsWith("nufe-kb-"));
+  const keep = new Set();
+  const create = [];
+  for (const item of plan) {
+    const found = ours.find((n) => reminderUnchanged(n, item));
+    if (found) keep.add(found.identifier);
+    else create.push(item);
+  }
+  const remove = ours.map((n) => n.identifier).filter((id) => id && !keep.has(id));
+  return { create, remove };
+}
+
+// ======================================================================
+// Scriptable 渲染
+// ======================================================================
 
 function palette() {
   const dyn = (light, dark) => Color.dynamic(new Color(light), new Color(dark));
@@ -395,11 +434,15 @@ function siteUrl() {
   return WIDGET_URL.replace(/\/widget\/[^/]+$/, "/");
 }
 
+const FONTS = {
+  bold: (s) => Font.boldSystemFont(s),
+  semibold: (s) => Font.semiboldSystemFont(s),
+  medium: (s) => Font.mediumSystemFont(s),
+  regular: (s) => Font.systemFont(s),
+};
+
 function styleText(t, { size = 12, weight = "regular", color, lines = 1, scale = 0.8 } = {}) {
-  t.font = weight === "bold" ? Font.boldSystemFont(size)
-    : weight === "semibold" ? Font.semiboldSystemFont(size)
-      : weight === "medium" ? Font.mediumSystemFont(size)
-        : Font.systemFont(size);
+  t.font = (FONTS[weight] || FONTS.regular)(size);
   if (color) t.textColor = color;
   t.lineLimit = lines;
   t.minimumScaleFactor = scale;
@@ -410,12 +453,23 @@ function addText(stack, text, opts) {
   return styleText(stack.addText(String(text)), opts);
 }
 
+function hstack(parent, { center = true } = {}) {
+  const row = parent.addStack();
+  if (center) row.centerAlignContent();
+  return row;
+}
+
+function vstack(parent) {
+  const col = parent.addStack();
+  col.layoutVertically();
+  return col;
+}
+
 /** 正在上课：距下课的计时（系统每秒自己走，不用刷新）；下一节：相对时间（“1小时后”）。 */
 function addCountdown(stack, lesson, day, opts = {}) {
   if (!day || (lesson.state !== "live" && lesson.state !== "next")) return null;
   const live = lesson.state === "live";
-  const row = stack.addStack();
-  row.centerAlignContent();
+  const row = hstack(stack);
   if (opts.alignRight) row.addSpacer();
   if (live && opts.label !== false) addText(row, "还剩 ", { ...opts, size: opts.size || 11 });
   const d = row.addDate(lessonDate(day.date, live ? lesson.end : lesson.start));
@@ -426,8 +480,7 @@ function addCountdown(stack, lesson, day, opts = {}) {
 }
 
 function header(widget, C, title, subtitle, note, family) {
-  const row = widget.addStack();
-  row.centerAlignContent();
+  const row = hstack(widget);
   addText(row, title, { size: family === "small" ? 13 : 14, weight: "bold", color: C.text });
   if (subtitle) addText(row, `  ${subtitle}`, { size: 11, color: C.sub });
   row.addSpacer();
@@ -443,25 +496,33 @@ function weekSubtitle(block) {
   return days.length ? `${shortDate(days[0].date)}–${shortDate(days[days.length - 1].date)}` : "";
 }
 
+/** 教室；调过课的附上原来的安排：“B202（原 A101）”。 */
+function roomText(lesson) {
+  if (!lesson.was) return lesson.room || "";
+  return lesson.room ? `${lesson.room}（${lesson.was}）` : lesson.was;
+}
+
+function lessonMeta(lesson, showTeacher) {
+  return [`${lesson.start}–${lesson.end}`, roomText(lesson), showTeacher ? lesson.teachers : ""].filter(Boolean).join(" · ");
+}
+
 function lessonRow(widget, C, lesson, { compact = false, showTeacher = false, day, url } = {}) {
-  const row = widget.addStack();
-  row.centerAlignContent();
+  const row = hstack(widget);
   if (url) row.url = url;
   const bar = row.addStack();
   bar.size = new Size(3, compact ? 26 : 32);
   bar.cornerRadius = 1.5;
   bar.backgroundColor = new Color(lesson.color || "#4b63e0");
   row.addSpacer(7);
-  const body = row.addStack();
-  body.layoutVertically();
-  addText(body, lesson.name, { size: compact ? 12 : 13, weight: "semibold", color: C.text });
-  const meta = [`${lesson.start}–${lesson.end}`, lesson.room, showTeacher ? lesson.teachers : ""].filter(Boolean).join(" · ");
-  addText(body, meta, { size: compact ? 10 : 11, color: C.sub });
+  const body = vstack(row);
+  const title = hstack(body);
+  addText(title, lesson.name, { size: compact ? 12 : 13, weight: "semibold", color: C.text });
+  if (lesson.changed) addText(title, " 调", { size: compact ? 10 : 11, weight: "bold", color: C.warn });
+  addText(body, lessonMeta(lesson, showTeacher), { size: compact ? 10 : 11, color: lesson.changed ? C.warn : C.sub });
   row.addSpacer();
   if (lesson.state === "live" || lesson.state === "next") {
-    const side = row.addStack();
-    side.layoutVertically();
-    const tagRow = side.addStack();
+    const side = vstack(row);
+    const tagRow = hstack(side);
     tagRow.addSpacer();
     addText(tagRow, lesson.state === "live" ? "上课中" : "下一节", {
       size: 10, weight: "semibold", color: lesson.state === "live" ? C.live : C.accent,
@@ -470,9 +531,13 @@ function lessonRow(widget, C, lesson, { compact = false, showTeacher = false, da
   }
 }
 
+function cancelledText(list) {
+  return `停课：${list.map((c) => `${c.name} ${c.start}`).join("、")}`;
+}
+
 function centered(widget, C, text, size = 13) {
   widget.addSpacer();
-  const row = widget.addStack();
+  const row = hstack(widget);
   row.addSpacer();
   addText(row, text, { size, weight: "medium", color: C.sub, lines: 2 });
   row.addSpacer();
@@ -480,23 +545,29 @@ function centered(widget, C, text, size = 13) {
 }
 
 function renderList(widget, C, plan, family, payload) {
-  const max = family === "large" || family === "extraLarge" ? 7 : 3;
+  const large = family === "large" || family === "extraLarge";
+  const max = large ? 7 : 3;
   const compact = family === "medium";
   const base = siteUrl();
+  const cancelled = plan.cancelled || [];
   if (plan.lessons.length) {
+    // 中号放不下时停课挤掉最后一节课的位置：停课比“还有一节”更要紧
+    const shown = cancelled.length && !large && plan.lessons.length >= max ? max - 1 : max;
     widget.addSpacer(8);
-    plan.lessons.slice(0, max).forEach((lesson, i) => {
+    plan.lessons.slice(0, shown).forEach((lesson, i) => {
       if (i) widget.addSpacer(compact ? 5 : 8);
       lessonRow(widget, C, lesson, { compact, showTeacher: !compact, day: plan.day, url: siteLink(base, payload, plan.day) });
     });
-    const rest = plan.lessons.length - max;
     widget.addSpacer();
+    if (cancelled.length) addText(widget, cancelledText(cancelled), { size: 10, weight: "medium", color: C.warn });
+    const rest = plan.lessons.length - shown;
     if (rest > 0) addText(widget, `还有 ${rest} 节`, { size: 10, color: C.faint });
     return;
   }
   if (plan.preview) {
     widget.addSpacer(6);
     addText(widget, plan.empty, { size: 12, weight: "medium", color: C.sub });
+    if (cancelled.length) addText(widget, cancelledText(cancelled), { size: 10, weight: "medium", color: C.warn });
     widget.addSpacer(6);
     addText(widget, plan.preview.title, { size: 11, weight: "semibold", color: C.faint });
     widget.addSpacer(4);
@@ -508,38 +579,56 @@ function renderList(widget, C, plan, family, payload) {
     widget.addSpacer();
     return;
   }
+  if (cancelled.length) {
+    widget.addSpacer();
+    addText(widget, plan.empty, { size: 13, weight: "medium", color: C.sub });
+    addText(widget, cancelledText(cancelled), { size: 11, weight: "medium", color: C.warn, lines: 2 });
+    widget.addSpacer();
+    return;
+  }
   centered(widget, C, plan.empty);
 }
 
 function renderSmall(widget, C, plan) {
   const focus = plan.lessons.find((l) => l.state === "live" || l.state === "next") || plan.lessons[0];
+  const cancelled = plan.cancelled || [];
   if (!focus) {
     if (plan.preview) {
       widget.addSpacer(6);
       addText(widget, plan.empty, { size: 11, color: C.sub, lines: 2 });
+      if (cancelled.length) addText(widget, cancelledText(cancelled), { size: 10, color: C.warn });
       widget.addSpacer();
       const first = plan.preview.lessons[0];
       addText(widget, `${plan.preview.title.replace(" · ", " ")} ${first.start}`, { size: 11, weight: "semibold", color: C.faint, scale: 0.6 });
       addText(widget, first.name, { size: 14, weight: "bold", color: C.text, lines: 2 });
       return;
     }
+    if (cancelled.length) {
+      widget.addSpacer();
+      addText(widget, plan.empty, { size: 12, weight: "medium", color: C.sub });
+      addText(widget, cancelledText(cancelled), { size: 11, weight: "medium", color: C.warn, lines: 3 });
+      widget.addSpacer();
+      return;
+    }
     centered(widget, C, plan.empty, 12);
     return;
   }
   widget.addSpacer();
+  const tagRow = hstack(widget);
   const tag = focus.state === "live" ? "上课中" : focus.state === "next" ? "下一节" : "";
-  if (tag) addText(widget, tag, { size: 11, weight: "semibold", color: focus.state === "live" ? C.live : C.accent });
+  if (tag) addText(tagRow, tag, { size: 11, weight: "semibold", color: focus.state === "live" ? C.live : C.accent });
+  if (focus.changed) addText(tagRow, tag ? " · 调课" : "调课", { size: 11, weight: "semibold", color: C.warn });
   addText(widget, `${focus.start}–${focus.end}`, { size: 18, weight: "bold", color: C.text, scale: 0.6 });
   addText(widget, focus.name, { size: 14, weight: "semibold", color: new Color(focus.color || "#4b63e0"), lines: 2 });
-  if (focus.room) addText(widget, focus.room, { size: 11, color: C.sub });
+  if (roomText(focus)) addText(widget, roomText(focus), { size: 11, color: focus.changed ? C.warn : C.sub });
   addCountdown(widget, focus, plan.day, { size: 11, color: C.sub });
   const others = plan.lessons.length - 1;
   widget.addSpacer();
-  if (others > 0) addText(widget, `之后还有 ${others} 节`, { size: 10, color: C.faint });
+  if (cancelled.length) addText(widget, cancelledText(cancelled), { size: 10, color: C.warn });
+  else if (others > 0) addText(widget, `之后还有 ${others} 节`, { size: 10, color: C.faint });
 }
 
-function renderWeek(widget, C, block, now, family, payload) {
-  const columns = weekColumns(block, now);
+function renderWeek(widget, C, columns, family, payload) {
   const large = family === "large" || family === "extraLarge";
   const perDay = large ? 6 : 3;
   // 中 / 大号内容区宽约 293（iPhone SE）~ 336pt：按窄的估，宁可留白也别被截断
@@ -551,8 +640,7 @@ function renderWeek(widget, C, block, now, family, payload) {
   row.spacing = 4;
   row.topAlignContent();
   for (const col of columns) {
-    const stack = row.addStack();
-    stack.layoutVertically();
+    const stack = vstack(row);
     stack.size = new Size(colW, 0);
     stack.url = siteLink(base, payload, col);
     const head = stack.addStack();
@@ -562,7 +650,7 @@ function renderWeek(widget, C, block, now, family, payload) {
     });
     head.addSpacer();
     stack.addSpacer(4);
-    if (!col.lessons.length) {
+    if (!col.lessons.length && !col.cancelled.length) {
       const free = stack.addStack();
       free.addSpacer();
       addText(free, "—", { size: 11, color: C.faint });
@@ -570,18 +658,19 @@ function renderWeek(widget, C, block, now, family, payload) {
     }
     col.lessons.slice(0, perDay).forEach((lesson, i) => {
       if (i) stack.addSpacer(3);
-      const chip = stack.addStack();
-      chip.layoutVertically();
+      const tint = new Color(lesson.color || "#4b63e0");
+      const chip = vstack(stack);
       chip.setPadding(3, 4, 3, 2);
       chip.cornerRadius = 5;
       chip.size = new Size(colW, 0);
-      const base = new Color(lesson.color || "#4b63e0");
       chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.18);
-      if (lesson.state === "live") {
-        chip.borderColor = base;
+      if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
+        chip.borderColor = lesson.state === "live" ? tint : C.warn;
         chip.borderWidth = 1.5;
       }
-      addText(chip, lesson.start, { size: 9, weight: "semibold", color: base });
+      addText(chip, lesson.changed ? `${lesson.start} 调` : lesson.start, {
+        size: 9, weight: "semibold", color: lesson.changed ? C.warn : tint,
+      });
       addText(chip, lesson.name, { size: large ? 10 : 9.5, weight: "medium", color: C.text, lines: large ? 2 : 1 });
       if (large && lesson.room) addText(chip, lesson.room, { size: 8.5, color: C.sub });
     });
@@ -589,20 +678,26 @@ function renderWeek(widget, C, block, now, family, payload) {
       stack.addSpacer(2);
       addText(stack, `+${col.lessons.length - perDay}`, { size: 9, color: C.faint });
     }
+    for (const c of col.cancelled.slice(0, large ? 2 : 1)) {
+      stack.addSpacer(3);
+      addText(stack, `停 ${c.name}`, { size: 8.5, weight: "medium", color: C.warn });
+    }
   }
   widget.addSpacer();
 }
 
 function renderAccessory(widget, plan, family) {
   const focus = plan.lessons.find((l) => l.state === "live" || l.state === "next");
+  const mark = focus && focus.changed ? "（调）" : "";
   if (family === "accessoryInline") {
-    widget.addText(focus ? `${focus.start} ${focus.name}${focus.room ? ` @${focus.room}` : ""}` : plan.empty || "今天没有课");
+    widget.addText(focus ? `${focus.start} ${focus.name}${mark}${focus.room ? ` @${focus.room}` : ""}` : plan.empty || "今天没有课");
     return;
   }
   if (family === "accessoryCircular") {
     // 上课中 → 下课时间；有下一节 → 上课时间；今天没了 → 下次上课那天的第一节
     const first = !focus && plan.preview ? plan.preview.lessons[0] : null;
-    const label = focus ? (focus.state === "live" ? "下课" : "上课") : first ? `周${WEEKDAY[plan.preview.day.weekday]}` : "";
+    const label = focus ? (focus.changed ? "调课" : focus.state === "live" ? "下课" : "上课")
+      : first ? `周${WEEKDAY[plan.preview.day.weekday]}` : "";
     const value = focus ? (focus.state === "live" ? focus.end : focus.start) : first ? first.start : "—";
     if (label) addText(widget, label, { size: 10 }).centerAlignText();
     addText(widget, value, { size: 14, weight: "bold" }).centerAlignText();
@@ -610,14 +705,15 @@ function renderAccessory(widget, plan, family) {
   }
   if (!focus) {
     addText(widget, plan.empty || "今天没有课", { size: 13, weight: "semibold" });
-    if (plan.preview) {
+    if (plan.cancelled && plan.cancelled.length) addText(widget, cancelledText(plan.cancelled), { size: 11 });
+    else if (plan.preview) {
       addText(widget, plan.preview.title, { size: 11 });
       addText(widget, `${plan.preview.lessons[0].start} ${plan.preview.lessons[0].name}`, { size: 12 });
     }
     return;
   }
-  addText(widget, `${focus.state === "live" ? "上课中" : focus.start} ${focus.name}`, { size: 13, weight: "semibold" });
-  addText(widget, [focus.room, `${focus.start}–${focus.end}`].filter(Boolean).join(" · "), { size: 12 });
+  addText(widget, `${focus.state === "live" ? "上课中" : focus.start} ${focus.name}${mark}`, { size: 13, weight: "semibold" });
+  addText(widget, [focus.room, focus.was, `${focus.start}–${focus.end}`].filter(Boolean).join(" · "), { size: 12 });
   addCountdown(widget, focus, plan.day, { size: 12 });
 }
 
@@ -629,12 +725,19 @@ function errorWidget(message) {
   widget.addSpacer();
   addText(widget, message, { size: 12, color: C.sub, lines: 4 });
   widget.addSpacer();
-  widget.refreshAfterDate = new Date(Date.now() + 30 * 60000);
+  widget.refreshAfterDate = new Date(Date.now() + MAX_REDRAW_MS);
   if (/^https?:\/\//.test(WIDGET_URL)) widget.url = siteUrl();
   return widget;
 }
 
-function buildWidget(payload, { family, mode, offline, nowMs = Date.now() }) {
+/** 在 Scriptable 里运行本脚本的链接（点按小组件 → 重排提醒）。 */
+function runScriptUrl() {
+  const name = typeof Script !== "undefined" && typeof Script.name === "function" ? Script.name() : "";
+  return name ? `scriptable:///run/${encodeURIComponent(name)}` : "";
+}
+
+/** opts.resync：课表变了而本机提醒还是旧的——提示，并让点按直接回到 Scriptable 重排。 */
+function buildWidget(payload, { family, mode, offline, resync = false, nowMs = Date.now() }) {
   const C = palette();
   const now = shanghaiNow(nowMs);
   const widget = new ListWidget();
@@ -645,97 +748,96 @@ function buildWidget(payload, { family, mode, offline, nowMs = Date.now() }) {
   }
   widget.refreshAfterDate = new Date(nextRefreshMs(payload, now));
   const base = siteUrl();
+  const rerun = resync ? runScriptUrl() : "";
 
   if (mode === "week") {
     const { title, block } = weekToShow(payload, now);
-    widget.url = siteLink(base, payload, block.days && block.days[0], "week");
-    header(widget, C, title, weekSubtitle(block), headerNote(payload, offline, block.days && block.days[0], family), family);
-    renderWeek(widget, C, block, now, family, payload);
+    const columns = weekColumns(block, now);
+    const changed = columns.some((col) => showsChanges(col.lessons, col.cancelled));
+    widget.url = rerun || siteLink(base, payload, block.days && block.days[0], "week");
+    header(widget, C, title, weekSubtitle(block),
+      headerNote(payload, offline, block.days && block.days[0], family, { changed, resync: Boolean(rerun), nowMs }), family);
+    renderWeek(widget, C, columns, family, payload);
     return widget;
   }
 
   const plan = buildPlan(payload, mode, now);
-  widget.url = siteLink(base, payload, plan.lessons.length ? plan.day : (plan.preview && plan.preview.day) || plan.day);
+  widget.url = rerun || siteLink(base, payload, plan.lessons.length ? plan.day : (plan.preview && plan.preview.day) || plan.day);
   if (accessory) {
     renderAccessory(widget, plan, family);
     return widget;
   }
-  header(widget, C, plan.title, daySubtitle(plan.day), headerNote(payload, offline, plan.day, family), family);
+  header(widget, C, plan.title, daySubtitle(plan.day),
+    headerNote(payload, offline, plan.day, family, { changed: planHasChanges(plan), resync: Boolean(rerun), nowMs }), family);
   if (family === "small") renderSmall(widget, C, plan);
   else renderList(widget, C, plan, family, payload);
   return widget;
 }
 
-// ---------- 读取数据 ----------
+// ======================================================================
+// 读写数据：课表 JSON、离线缓存、本机状态
+// ======================================================================
 
-function cachePath() {
+function localFile(name) {
   const fm = FileManager.local();
-  return { fm, path: fm.joinPath(fm.cacheDirectory(), cacheName(WIDGET_URL)) };
+  return { fm, path: fm.joinPath(fm.cacheDirectory(), name) };
 }
 
-function feedRequest(url) {
+function readJsonFile(name) {
+  const { fm, path } = localFile(name);
+  if (!fm.fileExists(path)) return null;
+  try {
+    return JSON.parse(fm.readString(path));
+  } catch (_) {
+    return null; // 坏了就当没有
+  }
+}
+
+function writeJsonFile(name, data) {
+  const { fm, path } = localFile(name);
+  fm.writeString(path, JSON.stringify(data));
+}
+
+const CACHE_FILE = () => cacheName(WIDGET_URL);
+const STATE_FILE = () => cacheName(WIDGET_URL).replace(/\.json$/, ".state.json");
+
+/** 只请求一次：快上课时的确认由服务器按“出门前检查点”安排，脚本不必再追加请求。 */
+async function readFeed(url) {
   const req = new Request(url);
   req.timeoutInterval = 12;
   req.headers = { "Cache-Control": "no-cache" };
-  return req;
-}
-
-async function readFeed(url) {
-  const req = feedRequest(url);
-  const data = await req.loadJSON();
+  const text = await req.loadString();
   const status = req.response && req.response.statusCode;
   if (status === 404) return { error: "小组件链接已失效：请到网站设置里重新生成，并重新复制脚本" };
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    // 反向代理的错误页之类：按连不上处理，退回缓存
+  }
   if (!data || data.v !== 1) throw new Error(`unexpected response ${status}`);
   return { data };
 }
 
-function saveCache(data) {
-  const { fm, path } = cachePath();
-  fm.writeString(path, JSON.stringify(data));
-}
-
 async function load() {
-  const { fm, path } = cachePath();
   try {
-    let got = await readFeed(WIDGET_URL);
+    const got = await readFeed(WIDGET_URL);
     if (got.error) return got;
-    // 快上课或服务端说该刷了：再要一次。只写库、不访问学校，失败就用第一次的结果。
-    if (shouldPushRefresh(got.data, shanghaiNow())) {
-      try {
-        const again = await readFeed(refreshUrl(WIDGET_URL));
-        if (again.data) got = again;
-      } catch (_) {
-        // 主动刷新没发出去
-      }
-    }
-    saveCache(got.data);
+    writeJsonFile(CACHE_FILE(), got.data);
     return { data: got.data, offline: false };
-  } catch (e) {
-    if (fm.fileExists(path)) {
-      try {
-        return { data: JSON.parse(fm.readString(path)), offline: true };
-      } catch (_) {
-        // 缓存坏了就当没有
-      }
-    }
+  } catch (_) {
+    const cached = readJsonFile(CACHE_FILE());
+    if (cached) return { data: cached, offline: true };
     return { error: "暂时连不上南财课表，稍后会自动重试" };
   }
 }
 
-/** 按最新课表改本地通知：没变的留下，多出来的删掉，新的补上。lead 为 0 时清空本脚本的提醒。 */
+/** 按最新课表改本地通知。lead 为 0 时清空本脚本的提醒。记下排好的时刻，小组件据此判断提醒是否过期。 */
 async function syncReminders(payload, now, leadMinutes, base) {
   if (typeof Notification === "undefined") return { scheduled: 0, created: 0, removed: 0 };
   const plan = reminderPlan(payload, now, leadMinutes, base);
   const pending = typeof Notification.allPending === "function" ? await Notification.allPending() : [];
-  const ours = (pending || []).filter((n) => String(n.identifier || "").startsWith("nufe-kb-"));
-  const keep = new Set();
-  const create = [];
-  for (const item of plan) {
-    const found = ours.find((n) => reminderUnchanged(n, item));
-    if (found) keep.add(found.identifier);
-    else create.push(item);
-  }
-  const remove = ours.map((n) => n.identifier).filter((id) => id && !keep.has(id));
+  const { create, remove } = reminderDiff(pending, plan);
   if (remove.length && typeof Notification.removePending === "function") await Notification.removePending(remove);
   for (const item of create) {
     const n = new Notification();
@@ -749,6 +851,7 @@ async function syncReminders(payload, now, leadMinutes, base) {
     n.setTriggerDate(new Date(item.when));
     await n.schedule();
   }
+  writeJsonFile(STATE_FILE(), { remindSyncedAt: leadMinutes > 0 ? now.ms / 1000 : null, lead: leadMinutes });
   return { scheduled: plan.length, created: create.length, removed: remove.length };
 }
 
@@ -764,7 +867,9 @@ function inWidget() {
   return Boolean(config.runsInWidget || config.widgetFamily);
 }
 
-// ---------- 在 Scriptable 里直接运行：预览 / 更新 / 打开网站 ----------
+// ======================================================================
+// 在 Scriptable 里直接运行：预览 / 刷新 / 更新 / 打开网站
+// ======================================================================
 
 async function updateScript() {
   const req = new Request(WIDGET_URL.replace(/\.json$/, ".js"));
@@ -787,46 +892,46 @@ async function updateScript() {
   return version;
 }
 
+async function say(title, message) {
+  const a = new Alert();
+  a.title = title;
+  a.message = message;
+  a.addAction("好");
+  await a.present();
+}
+
+async function refreshNow() {
+  const got = await readFeed(refreshUrl(WIDGET_URL));
+  if (got.error) throw new Error(got.error);
+  writeJsonFile(CACHE_FILE(), got.data);
+  const refresh = got.data.refresh || {};
+  if (got.data.status && got.data.status !== "ok") {
+    await say("需要重新登录", "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。");
+  } else if (refresh.pending) {
+    await say("已安排刷新", "正在向学校拉取课表，小组件大约两分钟后会换成新的。");
+  } else if (refresh.fresh) {
+    await say("刚刚更新过", "两分钟内刚同步过，先用现在的课表。");
+  } else {
+    await say("没能刷新", "服务器没有安排刷新，稍后再试。");
+  }
+}
+
 async function inAppMenu(result, mode, remindNote) {
   const alert = new Alert();
   alert.title = "南财课表小组件";
   const latest = result.data && result.data.script_version;
   const versionNote = `脚本版本 ${SCRIPT_VERSION}${isNewer(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
   alert.message = remindNote ? `${versionNote}\n${remindNote}` : versionNote;
+  const preview = (family, m) => buildWidget(result.data, { family, mode: m, offline: result.offline });
   const actions = [
-    ["预览今天（中号）", () => buildWidget(result.data, { family: "medium", mode: "today", offline: result.offline }).presentMedium()],
-    ["预览明天（中号）", () => buildWidget(result.data, { family: "medium", mode: "tomorrow", offline: result.offline }).presentMedium()],
-    ["预览本周（大号）", () => buildWidget(result.data, { family: "large", mode: "week", offline: result.offline }).presentLarge()],
-    ["预览小号", () => buildWidget(result.data, { family: "small", mode, offline: result.offline }).presentSmall()],
-    ["刷新课表", async () => {
-      const got = await readFeed(refreshUrl(WIDGET_URL));
-      if (got.error) throw new Error(got.error);
-      saveCache(got.data);
-      const refresh = got.data.refresh || {};
-      const done = new Alert();
-      if (got.data.status && got.data.status !== "ok") {
-        done.title = "需要重新登录";
-        done.message = "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。";
-      } else if (refresh.pending) {
-        done.title = "已安排刷新";
-        done.message = "正在向学校拉取课表，小组件大约两分钟后会换成新的。";
-      } else if (refresh.fresh) {
-        done.title = "刚刚更新过";
-        done.message = "两分钟内刚同步过，先用现在的课表。";
-      } else {
-        done.title = "没能刷新";
-        done.message = "服务器没有安排刷新，稍后再试。";
-      }
-      done.addAction("好");
-      await done.present();
-    }],
+    ["预览今天（中号）", () => preview("medium", "today").presentMedium()],
+    ["预览明天（中号）", () => preview("medium", "tomorrow").presentMedium()],
+    ["预览本周（大号）", () => preview("large", "week").presentLarge()],
+    ["预览小号", () => preview("small", mode).presentSmall()],
+    ["刷新课表", refreshNow],
     ["更新脚本", async () => {
       const version = await updateScript();
-      const done = new Alert();
-      done.title = "已更新";
-      done.message = `脚本已更新到 ${version}，小组件下次刷新时生效。`;
-      done.addAction("好");
-      await done.present();
+      await say("已更新", `脚本已更新到 ${version}，小组件下次刷新时生效。`);
     }],
     ["打开网站", () => Safari.open(siteUrl())],
   ];
@@ -840,7 +945,6 @@ async function inAppMenu(result, mode, remindNote) {
 async function main() {
   const family = config.widgetFamily || "medium";
   const param = parseParam(args.widgetParameter, family);
-  const { mode } = param;
   if (!/^https?:\/\//.test(WIDGET_URL)) {
     const widget = errorWidget("请从网站「设置 → 桌面小组件」复制脚本，里面会带上你的专属链接");
     if (inWidget()) Script.setWidget(widget);
@@ -851,8 +955,9 @@ async function main() {
   // 先把小组件交出去再结束。桌面进程里调用 Notification 经常不返回，
   // 系统会杀掉脚本，桌面就留下 “Call Script.setWidget()”。
   if (inWidget()) {
+    const resync = needsReminderResync(result.data, readJsonFile(STATE_FILE()), param.remindMinutes);
     Script.setWidget(result.error ? errorWidget(result.error)
-      : buildWidget(result.data, { family, mode, offline: result.offline }));
+      : buildWidget(result.data, { family, mode: param.mode, offline: result.offline, resync }));
     return;
   }
   let remindNote = "";
@@ -865,13 +970,9 @@ async function main() {
     }
   }
   try {
-    await inAppMenu(result, mode, remindNote);
+    await inAppMenu(result, param.mode, remindNote);
   } catch (e) {
-    const fail = new Alert();
-    fail.title = "出错了";
-    fail.message = String(e && e.message ? e.message : e);
-    fail.addAction("好");
-    await fail.present();
+    await say("出错了", String(e && e.message ? e.message : e));
   }
 }
 
@@ -879,8 +980,8 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isNewer, cacheName, siteLink,
-    resolveDays, annotate, termState, buildPlan, weekToShow, weekColumns, headerNote, nextRefreshMs,
-    lessonDays, classSoon, shouldPushRefresh, refreshUrl, reminderPlan,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, showsChanges, planHasChanges,
+    needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {
   main().catch((e) => {

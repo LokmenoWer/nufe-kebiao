@@ -12,6 +12,7 @@ from .ics import _hm, unit_times
 
 PAYLOAD_VERSION = 1
 _TZ = ZoneInfo(TIMEZONE)
+CHANGE_SHOW = 7 * 86400   # 调课标记在小组件上保留多久
 
 # 与 static/js/courses.js 完全一致：同一门课在网页和小组件上颜色相同
 PALETTE = [
@@ -69,6 +70,22 @@ def _lesson(a: dict, units: dict, colors: dict) -> dict | None:
     }
 
 
+_WEEKDAY = "一二三四五六日"
+
+
+def lesson_line(a: dict) -> str:
+    """一条排课的人类可读描述，也作为比较课表变动的键（邮件、同班联动、小组件标记都用它）。"""
+    day = a.get("weekday")
+    day_txt = f"周{_WEEKDAY[day - 1]}" if isinstance(day, int) and 1 <= day <= 7 else "周?"
+    start, end = a.get("startUnit"), a.get("endUnit")
+    units = f"第{start}–{end}节" if start and end and end != start else (f"第{start}节" if start else "")
+    clock = f"{a.get('startTime') or ''}–{a.get('endTime') or ''}".strip("–")
+    when = " ".join(x for x in (day_txt, units, clock) if x)
+    weeks = a.get("weeksStr") or ",".join(str(w) for w in (a.get("weekIndexes") or []))
+    room = a.get("room") or a.get("building") or "地点待定"
+    return f"{a.get('courseName') or '未命名课程'} · {when} · {room} · 第{weeks}周"
+
+
 def week_of(day: dt.date, week1: dt.date) -> int:
     return (day - week1).days // 7 + 1
 
@@ -88,23 +105,71 @@ def lessons_on(day: dt.date, activities: list, week1: dt.date, units: dict, colo
     return sorted(out, key=lambda x: (x["start"], x["end"], x["name"]))
 
 
-def _day(day: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict) -> dict:
+def _occurrence(lesson: dict) -> tuple:
+    return lesson["name"], lesson["start"], lesson["end"], lesson["room"]
+
+
+def _mark_changes(out: dict, day: dt.date, week1: dt.date, units: dict, colors: dict, changes: list) -> None:
+    """按“这一天”对比改动前后：新出现的课标 changed（附“原 …”），整门课当天没了的列进 cancelled。
+
+    比的是具体某天的上课安排而不是排课条目：教务常把“1~16 周”拆成“1~8,10~16 周”再补一条第 9 周，
+    这时其他周什么都没变，不该被标出来。
+    """
+    before, after = [], []
+    for ev in reversed(changes):  # 新的在前：同一节课改过几次，“原 …”和停课只认最近一次之前的样子
+        before += lessons_on(day, ev.get("removed") or [], week1, units, colors)
+        after += lessons_on(day, ev.get("added") or [], week1, units, colors)
+    if not before and not after:
+        return
+    old = {_occurrence(x) for x in before}
+    new = {_occurrence(x) for x in after}
+    current = {_occurrence(x) for x in out["lessons"]}
+    unpaired = [x for x in before if _occurrence(x) not in current]
+    for lesson in out["lessons"]:
+        key = _occurrence(lesson)
+        if key in old or key not in new:
+            continue
+        lesson["changed"] = True
+        # 同一天同一门课的旧安排：说明是改了教室还是改了时间
+        was = next((x for x in unpaired if x["name"] == lesson["name"]), None)
+        if not was:
+            continue
+        unpaired.remove(was)
+        if was["start"] != lesson["start"]:
+            lesson["was"] = f"原 {was['start']}"
+        elif was["room"] != lesson["room"]:
+            lesson["was"] = f"原 {was['room'] or '地点待定'}"
+    cancelled, seen = [], set()
+    for x in unpaired:
+        if (x["name"], x["start"]) in seen:
+            continue
+        seen.add((x["name"], x["start"]))
+        cancelled.append({k: x[k] for k in ("name", "start", "end", "room", "color")})
+    if cancelled:
+        out["cancelled"] = sorted(cancelled, key=lambda x: (x["start"], x["name"]))
+
+
+def _day(day: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict,
+         changes: list | None = None) -> dict:
     out = {"date": day.isoformat(), "weekday": day.isoweekday(), "week": None, "lessons": []}
     if week1:
         week = week_of(day, week1)
         if week >= 1:
             out["week"] = week
             out["lessons"] = lessons_on(day, activities, week1, units, colors)
+            if changes:
+                _mark_changes(out, day, week1, units, colors, changes)
     return out
 
 
 UPCOMING_DAYS = 14
 
 
-def upcoming(today: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict) -> dict | None:
+def upcoming(today: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict,
+             changes: list | None = None) -> dict | None:
     """今天之后第一个有课的日子（两周内）：周末 / 放假前小组件可以提示“下次上课”。"""
     for i in range(1, UPCOMING_DAYS + 1):
-        d = _day(today + dt.timedelta(days=i), activities, week1, units, colors)
+        d = _day(today + dt.timedelta(days=i), activities, week1, units, colors, changes)
         if d["lessons"]:
             return d
     return None
@@ -126,8 +191,9 @@ def term_bounds(activities: list, week1: dt.date | None) -> dict | None:
     return {"first_day": min(dates).isoformat(), "last_day": max(dates).isoformat()}
 
 
-def _week_block(monday: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict) -> dict:
-    days = [_day(monday + dt.timedelta(days=i), activities, week1, units, colors) for i in range(7)]
+def _week_block(monday: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict,
+                changes: list | None = None) -> dict:
+    days = [_day(monday + dt.timedelta(days=i), activities, week1, units, colors, changes) for i in range(7)]
     return {"week": days[0]["week"], "monday": monday.isoformat(), "days": days}
 
 
@@ -144,11 +210,19 @@ def next_change(now: dt.datetime, days: list[dict]) -> str | None:
     return future[0].isoformat() if future else None
 
 
+def recent_changes(events: list | None, semester_id, now: dt.datetime) -> list:
+    """本学期、CHANGE_SHOW 内的调课记录（service 在发现变动时写入）。"""
+    cutoff = now.timestamp() - CHANGE_SHOW
+    return [ev for ev in events or [] if isinstance(ev, dict) and ev.get("semester_id") == semester_id
+            and isinstance(ev.get("at"), int | float) and ev["at"] >= cutoff]
+
+
 def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: dt.datetime | None = None,
-          script_version: str | None = None) -> dict:
+          script_version: str | None = None, changes: list | None = None) -> dict:
     """view: service.timetable_view() 的结果（当前学期）；week1_iso: 第 1 周周一。
 
     script_version：服务器上最新的小组件脚本版本，旧脚本据此提示“可更新”。
+    changes：最近发现的调课 [{"at", "semester_id", "removed": [排课], "added": [排课]}]。
     """
     now = (now or dt.datetime.now(_TZ)).astimezone(_TZ)
     today = now.date()
@@ -159,10 +233,11 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
     activities = (view or {}).get("activities") or []
     units = unit_times([a for a in activities if isinstance(a, dict)])
     colors = color_map(activities)
+    recent = recent_changes(changes, (view or {}).get("semester_id"), now)
     monday = today - dt.timedelta(days=today.weekday())
-    today_d = _day(today, activities, week1, units, colors)
-    tomorrow_d = _day(today + dt.timedelta(days=1), activities, week1, units, colors)
-    this_week = _week_block(monday, activities, week1, units, colors)
+    today_d = _day(today, activities, week1, units, colors, recent)
+    tomorrow_d = _day(today + dt.timedelta(days=1), activities, week1, units, colors, recent)
+    this_week = _week_block(monday, activities, week1, units, colors, recent)
     return {
         "v": PAYLOAD_VERSION,
         "now": now.isoformat(timespec="seconds"),
@@ -176,8 +251,10 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
         "tomorrow": tomorrow_d,
         "week": this_week,
         # 周末本周已经没课时，week 模式改看下周
-        "next_week": _week_block(monday + dt.timedelta(days=7), activities, week1, units, colors),
+        "next_week": _week_block(monday + dt.timedelta(days=7), activities, week1, units, colors, recent),
         "term": term_bounds(activities, week1),
-        "upcoming": upcoming(today, activities, week1, units, colors),
+        "upcoming": upcoming(today, activities, week1, units, colors, recent),
         "next_change": next_change(now, [today_d, tomorrow_d]),
+        # 最近一次发现调课的时刻：脚本据此在标题栏提示，并提醒到 Scriptable 里重排上课通知
+        "changed_at": max((ev["at"] for ev in recent), default=None),
     }

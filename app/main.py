@@ -652,7 +652,8 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     view = service.timetable_view(user["id"], None)
     week1 = view.get("week1_monday") if view else None
     _template, version = _widget_template()
-    payload = widget.build(view, week1, status=user["status"], script_version=version)
+    payload = widget.build(view, week1, status=user["status"], script_version=version,
+                           changes=service.recent_changes(user["id"]))
     try:
         payload["refresh"] = service.widget_refresh_state(user["id"])
     except Exception as e:

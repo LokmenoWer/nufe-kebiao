@@ -610,7 +610,7 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         if trigger == "scheduled":
             _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
         try:
-            n = alert_classmates(uid, changes["semester_id"], changes["slots"], changes["removed"])
+            n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
             if n:
                 log.info("user %s: timetable changed, asked %s classmates to refresh", uid, n)
         except Exception as e:
@@ -628,49 +628,84 @@ def _notify_safely(fn, *args) -> None:
 
 # ---------- 动态刷新：信号、下一节课、按需请求 ----------
 
-_SIGNAL_COLS = "last_seen_at, last_success_at, last_change_at, next_class_at, refresh_requested_at"
+_SIGNAL_COLS = ("last_seen_at, last_success_at, last_change_at, next_class_at, refresh_requested_at, "
+                "(enc_email IS NOT NULL AND notify_changes=1) AS subscribed")
 NEXT_CLASS_LOOKAHEAD_DAYS = 60
 NEXT_CLASS_RECHECK = 6 * 3600   # 两个月内都没课时，隔这么久再按已存课表重算一次（校历可能改了）
 TOUCH_EVERY = 600               # 秒：last_seen_at 最多每 10 分钟写一次库
+CHANGE_KEEP = 5                 # 最多留几次调课记录给小组件标记
 
 
-def signals_of(row) -> refresh_policy.Signals:
+def signals_of(row, peer_checked_at: float | None = None) -> refresh_policy.Signals:
     return refresh_policy.Signals(
         last_seen_at=row["last_seen_at"], last_success_at=row["last_success_at"],
         last_change_at=row["last_change_at"], next_class_at=row["next_class_at"],
-        refresh_requested_at=row["refresh_requested_at"])
+        refresh_requested_at=row["refresh_requested_at"], subscribed=bool(row["subscribed"]),
+        peer_checked_at=peer_checked_at)
 
 
-def compute_next_class(uid: int, now: float | None = None, conn=None) -> float | None:
-    """按已存的当前学期课表算下一节课的开始时刻（不访问学校）。"""
+def compute_next_class(uid: int, now: float | None = None, conn=None) -> tuple[float | None, list[str]]:
+    """按已存的当前学期课表算下一节课：(开始时刻, 这一时刻开始的各节课的 slot_key)。不访问学校。"""
     conn = conn or db.connect()
     now = db.now() if now is None else now
     user = conn.execute("SELECT current_semester_id FROM users WHERE id=?", (uid,)).fetchone()
     view = timetable_view(uid, user["current_semester_id"] if user else None)
     if not view or not view.get("week1_monday"):
-        return None
+        return None, []
     try:
         week1 = dt.date.fromisoformat(view["week1_monday"])
     except ValueError:
-        return None
+        return None, []
     tz = ZoneInfo(TIMEZONE)
     today = dt.datetime.fromtimestamp(now, tz).date()
     acts = [a for a in (view.get("activities") or []) if isinstance(a, dict)]
     units = ics.unit_times(acts)
     for i in range(NEXT_CLASS_LOOKAHEAD_DAYS):
         day = today + dt.timedelta(days=i)
-        for lesson in widget.lessons_on(day, acts, week1, units, {}):
+        week = widget.week_of(day, week1)
+        starts = []
+        for a in acts:
+            if a.get("weekday") != day.isoweekday() or week not in (a.get("weekIndexes") or []):
+                continue
+            lesson = widget._lesson(a, units, {})
+            if not lesson:
+                continue
             h, m = map(int, lesson["start"].split(":"))
             at = dt.datetime.combine(day, dt.time(h, m), tz).timestamp()
             if at > now:
-                return at
-    return None
+                starts.append((at, slot_key(view["semester_id"], a)))
+        if starts:
+            first = min(at for at, _k in starts)
+            return first, sorted({k for at, k in starts if at == first})
+    return None, []
 
 
 def _store_next_class(c, uid: int, now: float) -> float | None:
-    at = compute_next_class(uid, now, c)
-    c.execute("UPDATE users SET next_class_at=?, next_class_checked_at=? WHERE id=?", (at, now, uid))
+    at, slots = compute_next_class(uid, now, c)
+    c.execute("UPDATE users SET next_class_at=?, next_class_checked_at=?, next_class_slots=? WHERE id=?",
+              (at, now, json.dumps(slots), uid))
     return at
+
+
+def _peer_checked_at(conn, uid: int, semester_id, slots_json: str | None) -> float | None:
+    """下一节课的每个 slot 都有同学（状态正常）刷到过：取其中最旧的那次；有一节没人上就是 None。
+
+    同学刷新时若发现这节课变了，会直接把还停在旧安排的人排到队首（alert_classmates），
+    所以“同学刚刷过、我没被叫醒”就等于这节课替我检查过了。
+    """
+    slots = [k for k in _json_list(slots_json) if isinstance(k, str)]
+    if not slots or semester_id is None:
+        return None
+    marks = ",".join("?" * len(slots))
+    rows = conn.execute(
+        f"""SELECT s.slot_key, MAX(t.fetched_at) AS at FROM lesson_slots s
+            JOIN users u ON u.id = s.user_id
+            JOIN timetables t ON t.user_id = s.user_id AND t.semester_id = s.semester_id
+            WHERE s.semester_id=? AND s.slot_key IN ({marks}) AND s.user_id<>? AND u.status='ok'
+            GROUP BY s.slot_key""", (semester_id, *slots, uid)).fetchall()
+    if len(rows) < len(slots):
+        return None
+    return min(r["at"] for r in rows)
 
 
 def refresh_outlook(uid: int, now: float | None = None) -> dict:
@@ -682,6 +717,7 @@ def refresh_outlook(uid: int, now: float | None = None) -> dict:
         return {}
     sig = signals_of(row)
     tgt = refresh_policy.target(sig, now)
+    why = refresh_policy.reason(sig, now)
     if row["status"] in ("needs_rebind", "captcha"):
         nxt = None
     elif row["status"] == "error":
@@ -689,7 +725,7 @@ def refresh_outlook(uid: int, now: float | None = None) -> dict:
     else:
         nxt = refresh_policy.next_due(sig, now)
     pending = bool(sig.refresh_requested_at and sig.refresh_requested_at > (sig.last_success_at or 0))
-    return {"target_minutes": round(tgt.seconds / 60), "reason": tgt.reason, "next_refresh_at": nxt,
+    return {"target_minutes": round(tgt.seconds / 60), "reason": why, "next_refresh_at": nxt,
             "pending": pending and row["status"] == "ok"}
 
 
@@ -777,8 +813,9 @@ def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, i
     """该刷的人，按逾期程度从高到低：[(score, uid)]。顺带惰性重算过期的“下一节课”。"""
     now = db.now() if now is None else now
     conn = db.connect()
+    cols = f"id, status, next_refresh_at, next_class_checked_at, next_class_slots, current_semester_id, {_SIGNAL_COLS}"
     rows = conn.execute(
-        f"""SELECT id, status, next_refresh_at, next_class_checked_at, {_SIGNAL_COLS} FROM users
+        f"""SELECT {cols} FROM users
             WHERE status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?)""",
         (now,)).fetchall()
     stale_next = [r["id"] for r in rows
@@ -786,36 +823,53 @@ def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, i
                   or (not r["next_class_at"] and now - (r["next_class_checked_at"] or 0) > NEXT_CLASS_RECHECK)]
     if stale_next:
         with db.tx() as c:
-            fresh = {uid: _store_next_class(c, uid, now) for uid in stale_next}
-    else:
-        fresh = {}
+            for uid in stale_next:
+                _store_next_class(c, uid, now)
+        # 下一节课换了：重新读这些人的时刻和 slot
+        rows = [r for r in rows if r["id"] not in set(stale_next)] + conn.execute(
+            f"SELECT {cols} FROM users WHERE id IN ({','.join('?' * len(stale_next))})", stale_next).fetchall()
     out = []
     for r in rows:
-        sig = signals_of(r)
-        if r["id"] in fresh:
-            sig = refresh_policy.Signals(sig.last_seen_at, sig.last_success_at, sig.last_change_at,
-                                         fresh[r["id"]], sig.refresh_requested_at)
-        # 失败退避已到期的人按“该刷了”处理，但排在主动请求之后
-        score = max(refresh_policy.overdue(sig, now), 1.0) if r["status"] == "error" else refresh_policy.overdue(sig, now)
+        if r["status"] == "error":
+            # 失败退避已到期的人按“该刷了”处理，但排在主动请求之后
+            out.append((max(refresh_policy.overdue(signals_of(r), now), 1.0), r["id"]))
+            continue
+        score = _score(conn, r, now)
         if score >= 1:
             out.append((score, r["id"]))
     out.sort(reverse=True)
     return out[:limit]
 
 
+def _score(conn, row, now: float) -> float:
+    """逾期程度。只有卡在检查点上的人才去查同班同学（一条按 slot 的索引查询）。"""
+    sig = signals_of(row)
+    cp = refresh_policy.checkpoint(sig, now)
+    if cp and now >= cp[0] and not refresh_policy.requested(sig):
+        peer = _peer_checked_at(conn, row["id"], row["current_semester_id"], row["next_class_slots"])
+        if peer:
+            sig = signals_of(row, peer)
+    return refresh_policy.overdue(sig, now)
+
+
 def still_due(uid: int, now: float | None = None) -> bool:
     """真正开刷前再看一眼：期间可能有人手动刷过了。"""
     now = db.now() if now is None else now
-    row = db.connect().execute(f"SELECT status, next_refresh_at, {_SIGNAL_COLS} FROM users WHERE id=?",
-                               (uid,)).fetchone()
+    conn = db.connect()
+    row = conn.execute(
+        f"""SELECT id, status, next_refresh_at, next_class_slots, current_semester_id, {_SIGNAL_COLS}
+            FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return False
     if row["status"] == "error":
         return bool(row["next_refresh_at"]) and row["next_refresh_at"] <= now
-    return row["status"] == "ok" and refresh_policy.overdue(signals_of(row), now) >= 1
+    # 同一个 tick 里同班同学可能刚替他检查过下一节课
+    return row["status"] == "ok" and _score(conn, row, now) >= 1
 
 
 # ---------- 同班同学：一人发现调课，其他人立刻排上 ----------
+
+lesson_line = _lesson_line = widget.lesson_line
 
 def slot_key(semester_id, a: dict) -> str:
     """同一节课的身份：课程、教师、星期、开始节次、周次（不含教室和具体钟点——它们正是会被调的部分）。"""
@@ -825,55 +879,60 @@ def slot_key(semester_id, a: dict) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:24]
 
 
+def course_key(semester_id, a: dict) -> str:
+    """同一门课：课程 + 教师。补课 / 加课是全新的排课条目，只能按课程找同学。"""
+    teachers = ",".join(sorted(t for t in (a.get("teachers") or []) if isinstance(t, str)))
+    return hashlib.sha1(f"{semester_id}|{a.get('courseName')}|{teachers}".encode()).hexdigest()[:24]
+
+
 def _store_slots(c, uid: int, semester_id, activities: list) -> None:
-    keys = {slot_key(semester_id, a) for a in activities if isinstance(a, dict)}
+    keys = {(slot_key(semester_id, a), course_key(semester_id, a)) for a in activities if isinstance(a, dict)}
     c.execute("DELETE FROM lesson_slots WHERE user_id=? AND semester_id=?", (uid, semester_id))
-    c.executemany("INSERT OR IGNORE INTO lesson_slots(user_id, semester_id, slot_key) VALUES(?,?,?)",
-                  [(uid, semester_id, k) for k in keys])
+    c.executemany("INSERT OR IGNORE INTO lesson_slots(user_id, semester_id, slot_key, course_key) VALUES(?,?,?,?)",
+                  [(uid, semester_id, k, ck) for k, ck in keys])
 
 
-def alert_classmates(uid: int, semester_id, keys: list[str], old_lines: list[str]) -> int:
-    """被改动的课（按改动前的身份）还有谁在上，且他存的课表里还是旧安排：请求他尽快刷新。返回人数。
+def alert_classmates(uid: int, semester_id, old: list, new: list) -> int:
+    """课表变了：同班里还停在旧安排的人，请求他尽快刷新。返回人数。
 
-    只提醒“还停留在旧安排”的人：已经刷到新安排的同学不会被反复叫醒，也不会互相连锁提醒。
+    old / new：这次被改掉的排课（改动前）和新出现的排课（改动后）。
+    - 改了时间 / 教室 / 周次：按改动前的 slot 找人，他存的课表里还有旧安排就提醒；
+    - 补课 / 加课（这门课没有任何旧排课被改掉）：按课程找人，他存的课表里还没有这条新排课就提醒。
+    已经刷到新安排的同学不会被反复叫醒，也不会互相连锁提醒。
     """
-    if not keys or not old_lines:
+    old = [a for a in old if isinstance(a, dict)]
+    new = [a for a in new if isinstance(a, dict)]
+    stale_lines = {lesson_line(a) for a in old}
+    slots = sorted({slot_key(semester_id, a) for a in old})
+    touched = {course_key(semester_id, a) for a in old}
+    extra: dict[str, set[str]] = {}
+    for a in new:
+        ck = course_key(semester_id, a)
+        if ck not in touched:
+            extra.setdefault(ck, set()).add(lesson_line(a))
+    if not slots and not extra:
         return 0
     now = db.now()
-    stale_lines = set(old_lines)
     alerted = 0
     with db.tx() as c:
-        marks = ",".join("?" * len(keys))
         rows = c.execute(
             f"""SELECT DISTINCT s.user_id, t.data_json FROM lesson_slots s
                 JOIN timetables t ON t.user_id = s.user_id AND t.semester_id = s.semester_id
-                WHERE s.semester_id=? AND s.slot_key IN ({marks}) AND s.user_id<>?""",
-            (semester_id, *keys, uid)).fetchall()
+                WHERE s.semester_id=? AND s.user_id<>?
+                  AND (s.slot_key IN ({",".join("?" * len(slots))}) OR s.course_key IN ({",".join("?" * len(extra))}))""",
+            (semester_id, uid, *slots, *extra)).fetchall()
         for r in rows:
             try:
-                acts = json.loads(r["data_json"]).get("activities") or []
+                acts = [a for a in json.loads(r["data_json"]).get("activities") or [] if isinstance(a, dict)]
             except (TypeError, ValueError, AttributeError):
                 acts = []
-            if any(isinstance(a, dict) and _lesson_line(a) in stale_lines for a in acts):
+            lines = {lesson_line(a) for a in acts}
+            mine = {course_key(semester_id, a) for a in acts}
+            missing = any(ck in mine and not want <= lines for ck, want in extra.items())
+            if lines & stale_lines or missing:
                 request_refresh(r["user_id"], "同班同学的课表有变动", now, conn=c)
                 alerted += 1
     return alerted
-
-
-_WEEKDAY = "一二三四五六日"
-
-
-def _lesson_line(a: dict) -> str:
-    """一条排课的人类可读描述，也作为比较课表变动的键。"""
-    day = a.get("weekday")
-    day_txt = f"周{_WEEKDAY[day - 1]}" if isinstance(day, int) and 1 <= day <= 7 else "周?"
-    start, end = a.get("startUnit"), a.get("endUnit")
-    units = f"第{start}–{end}节" if start and end and end != start else (f"第{start}节" if start else "")
-    clock = f"{a.get('startTime') or ''}–{a.get('endTime') or ''}".strip("–")
-    when = " ".join(x for x in (day_txt, units, clock) if x)
-    weeks = a.get("weeksStr") or ",".join(str(w) for w in (a.get("weekIndexes") or []))
-    room = a.get("room") or a.get("building") or "地点待定"
-    return f"{a.get('courseName') or '未命名课程'} · {when} · {room} · 第{weeks}周"
 
 
 def timetable_diff(old: list, new: list) -> tuple[list[str], list[str]]:
@@ -896,9 +955,8 @@ def _old_activities(c, uid: int, semester_id) -> list | None:
 
 
 def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
-    """保存结果；返回课表变动 {"semester_name", "added", "removed", "slots"}（首次抓取或无变化时为 None）。
-
-    slots：被改动的课在改动前的 slot_key，用来提醒同班同学。
+    """保存结果；返回课表变动 {"semester_name", "semester_id", "added", "removed", "old", "new"}
+    （首次抓取或无变化时为 None）。added / removed 是给人看的行，old / new 是改动前后的排课本身。
     """
     now = db.now()
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
@@ -926,16 +984,32 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
     if old is not None:
         added, removed = timetable_diff(old, data["activities"])
         if added or removed:
-            new_lines = {_lesson_line(a) for a in data["activities"] if isinstance(a, dict)}
-            slots = sorted({slot_key(data["semester_id"], a) for a in old
-                            if isinstance(a, dict) and _lesson_line(a) not in new_lines})
+            gone, came = set(removed), set(added)
             changes = {"semester_name": data["semester_name"], "semester_id": data["semester_id"],
-                       "added": added, "removed": removed, "slots": slots}
-            c.execute("UPDATE users SET last_change_at=? WHERE id=?", (now, uid))
+                       "added": added, "removed": removed,
+                       "old": [a for a in old if isinstance(a, dict) and _lesson_line(a) in gone],
+                       "new": [a for a in data["activities"] if isinstance(a, dict) and _lesson_line(a) in came]}
+            _record_change(c, uid, now, changes)
     _store_next_class(c, uid, now)
     row = c.execute(f"SELECT {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
     c.execute("UPDATE users SET next_refresh_at=? WHERE id=?", (refresh_policy.next_due(signals_of(row), now), uid))
     return changes
+
+
+def _record_change(c, uid: int, now: float, changes: dict) -> None:
+    """记下这次调课（改动前后的排课），小组件在课表上标出“调”和“停”。只留最近几次。"""
+    row = c.execute("SELECT recent_changes_json FROM users WHERE id=?", (uid,)).fetchone()
+    events = [ev for ev in _json_list(row["recent_changes_json"] if row else None)
+              if isinstance(ev, dict) and isinstance(ev.get("at"), int | float) and now - ev["at"] < widget.CHANGE_SHOW]
+    events.append({"at": now, "semester_id": changes["semester_id"],
+                   "removed": changes["old"][:40], "added": changes["new"][:40]})
+    c.execute("UPDATE users SET last_change_at=?, recent_changes_json=? WHERE id=?",
+              (now, json.dumps(events[-CHANGE_KEEP:], ensure_ascii=False), uid))
+
+
+def recent_changes(uid: int) -> list:
+    row = db.connect().execute("SELECT recent_changes_json FROM users WHERE id=?", (uid,)).fetchone()
+    return _json_list(row["recent_changes_json"] if row else None)
 
 
 def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
