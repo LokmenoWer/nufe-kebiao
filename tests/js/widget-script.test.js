@@ -267,6 +267,12 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   for (const room of ["德正楼\nZ3-117", "德业楼\nZ4-106", "德经楼\nZ1-101", "博文楼\nJA108", "德济楼\nZ2S206"]) {
     assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
   }
+  // 大屏 6 列（列宽约 48pt）：“18:30–20:00”一行会被截断，统一分两行写全，不再有半截时间
+  assert.equal(W.timeFitsOneLine(42, 9), false);
+  assert.equal(W.timeFitsOneLine(47, 9), true);
+  const big = (await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW, screen: { width: 440, height: 956 } })).widget.texts();
+  for (const when of ["18:30–\n20:00", "13:30–\n14:55", "15:10–\n16:35"]) assert.ok(big.includes(when), `${when}: ${big.join("|")}`);
+  assert.ok(!big.some((x) => /^\d\d:\d\d–\d\d:\d\d/.test(x)), big.join("|"));
   // 周日也有课（7 列）：仍然写全
   const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
   const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();

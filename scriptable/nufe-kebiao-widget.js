@@ -634,11 +634,29 @@ function roomText(lesson, room = lesson.room) {
   return room ? `${room}（${lesson.was}）` : lesson.was;
 }
 
-/** 粗估一行字的宽度（pt）：汉字约一个字号宽，字母数字约 0.6 个。 */
+/** 粗估一行字的宽度（pt）：汉字约一个字号宽，字母数字约 0.6 个，冒号、短横、空格约 0.3 个，“–”约 0.5 个。 */
 function textWidth(text, size) {
   let w = 0;
-  for (const ch of String(text || "")) w += /[\u2e80-\uffff]/.test(ch) ? size : size * 0.6;
+  for (const ch of String(text || "")) {
+    w += size * (ch === "–" ? 0.5 : /[\u2e80-\uffff]/.test(ch) ? 1 : /[:\-. ]/.test(ch) ? 0.3 : 0.6);
+  }
   return w;
+}
+
+/**
+ * 起止时间一行放不放得下。按最宽的数字估（“00:00–00:00”），整张课表统一：
+ * 窄列里“13:30–14:55”缩一缩能放下，“18:30–20:50”却会被截成“18:30–20:…”，不能逐节课碰运气。
+ * 字号最多按缩到 0.8 倍算，再小就看不清了。
+ */
+function timeFitsOneLine(width, size) {
+  return textWidth("00:00–00:00", size) * 0.8 <= width;
+}
+
+/** 卡片顶上的时间：one 写起止；two 分两行（“18:30–” / “20:50”）；start 只写开始。 */
+function timeLabel(lesson, mode) {
+  if (mode === "one") return `${lesson.start}–${lesson.end}`;
+  if (mode === "two") return `${lesson.start}–\n${lesson.end}`;
+  return lesson.start;
 }
 
 /**
@@ -814,27 +832,35 @@ function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
   }
   // 每张卡片顶上写自己的上课时间（大号写起止，中号格子够高时写开始），用课程色，一眼对上行
   const showTime = large || height >= 30;
-  if (showTime) {
-    // 起止时间约需 46pt 宽；有周末课排成 7 列时放不下，只写开始
-    const when = large && width >= 46 ? `${lesson.start}–${lesson.end}` : lesson.start;
-    addText(chip, lesson.changed ? `${when} 调` : when, {
-      size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), scale: 0.7,
-    });
-  }
   // 大号格子放得下三行（时间 + 课名 + 教室）就写教室：两节小课的格子也要能看到去哪上课
   const showRoom = large && Boolean(lesson.room) && height >= 40;
   // 撞课：同一格里还有别的课，名字后面注“+1”
   const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
-  // 大号按高度分行（时间约 11pt、课名每行 12pt、教室每行 10.5pt）：先保证课名写全，还有富余再把教室分两行写全
+  // 大号按高度分行（时间每行约 11pt、课名每行 12pt、教室每行 10.5pt），依次满足：
+  // 开始时间 → 课名写全 → 教室编号 → 结束时间（一行放不下就分两行）→ 教室楼名 → 课名多给的行
   const inner = width - 6;
   let lines = !showTime && height >= 28 ? 2 : 1;
+  let timeMode = "start";
   let roomTwo = null;
   if (large) {
-    const left = height - 4 - 11 - (showRoom ? 10.5 : 0);
-    const nameMax = Math.max(1, Math.min(3, Math.floor(left / 12)));
-    const need = Math.min(nameMax, linesNeeded(name, inner, 10));
-    if (showRoom && left - need * 12 >= 10.5) roomTwo = splitRoom(lesson.room, inner, 8.5);
-    lines = roomTwo ? need : nameMax;
+    let left = height - 4 - 11 - (showRoom ? 10.5 : 0);
+    const need = Math.max(1, Math.min(3, Math.floor(left / 12), linesNeeded(name, inner, 10)));
+    left -= need * 12;
+    if (timeFitsOneLine(inner, 9)) timeMode = "one";
+    else if (left >= 11) {
+      timeMode = "two";
+      left -= 11;
+    }
+    if (showRoom && left >= 10.5) roomTwo = splitRoom(lesson.room, inner, 8.5);
+    if (roomTwo) left -= 10.5;
+    lines = Math.min(3, need + Math.max(0, Math.floor(left / 12)));
+  }
+  if (showTime) {
+    const when = timeLabel(lesson, timeMode);
+    addText(chip, lesson.changed ? `${when} 调` : when, {
+      size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color),
+      lines: timeMode === "two" ? 2 : 1, scale: 0.7,
+    });
   }
   addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
   if (showRoom) {
@@ -933,23 +959,32 @@ function fullChip(cell, C, lesson, { width, height, large, more }) {
   const showRoom = n >= 2 && hasRoom;
   const showTime = n >= (hasRoom ? 3 : 2);
   const showTeacher = large && n >= 6 && Boolean(lesson.teachers);
-  const nameMax = Math.max(1, Math.min(3, n - showTime - showRoom - showTeacher));
   const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
-  // 课名写全之后还剩一行：教室分两行写全（楼名 / 编号），不再缩成编号
-  const need = Math.min(nameMax, linesNeeded(name, width - 6, large ? 10 : 9));
-  const roomTwo = showRoom && n - showTime - showRoom - showTeacher - need >= 1 ? splitRoom(lesson.room, width - 6, large ? 8.5 : 8) : null;
-  const nameLines = roomTwo ? need : nameMax;
+  // 剩下的行依次给：课名写全 → 结束时间（一行放不下就分两行）→ 教室楼名 → 课名多给的行
+  const inner = width - 6;
+  let spare = n - showTime - showRoom - showTeacher;
+  const need = Math.max(1, Math.min(3, spare, linesNeeded(name, inner, large ? 10 : 9)));
+  spare -= need;
+  let timeMode = showTime && timeFitsOneLine(inner, large ? 9 : 8.5) ? "one" : "start";
+  if (showTime && timeMode === "start" && spare >= 1) {
+    timeMode = "two";
+    spare -= 1;
+  }
+  const roomTwo = showRoom && spare >= 1 ? splitRoom(lesson.room, inner, large ? 8.5 : 8) : null;
+  if (roomTwo) spare -= 1;
+  const nameLines = Math.min(3, need + Math.max(0, spare));
   if (showTime) {
-    const when = width >= 46 ? `${lesson.start}–${lesson.end}` : lesson.start;
+    const when = timeLabel(lesson, timeMode);
     addText(chip, lesson.changed ? `${when} 调` : when, {
-      size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), scale: 0.7,
+      size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color),
+      lines: timeMode === "two" ? 2 : 1, scale: 0.7,
     });
   }
   addText(chip, name, {
     size: large ? 10 : 9, weight: "semibold", color: lesson.changed ? C.warn : C.text, lines: nameLines, scale: 0.6,
   });
   if (showRoom) {
-    const room = roomTwo || fitRoom(lesson.room, width - 6, large ? 8.5 : 8);
+    const room = roomTwo || fitRoom(lesson.room, inner, large ? 8.5 : 8);
     addText(chip, roomText(lesson, room), { size: large ? 8.5 : 8, color: C.sub, lines: (roomTwo ? 2 : 1) + (n >= 7 ? 1 : 0), scale: 0.7 });
   }
   if (showTeacher) addText(chip, lesson.teachers, { size: 8.5, color: C.faint, scale: 0.7 });
@@ -1331,7 +1366,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, splitRoom, linesNeeded, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, splitRoom, linesNeeded, timeFitsOneLine, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {
