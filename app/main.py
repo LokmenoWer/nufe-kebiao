@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import cas, crypto, db, scheduler, service
+from . import cas, crypto, db, mailer, notify, scheduler, service
 from .config import (
     FORCE_HTTPS,
     MAX_USER_REFRESH_TIMES,
@@ -83,11 +83,13 @@ async def _upstream_call(fn):
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
+    mailer.start()
     scheduler.start(refresh=SCHEDULER_ENABLED)
     try:
         yield
     finally:
         scheduler.stop()
+        mailer.stop()
         _upstream.shutdown(wait=False, cancel_futures=True)
 
 
@@ -408,6 +410,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "refresh_allowed_hours": sorted(REFRESH_ALLOWED_HOURS),
         "refresh_max_times": MAX_USER_REFRESH_TIMES,
         "refresh_default_interval_hours": REFRESH_INTERVAL_HOURS,
+        "mail": notify.snapshot(sess["id"]),
     }
 
 
@@ -473,6 +476,60 @@ def refresh_log(sess=Depends(current_session)):
 
 
 # ---------- 凭据 / 账号 ----------
+
+# ---------- 邮件通知 ----------
+
+class EmailIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class EmailCodeIn(BaseModel):
+    code: str = Field(min_length=4, max_length=10)
+
+
+class EmailPrefsIn(BaseModel):
+    notify_status: bool
+    notify_changes: bool
+
+
+def _email_call(fn):
+    try:
+        return fn()
+    except notify.EmailError as e:
+        headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+        raise HTTPException(e.status, str(e), headers=headers) from None
+    except KeyError:
+        raise HTTPException(401, "会话已失效") from None
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+@app.post("/api/email/start")
+def email_start(body: EmailIn, request: Request, sess=Depends(csrf_protected)):
+    return _email_call(lambda: notify.start_verification(sess["id"], body.email, _client_ip(request)))
+
+
+@app.post("/api/email/verify")
+def email_verify(body: EmailCodeIn, sess=Depends(csrf_protected)):
+    return _email_call(lambda: notify.confirm(sess["id"], body.code))
+
+
+@app.post("/api/email/remove")
+def email_remove(sess=Depends(csrf_protected)):
+    return _email_call(lambda: notify.remove(sess["id"]))
+
+
+@app.post("/api/email/prefs")
+def email_prefs(body: EmailPrefsIn, sess=Depends(csrf_protected)):
+    return _email_call(lambda: notify.set_prefs(sess["id"], body.notify_status, body.notify_changes))
+
+
+@app.post("/api/email/test")
+def email_test(request: Request, sess=Depends(csrf_protected)):
+    return _email_call(lambda: notify.send_test(sess["id"], _client_ip(request)))
+
 
 @app.post("/api/credentials/forget")
 def forget(sess=Depends(csrf_protected)):

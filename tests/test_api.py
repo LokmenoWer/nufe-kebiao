@@ -40,6 +40,8 @@ class FakeUpstream:
         self.tgc_alive = set()    # 教务会话过期但 CASTGC 仍有效：可以静默续期
         self.renewals = 0
         self.fetches = 0
+        self.course_override = None
+        self.room_override = None
 
     def login(self, session, username, password, device_id=None):
         self.devices.append(device_id)
@@ -64,6 +66,12 @@ class FakeUpstream:
 
     def fetch(self, session, semester_id=None, page_html=None):
         self.fetches += 1
+        if self.course_override:
+            tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
+            if tgc and tgc.removeprefix("tgc-") not in self.expired:
+                data = _timetable(tgc.removeprefix("tgc-"), self.course_override)
+                data["activities"][0]["room"] = self.room_override or "A101"
+                return data
         tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
         sid = tgc.removeprefix("tgc-") if tgc else None
         if not sid or sid in self.expired:
@@ -191,7 +199,18 @@ def up(monkeypatch):
     monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 0)
     from app import polite
     polite.reset_health()
+    from app import notify
+    notify.mails_by_user._hits.clear()
+    notify.mails_by_ip._hits.clear()
     return fake
+
+
+@pytest.fixture
+def outbox(monkeypatch):
+    from app import mailer
+    sent = []
+    monkeypatch.setattr(mailer, "send", lambda to, subject, body: sent.append((to, subject, body)) or True)
+    return sent
 
 
 def _login(client, sid, remember=False, pw=None, keep=False):
@@ -1119,3 +1138,158 @@ def test_ics_cache_invalidated_when_calendar_changes(up, monkeypatch):
     second = second_resp.text
     assert "20260907T082000" not in second
     assert "20260914T082000" in second
+
+
+# ---------- 邮件通知 ----------
+
+def _bind_email(c, outbox, email="me@example.com"):
+    r = c.post("/api/email/start", headers=_csrf(c), json={"email": email})
+    assert r.status_code == 200, r.text
+    to, subject, body = outbox[-1]
+    code = next(w for w in subject.split() if w.isdigit() and len(w) == 6)
+    assert to.lower() == email.lower() and code in body
+    r = c.post("/api/email/verify", headers=_csrf(c), json={"code": code})
+    assert r.status_code == 200 and r.json()["email"].lower() == email.lower()
+    return code
+
+
+def test_email_bind_verify_and_me(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    mail = c.get("/api/me").json()["mail"]
+    assert mail["available"] is True and mail["email"] is None
+    _bind_email(c, outbox, "Me.Name@EXAMPLE.com")
+    mail = c.get("/api/me").json()["mail"]
+    assert mail["email"] == "Me.Name@example.com" and mail["notify_status"] and mail["notify_changes"]
+    # 邮箱加密落库
+    raw = db.connect().execute("SELECT enc_email FROM users WHERE student_id='2023001'").fetchone()[0]
+    assert b"example.com" not in raw
+
+
+def test_email_code_wrong_expired_and_resend_gap(up, outbox):
+    from app import notify
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.post("/api/email/start", headers=_csrf(c), json={"email": "a@example.com"}).status_code == 200
+    again = c.post("/api/email/start", headers=_csrf(c), json={"email": "a@example.com"})
+    assert again.status_code == 429 and int(again.headers["Retry-After"]) <= notify.RESEND_GAP
+    wrong = c.post("/api/email/verify", headers=_csrf(c), json={"code": "000000"})
+    if wrong.status_code == 200:  # 极小概率撞上真验证码
+        return
+    assert wrong.status_code == 400 and "再试" in wrong.json()["detail"]
+    with db.tx() as conn:
+        conn.execute("UPDATE email_verifications SET expires_at=?", (db.now() - 1,))
+    code = next(w for w in outbox[-1][1].split() if w.isdigit() and len(w) == 6)
+    r = c.post("/api/email/verify", headers=_csrf(c), json={"code": code})
+    assert r.status_code == 400 and "失效" in r.json()["detail"]
+    assert c.get("/api/me").json()["mail"]["email"] is None
+
+
+def test_email_attempt_limit(up, outbox):
+    from app import notify
+    c = TestClient(app)
+    _login(c, "2023001")
+    c.post("/api/email/start", headers=_csrf(c), json={"email": "a@example.com"})
+    code = next(w for w in outbox[-1][1].split() if w.isdigit() and len(w) == 6)
+    bad = "111111" if code != "111111" else "222222"
+    for _ in range(notify.CODE_MAX_ATTEMPTS):
+        c.post("/api/email/verify", headers=_csrf(c), json={"code": bad})
+    # 试满之后，正确的验证码也不再接受
+    assert c.post("/api/email/verify", headers=_csrf(c), json={"code": code}).status_code == 400
+
+
+def test_email_rejects_bad_address_and_limits_sends(up, outbox, monkeypatch):
+    from app import notify
+    c = TestClient(app)
+    _login(c, "2023001")
+    for bad in ("not-an-email", "a@b", "a b@example.com", "a@example.com\nBcc: x@y.com"):
+        assert c.post("/api/email/start", headers=_csrf(c), json={"email": bad}).status_code in (400, 422)
+    monkeypatch.setattr(notify, "RESEND_GAP", 0)
+    codes = [c.post("/api/email/start", headers=_csrf(c), json={"email": "a@example.com"}).status_code
+             for _ in range(6)]
+    assert codes[:5] == [200] * 5 and codes[5] == 429  # 每人每小时最多 5 封
+
+
+def test_email_prefs_test_and_remove(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.post("/api/email/test", headers=_csrf(c)).status_code == 400  # 还没绑定
+    _bind_email(c, outbox)
+    r = c.post("/api/email/prefs", headers=_csrf(c), json={"notify_status": False, "notify_changes": True}).json()
+    assert r["notify_status"] is False and r["notify_changes"] is True
+    assert c.post("/api/email/test", headers=_csrf(c)).status_code == 200 and "测试" in outbox[-1][1]
+    assert c.post("/api/email/remove", headers=_csrf(c)).json()["email"] is None
+
+
+def _scheduled(student_id):
+    with scheduler.background_upstream():
+        return service.refresh_user(service_uid(student_id), "scheduled")
+
+
+def test_paused_refresh_emails_once_and_only_in_background(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox)
+    up.expired.add("2023001")
+    before = len(outbox)
+    c.post("/api/refresh", headers=_csrf(c), json={})  # 手动刷新：人在屏幕前，不发邮件
+    assert len(outbox) == before
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='ok'")
+    assert _scheduled("2023001")["status"] == "needs_rebind"
+    assert len(outbox) == before + 1 and "重新登录" in outbox[-1][1] and "http://testserver/" in outbox[-1][2]
+    _scheduled("2023001")  # 状态没变：不重复发
+    assert len(outbox) == before + 1
+
+
+def test_error_threshold_emails_once(up, outbox, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox)
+    before = len(outbox)
+
+    def boom(*_a, **_k):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(jwxt, "fetch_timetable", boom)
+    for _ in range(service.REFRESH_MAX_FAILS + 1):
+        _scheduled("2023001")
+    assert len(outbox) == before + 1 and "连续失败" in outbox[-1][1]
+
+
+def test_timetable_change_email(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox)
+    before = len(outbox)
+    _scheduled("2023001")  # 没变化：不发
+    assert len(outbox) == before
+    up.course_override, up.room_override = "高数", "B202"
+    assert _scheduled("2023001")["ok"] is True
+    to, subject, body = outbox[-1]
+    assert len(outbox) == before + 1 and "课表有变动" in subject
+    assert "B202" in body and "A101" in body and "周一" in body
+    # 关掉“课表变动”提醒后不再发
+    c.post("/api/email/prefs", headers=_csrf(c), json={"notify_status": True, "notify_changes": False})
+    up.room_override = "C303"
+    _scheduled("2023001")
+    assert len(outbox) == before + 1
+
+
+def test_no_email_when_not_bound(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    up.expired.add("2023001")
+    _scheduled("2023001")
+    assert outbox == []
+
+
+def test_delete_account_removes_email(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox)
+    c.post("/api/email/start", headers=_csrf(c), json={"email": "other@example.com"})
+    c.post("/api/account/delete", headers=_csrf(c))
+    conn = db.connect()
+    assert conn.execute("SELECT COUNT(*) FROM users WHERE student_id='2023001'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM email_verifications").fetchone()[0] == 0

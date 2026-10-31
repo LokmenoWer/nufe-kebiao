@@ -10,6 +10,7 @@
 - **周视图 + 日视图**：当前时间线、正在上课进度、下一节提示、今天跳转、按周/日深链接；手机上周视图可横向滚动，时间轴固定在左侧。
 - **现代前端**：无构建步骤的 ES modules，原生 `dialog` / `popover` / `color-mix`，浅色/深色/跟随系统，移动端底部抽屉设置页。
 - **后台刷新**：按用户自选时段串行刷新，失败指数退避；登录态过期、验证码、二次认证会在界面顶部提示并暂停自动重试。
+- **邮件通知**（可选）：绑定邮箱后，后台自动刷新暂停（需要重新登录 / 验证码）、连续失败或发现课表变动时发邮件提醒；两类提醒可分别关闭。
 - **日历订阅**：生成可撤销的 `.ics` 链接，iOS / macOS 日历、Google 日历、Outlook 均可添加。
 - **数据自主**：可删除已保存密码，也可一键删除账号与全部数据。
 
@@ -149,7 +150,29 @@ deploy/deploy.sh
 | CSRF | 所有写请求校验 Origin/Referer（Referrer 被隐私设置去掉时用浏览器写入的 Sec-Fetch-Site 兜底；同时防登录 CSRF）+ 已登录接口要求 `X-CSRF-Token` |
 | 其他头 | 严格 CSP（无内联脚本，含 `base-uri` / `object-src` / `form-action` / Trusted Types）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`（防订阅 token 外泄）、CORP/COOP |
 | 前端 XSS | 不拼接 HTML 字符串（没有 `innerHTML` / `eval`），所有用户/学校数据都走 `textContent`；测试会扫描这些危险写法 |
-| 删除 | 设置 → “删除我的账号与所有数据”，外键级联删除会话、课表、刷新记录和订阅 token，并清掉内存里未完成的登录流程/缓存 |
+| 通知邮箱 | 用户主动绑定，必须收到 6 位验证码确认（只存 HMAC，10 分钟有效，最多试 5 次，60 秒才能重发）；邮箱 AES-256-GCM 加密落库；验证 / 测试邮件按人 5 封、按 IP 10 封每小时限量，防止被拿来轰炸别人的邮箱；日志里只记打码后的地址 |
+| 删除 | 设置 → “删除我的账号与所有数据”，外键级联删除会话、课表、刷新记录、订阅 token 和通知邮箱，并清掉内存里未完成的登录流程/缓存 |
+
+### 邮件通知
+
+在 `.env` 里配好 SMTP 就会在设置页出现“邮件通知”（没配则整块隐藏）：
+
+```
+MAIL_MAILER=smtp            # log = 不真的发信，只打印到日志（本地开发 / 演示）
+MAIL_HOST=smtp.163.com
+MAIL_PORT=465
+MAIL_USERNAME=you@163.com
+MAIL_PASSWORD=<邮箱的 SMTP 授权码，不是登录密码>
+MAIL_ENCRYPTION=ssl         # ssl（465）| tls（587，STARTTLS）| none
+MAIL_FROM_ADDRESS=you@163.com
+MAIL_FROM_NAME=南财课表
+```
+
+- 发信走单线程后台队列，SMTP 慢或连不上不影响网页和刷新；失败重试两次后丢弃。两封信之间至少隔 `MAIL_MIN_INTERVAL`（默认 3）秒。
+- 只在**后台刷新**时提醒（手动刷新、登录时用户就在屏幕前）：
+  - 刷新暂停：状态第一次变成需要重新登录 / 验证码时发一封；普通失败在连续次数恰好达到 `REFRESH_MAX_FAILS` 时发一封，不会每次失败都发。
+  - 课表变动：与上次保存的同一学期课表比较（课程名、星期、节次与时间、地点、周次），列出新增和取消的条目。首次抓取不算变动。
+- 每封信末尾都说明可在设置里关闭或解绑。
 
 ### 会话与设备
 
@@ -192,6 +215,8 @@ app/
   service.py    代登录、凭据保管、刷新状态机
   scheduler.py  后台定时刷新、扫码状态轮询
   ics.py        iCalendar 导出
+  mailer.py     SMTP 发信后台队列
+  notify.py     通知邮箱绑定（验证码）与刷新暂停 / 课表变动提醒
   security.py   会话、CSRF、限速
   main.py       FastAPI 路由 + 安全响应头 + 静态资源版本
 static/
@@ -218,7 +243,7 @@ pyproject.toml  ruff / pytest 配置
 
 ## 尚未做的
 
-- 通知只做了站内横幅（`needs_rebind` / `captcha` / 连续失败）；要发邮件或推送，可以在 `service._save_failure` 里接。
+- 通知只有站内横幅和邮件；没有微信 / App 推送。
 - SQLite 起步。换 PostgreSQL 需要改 `db.py` 的连接和少量 SQL（`ON CONFLICT` 语法两边通用）。
 - 前端没有 Service Worker / 离线缓存；课表数据每次打开都从本站读取。
 

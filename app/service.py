@@ -21,7 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
-from . import cas, crypto, db, ics, jwxt
+from . import cas, crypto, db, ics, jwxt, notify
 from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
@@ -606,10 +606,20 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
 
     try:
         with db.tx() as c:
-            _save_success(c, uid, s, data, trigger)
+            changes = _save_success(c, uid, s, data, trigger)
     except UserGone:
         return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
+    if changes and trigger == "scheduled":
+        _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
     return {"ok": True}
+
+
+def _notify_safely(fn, *args) -> None:
+    """通知失败（解密、入队等）只记日志，绝不影响刷新本身。"""
+    try:
+        fn(*args)
+    except Exception as e:
+        log.warning("notify %s failed for user %s: %s", fn.__name__, args[0], type(e).__name__)
 
 
 def next_scheduled(hours: list[int] | None, now: float | None = None) -> float:
@@ -667,10 +677,47 @@ def _user_hours(c, uid: int) -> list[int] | None:
     return [h for h in hours if isinstance(h, int)] if isinstance(hours, list) else None
 
 
-def _save_success(c, uid: int, s, data: dict, trigger: str) -> None:
+_WEEKDAY = "一二三四五六日"
+
+
+def _lesson_line(a: dict) -> str:
+    """一条排课的人类可读描述，也作为比较课表变动的键。"""
+    day = a.get("weekday")
+    day_txt = f"周{_WEEKDAY[day - 1]}" if isinstance(day, int) and 1 <= day <= 7 else "周?"
+    start, end = a.get("startUnit"), a.get("endUnit")
+    units = f"第{start}–{end}节" if start and end and end != start else (f"第{start}节" if start else "")
+    clock = f"{a.get('startTime') or ''}–{a.get('endTime') or ''}".strip("–")
+    when = " ".join(x for x in (day_txt, units, clock) if x)
+    weeks = a.get("weeksStr") or ",".join(str(w) for w in (a.get("weekIndexes") or []))
+    room = a.get("room") or a.get("building") or "地点待定"
+    return f"{a.get('courseName') or '未命名课程'} · {when} · {room} · 第{weeks}周"
+
+
+def timetable_diff(old: list, new: list) -> tuple[list[str], list[str]]:
+    """(新增, 取消)；时间 / 地点 / 周次改了的课会同时出现在两边（调整后 / 调整前）。"""
+    old_lines = {_lesson_line(a) for a in old if isinstance(a, dict)}
+    new_lines = {_lesson_line(a) for a in new if isinstance(a, dict)}
+    return sorted(new_lines - old_lines), sorted(old_lines - new_lines)
+
+
+def _old_activities(c, uid: int, semester_id) -> list | None:
+    row = c.execute("SELECT data_json FROM timetables WHERE user_id=? AND semester_id=?",
+                    (uid, semester_id)).fetchone()
+    if not row:
+        return None
+    try:
+        acts = json.loads(row["data_json"]).get("activities")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return acts if isinstance(acts, list) else None
+
+
+def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
+    """保存结果；返回课表变动 {"semester_name", "added", "removed"}（首次抓取或无变化时为 None）。"""
     now = db.now()
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         raise UserGone(uid)
+    old = _old_activities(c, uid, data["semester_id"])
     _save_semester(c, data)
     c.execute(
         """INSERT INTO timetables(user_id, semester_id, semester_name, data_json, fetched_at) VALUES(?,?,?,?,?)
@@ -688,14 +735,21 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> None:
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
+    if old is None:
+        return None
+    added, removed = timetable_diff(old, data["activities"])
+    if not (added or removed):
+        return None
+    return {"semester_name": data["semester_name"], "added": added, "removed": removed}
 
 
 def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
     now = db.now()
     with db.tx() as c:
-        row = c.execute("SELECT fail_count FROM users WHERE id=?", (uid,)).fetchone()
+        row = c.execute("SELECT fail_count, status FROM users WHERE id=?", (uid,)).fetchone()
         if row is None:
             return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
+        prev_status = row["status"]
         fails = (row["fail_count"] or 0) + 1
         if status == "error":
             # 指数退避：30min, 1h, 2h ... 上限 24h；连续失败达到阈值后在界面提示用户
@@ -708,6 +762,10 @@ def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
                   (status, fails, message, now, nxt, uid))
         c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,0,?)",
                   (uid, now, trigger, message))
+    # 只提醒后台刷新里的“状态变化”：暂停那一刻发一次；连续失败恰好达到阈值时发一次
+    if trigger == "scheduled" and ((status != "error" and prev_status != status)
+                                   or (status == "error" and fails == REFRESH_MAX_FAILS)):
+        _notify_safely(notify.refresh_paused, uid, status, message)
     return {"ok": False, "status": status, "message": message}
 
 

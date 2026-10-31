@@ -257,3 +257,12 @@ dialog[open] { animation: modal-in 0.16s ease-out; }
 @keyframes sheet-up {
   from { transform: translateY(28px); opacity: 0.7; }
 }
+
+/* ---------- 邮件通知 ---------- */
+.email-settings,
+.email-bind,
+.email-bound { display: flex; flex-direction: column; gap: 10px; }
+.email-settings [hidden] { display: none; }
+.email-address { overflow-wrap: anywhere; }
+.email-settings .code-row input { letter-spacing: normal; font-size: 15px; }
+.email-settings .code-row .btn { height: 42px; }

@@ -451,3 +451,52 @@ def test_reauth_method_detection():
     assert cas.reauth_method('<input name="answer1"><input name="answer2">', "6") == "密保问题"
     assert cas.reauth_method("请输入邮箱验证码", "4") == "邮箱验证码"
     assert "reAuthType=9" in cas.reauth_method("<p>?</p>", "9")
+
+
+# ---------- 邮件 ----------
+
+def test_mail_build_and_mask():
+    from app import mailer
+    msg = mailer.build(mailer.Mail("someone@example.com", "【南财课表】测试 123456", "正文\n第二行"))
+    assert msg["To"] == "someone@example.com" and "南财课表" in str(msg["Subject"])
+    assert msg["Auto-Submitted"] == "auto-generated" and msg["Message-ID"]
+    assert msg.get_content().startswith("正文")
+    assert mailer.mask("someone@example.com") == "s***e@example.com"
+    assert mailer.mask("ab@x.cn") == "a***@x.cn" and mailer.mask("bad") == "***"
+
+
+def test_mail_worker_retries_then_delivers(monkeypatch):
+    import smtplib
+    import time as _time
+
+    from app import mailer
+    calls = []
+
+    def flaky(msg):
+        calls.append(msg["To"])
+        if len(calls) == 1:
+            raise smtplib.SMTPServerDisconnected("bye")
+
+    monkeypatch.setattr(mailer, "deliver", flaky)
+    monkeypatch.setattr(mailer, "RETRY_DELAYS", (0.05, 0.05))
+    monkeypatch.setattr(mailer, "MAIL_MIN_INTERVAL", 0)
+    mailer.start()
+    try:
+        assert mailer.send("a@example.com", "s", "b")
+        for _ in range(100):
+            if len(calls) >= 2:
+                break
+            _time.sleep(0.02)
+        assert calls == ["a@example.com", "a@example.com"]
+    finally:
+        mailer.stop()
+
+
+def test_timetable_diff_lines():
+    from app import service
+    a = {"courseName": "高数", "weekday": 1, "startUnit": 1, "endUnit": 2, "startTime": "08:00",
+         "endTime": "09:35", "room": "A101", "weeksStr": "1-16"}
+    added, removed = service.timetable_diff([a], [{**a, "room": "B202"}])
+    assert added == ["高数 · 周一 第1–2节 08:00–09:35 · B202 · 第1-16周"]
+    assert removed == ["高数 · 周一 第1–2节 08:00–09:35 · A101 · 第1-16周"]
+    assert service.timetable_diff([a], [dict(a)]) == ([], [])

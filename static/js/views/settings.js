@@ -1,4 +1,4 @@
-/** 设置抽屉：账号、自动刷新、日历订阅、外观、删除数据。 */
+/** 设置抽屉：账号、自动刷新、邮件通知、日历订阅、外观、删除数据。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -8,6 +8,7 @@ import { confirmDialog, openDialog } from "../components/dialog.js";
 import * as T from "../time.js";
 import { initialOf } from "../courses.js";
 import { getThemeMode, setThemeMode } from "../theme.js";
+import { createEmailSection } from "./settings-email.js";
 
 const STATUS = {
   ok: { label: "正常", tone: "ok" },
@@ -101,6 +102,17 @@ export function openSettings({
     onClick: () => deleteAccount(),
   }, icon("trash"), h("span", {}, "删除我的账号与所有数据"));
 
+  // 服务端没配邮件时整块不显示
+  const emailSection = current.mail?.available
+    ? createEmailSection({
+      mail: current.mail,
+      onChange: (mail) => {
+        current.mail = mail;
+        onUpdated?.(current);
+      },
+    })
+    : null;
+
   const content = h("div", { class: "settings-body" },
     h("header", { class: "settings-head" },
       h("h2", { id: "settings-title" }, "账号与设置"),
@@ -123,6 +135,8 @@ export function openSettings({
       h("div", { class: "button-row" }, saveHoursBtn),
       logDetails),
 
+    emailSection ? section("邮件通知", emailSection.el) : null,
+
     section("日历订阅",
       h("p", { class: "hint" }, "在 iOS / macOS 日历、Google 日历或 Outlook 里“添加订阅”并填入链接。链接本身就是凭证，泄露后请重新生成。"),
       h("div", { class: "copy-row" }, icsInput, copyBtn),
@@ -141,7 +155,7 @@ export function openSettings({
     className: "settings-dialog",
     label: "账号与设置",
     content,
-    onClose: () => {},
+    onClose: () => emailSection?.destroy(),
   });
 
   // ---- 渲染 ----

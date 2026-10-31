@@ -106,6 +106,24 @@ SCHEDULER_TICK = _int("SCHEDULER_TICK", 60, minimum=5)
 MANUAL_REFRESH_MIN_GAP = _int("MANUAL_REFRESH_MIN_GAP", 20)
 MANUAL_REFRESH_FRESH_SECONDS = _int("MANUAL_REFRESH_FRESH_SECONDS", 120)
 
+# 邮件通知（SMTP）。变量名沿用常见的 MAIL_* 写法；没配 MAIL_HOST 时整个功能在界面上隐藏。
+# MAIL_MAILER=log：不真的发信，只写日志（本地开发 / 演示用）。
+MAIL_MAILER = os.getenv("MAIL_MAILER", "smtp").strip().lower()
+if MAIL_MAILER not in ("smtp", "log"):
+    raise RuntimeError("MAIL_MAILER 只能是 smtp 或 log")
+MAIL_HOST = os.getenv("MAIL_HOST", "").strip()
+MAIL_PORT = _int("MAIL_PORT", 465, minimum=1)
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "").strip()
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
+MAIL_ENCRYPTION = os.getenv("MAIL_ENCRYPTION", "ssl").strip().lower()
+if MAIL_ENCRYPTION not in ("ssl", "tls", "starttls", "none", ""):
+    raise RuntimeError("MAIL_ENCRYPTION 只能是 ssl / tls / none")
+MAIL_FROM_ADDRESS = os.getenv("MAIL_FROM_ADDRESS", "").strip() or MAIL_USERNAME
+MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "南财课表").strip()
+MAIL_ENABLED = MAIL_MAILER == "log" or bool(MAIL_HOST and MAIL_FROM_ADDRESS)
+# 两封信之间至少隔几秒：163 等免费邮箱对发信频率很敏感
+MAIL_MIN_INTERVAL = _float("MAIL_MIN_INTERVAL", 3.0, minimum=0.0)
+
 TIMEZONE = "Asia/Shanghai"
 
 # 校历锚点：学期名或学期 id → 第 1 周周一。优先级高于教务接口返回的日期。

@@ -33,7 +33,11 @@ CREATE TABLE IF NOT EXISTS users (
     ics_token_hash   TEXT UNIQUE,
     enc_ics_token    BLOB,
     enc_device_id    BLOB,             -- 本服务作为该用户"设备"的指纹，二次认证/信任设备绑定于此
-    refresh_hours    TEXT              -- 用户自选的每日刷新整点（JSON 列表）；NULL = 按默认间隔
+    refresh_hours    TEXT,             -- 用户自选的每日刷新整点（JSON 列表）；NULL = 按默认间隔
+    enc_email        BLOB,             -- AES-GCM(已验证的通知邮箱)
+    email_verified_at REAL,
+    notify_status    INTEGER NOT NULL DEFAULT 1,   -- 自动刷新暂停 / 连续失败时发邮件
+    notify_changes   INTEGER NOT NULL DEFAULT 1    -- 后台刷新发现课表变动时发邮件
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash  TEXT PRIMARY KEY,
@@ -42,6 +46,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at  REAL NOT NULL,
     expires_at  REAL NOT NULL,
     persistent  INTEGER NOT NULL DEFAULT 0   -- 1 = 勾了“保持登录”，cookie 带 max_age
+);
+CREATE TABLE IF NOT EXISTS email_verifications (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    enc_email   BLOB NOT NULL,      -- 待验证的邮箱（加密）
+    code_hash   TEXT NOT NULL,      -- HMAC(验证码)
+    sent_at     REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS timetables (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -127,7 +139,9 @@ def init() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
-    for col, typ in (("enc_device_id", "BLOB"), ("refresh_hours", "TEXT")):
+    for col, typ in (("enc_device_id", "BLOB"), ("refresh_hours", "TEXT"), ("enc_email", "BLOB"),
+                     ("email_verified_at", "REAL"), ("notify_status", "INTEGER NOT NULL DEFAULT 1"),
+                     ("notify_changes", "INTEGER NOT NULL DEFAULT 1")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
     session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
