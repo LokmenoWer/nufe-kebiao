@@ -21,10 +21,7 @@ from pydantic import BaseModel, Field
 from . import cas, crypto, db, mailer, notify, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
-    MAX_USER_REFRESH_TIMES,
     PUBLIC_BASE_URL,
-    REFRESH_ALLOWED_HOURS,
-    REFRESH_INTERVAL_HOURS,
     ROOT,
     SCHEDULER_ENABLED,
 )
@@ -394,6 +391,18 @@ def _widget_url(uid: int) -> str | None:
     return f"{PUBLIC_BASE_URL}/widget/{token}.json"
 
 
+def _record_use(uid: int) -> None:
+    """有人在用（网站 / 小组件 / 日历）：更新活跃度；数据比他的目标间隔还旧就排一次后台刷新。
+
+    纯本地数据库操作，不访问学校；出错只记日志，绝不影响请求本身。
+    """
+    try:
+        service.touch(uid)
+        service.request_if_stale(uid)
+    except Exception as e:
+        log.warning("record use failed for user %s: %s", uid, type(e).__name__)
+
+
 def _json_list(raw: str | None) -> list:
     try:
         value = json.loads(raw or "[]")
@@ -404,8 +413,10 @@ def _json_list(raw: str | None) -> list:
 
 @app.get("/api/me")
 def me(request: Request, response: Response, sess=Depends(current_session)):
-    # 每次打开页面都会先调这里：顺手做会话滑动续期
+    # 每次打开页面都会先调这里：顺手做会话滑动续期，记下“还在用”，数据过期就排一次后台刷新
     renew_session(request, response, sess)
+    _record_use(sess["id"])
+    outlook = service.refresh_outlook(sess["id"])
     if device_hint_uid(request) != sess["id"]:
         set_device_hint(response, sess["id"])  # 已登录的老会话也补上，下次扫码即可复用设备
     return {
@@ -418,32 +429,16 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "fail_count": sess["fail_count"],
         "last_refresh_at": sess["last_refresh_at"],
         "last_success_at": sess["last_success_at"],
-        "next_refresh_at": sess["next_refresh_at"],
+        "next_refresh_at": outlook.get("next_refresh_at"),
+        "refresh_target_minutes": outlook.get("target_minutes"),
+        "refresh_reason": outlook.get("reason"),
+        "refresh_pending": outlook.get("pending", False),
         "current_semester_id": sess["current_semester_id"],
         "semesters": _json_list(sess["semesters_json"]),
         "ics_url": _ics_url(sess["id"]),
-        "refresh_hours": _json_list(sess["refresh_hours"]),
-        "refresh_allowed_hours": sorted(REFRESH_ALLOWED_HOURS),
-        "refresh_max_times": MAX_USER_REFRESH_TIMES,
-        "refresh_default_interval_hours": REFRESH_INTERVAL_HOURS,
         "mail": notify.snapshot(sess["id"]),
         "widget_url": _widget_url(sess["id"]),
     }
-
-
-class RefreshHoursIn(BaseModel):
-    hours: list[int] = Field(max_length=24)
-
-
-@app.post("/api/settings/refresh-hours")
-def set_refresh_hours(body: RefreshHoursIn, sess=Depends(csrf_protected)):
-    try:
-        nxt = service.set_refresh_hours(sess["id"], body.hours)
-    except KeyError:
-        raise HTTPException(401, "会话已失效") from None
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
-    return {"ok": True, "next_refresh_at": nxt}
 
 
 # ---------- 课表 ----------
@@ -644,6 +639,7 @@ def widget_script_by_token(token: str):
 @app.get("/widget/{token}.json")
 def widget_feed(token: str):
     user = _widget_user(token)
+    _record_use(user["id"])
     view = service.timetable_view(user["id"], None)
     week1 = view.get("week1_monday") if view else None
     _template, version = _widget_template()
@@ -668,6 +664,7 @@ def ics_feed(token: str, request: Request):
         "SELECT id, student_id FROM users WHERE ics_token_hash=?", (crypto.token_hash(token),)).fetchone()
     if not user:
         raise HTTPException(404)
+    _record_use(user["id"])
     version, body = service.ics_body(user["id"], user["student_id"])
     etag = f'W/"{version}"'
     headers = {

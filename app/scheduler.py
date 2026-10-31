@@ -1,18 +1,19 @@
-"""后台定时刷新：单线程串行处理到期用户，只在允许的时段工作，每个用户之间随机间隔。
+"""后台动态刷新：按“谁最逾期”排队，在全站预算内刷；预算随学校的反应自动伸缩。
 
-扫码登录的状态轮询在另一条独立线程里：刷新批次会在用户之间停 5~20 秒，
-不能让扫码的人跟着等。两条线程发往学校的请求都经过 polite 的全站限速。
+没有固定时段和统一间隔：每个人该多久刷一次由 refresh_policy 按活跃度、临近上课、近期变动算出，
+调度器每个 tick 取最逾期的若干人刷新。预算（后台每秒可用的学校请求数）按 AIMD 调整：
+学校报错 / 让我们暂停时立刻减半，正常时每个 tick 加回一点，直到 REFRESH_BUDGET_RPS。
+
+扫码登录的状态轮询在另一条独立线程里，不受刷新批次影响。两条线程发往学校的请求都经过 polite 的全站限速。
 """
 from __future__ import annotations
 
-import datetime as dt
 import logging
 import random
 import threading
-from zoneinfo import ZoneInfo
 
-from . import service
-from .config import REFRESH_ALLOWED_HOURS, SCHEDULER_TICK, TIMEZONE
+from . import polite, service
+from .config import REFRESH_BUDGET_RPS, SCHEDULER_TICK
 from .polite import UpstreamYield, background_upstream
 
 log = logging.getLogger("kebiao.scheduler")
@@ -20,15 +21,45 @@ _stop = threading.Event()
 _threads: list[threading.Thread] = []
 _thread_lock = threading.Lock()
 
+REQUESTS_PER_REFRESH = 2.5      # 一次刷新平均打学校几次（课表页 + 打印数据，偶尔加校历 / 续期）
+MIN_RATE = 0.05                 # 预算下限：学校再不稳也保持极低频地探一探
+RECOVER_STEP = 0.1              # 每个正常 tick 加回上限的 10%
+USER_GAP = (0.3, 1.0)           # 两个人之间的小抖动（秒）
 
-def _allowed_now() -> bool:
-    return dt.datetime.now(ZoneInfo(TIMEZONE)).hour in REFRESH_ALLOWED_HOURS
+
+class Budget:
+    """后台刷新预算（令牌桶 + AIMD）。单位：次刷新。"""
+
+    def __init__(self, max_rps: float = REFRESH_BUDGET_RPS, tick: float = SCHEDULER_TICK):
+        self.max_rate = max_rps
+        self.rate = max_rps
+        self.tick = tick
+        self.tokens = 0.0
+
+    def adjust(self, penalty: float, cooldown: float) -> None:
+        if penalty > 0 or cooldown > 0:
+            self.rate = max(MIN_RATE, self.rate / 2)
+        else:
+            self.rate = min(self.max_rate, self.rate + self.max_rate * RECOVER_STEP)
+
+    def refill(self) -> float:
+        per_tick = self.rate * self.tick / REQUESTS_PER_REFRESH
+        # 最多攒两个 tick 的量：闲了一阵也不会一口气冲向学校
+        self.tokens = min(self.tokens + per_tick, per_tick * 2)
+        return self.tokens
 
 
-def run_once(batch: int = 20) -> int:
+_budget = Budget()
+
+
+def run_once(budget: Budget | None = None) -> int:
+    """一个 tick：调整预算，从最逾期的人开始刷。返回刷了几个人。"""
+    budget = budget or _budget
+    budget.adjust(*polite.health())
+    budget.refill()
     done = 0
-    for uid in service.due_users(batch):
-        if _stop.is_set() or not _allowed_now():
+    for _score, uid in service.candidates(limit=int(budget.tokens) + 5):
+        if _stop.is_set() or budget.tokens < 1:
             break
         if not service.still_due(uid):
             continue
@@ -46,23 +77,23 @@ def run_once(batch: int = 20) -> int:
         except Exception as e:
             # 只记录类型：异常原文可能包含带 ticket 的 URL
             log.error("scheduled refresh crashed user=%s: %s", uid, type(e).__name__)
+        budget.tokens -= 1
         done += 1
-        if _stop.wait(random.uniform(5, 20)):  # 用户之间的抖动间隔
+        if _stop.wait(random.uniform(*USER_GAP)):
             break
     return done
 
 
 def _loop() -> None:
-    while not _stop.wait(SCHEDULER_TICK * random.uniform(0.8, 1.2)):
+    while not _stop.wait(SCHEDULER_TICK * random.uniform(0.9, 1.1)):
         try:
             service.housekeeping()
         except Exception as e:
             log.error("housekeeping failed: %s", type(e).__name__)
-        if _allowed_now():
-            try:
-                run_once()
-            except Exception as e:
-                log.error("scheduler tick failed: %s", type(e).__name__)
+        try:
+            run_once()
+        except Exception as e:
+            log.error("scheduler tick failed: %s", type(e).__name__)
 
 
 def _qr_loop() -> None:

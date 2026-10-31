@@ -562,3 +562,71 @@ def test_widget_colors_match_frontend():
     assert widget.color_map(acts) == {
         "Data Structures": "#6741d9", "大学英语": "#2f9e44", "宏观经济学": "#1971c2",
         "概率论与数理统计": "#74b816", "线性代数": "#ae3ec9", "高等数学": "#e67700"}
+
+
+# ---------- 动态刷新策略 ----------
+
+def test_refresh_policy_targets():
+    from app import refresh_policy as P
+    now = 1_000_000_000.0
+    H, D, M = 3600, 86400, 60
+    soon_class = now + 5 * D  # 一周内有课，但还远
+
+    def t(**kw):
+        return P.target(P.Signals(**{"next_class_at": soon_class, **kw}), now)
+
+    # 活跃度分档
+    assert t(last_seen_at=now - H).seconds == 4 * H and t(last_seen_at=now - H).reason == "常用"
+    assert t(last_seen_at=now - 10 * D).seconds == 6 * H
+    assert t(last_seen_at=now - 30 * D).seconds == 24 * H
+    assert t(last_seen_at=now - 90 * D, next_class_at=now + 10 * D).seconds == 7 * D
+    # 很久没用但这周有课：按距上课时间的 1/3 提速
+    assert t(last_seen_at=now - 90 * D).seconds == 5 * D / 3 and t(last_seen_at=now - 90 * D).reason == "这周有课"
+    # 临近上课：间隔不超过距上课时间的 1/3，最短 30 分钟
+    assert t(last_seen_at=now - H, next_class_at=now + 2 * H).seconds == 40 * M
+    assert t(last_seen_at=now - H, next_class_at=now + H).seconds == 30 * M
+    assert t(last_seen_at=now - H, next_class_at=now + H).reason == "临近上课"
+    # 半夜离早课还有 6 小时：2 小时一刷；不活跃的人临近上课也会提速
+    assert t(last_seen_at=now - H, next_class_at=now + 6 * H).seconds == 2 * H
+    assert t(last_seen_at=now - 30 * D, next_class_at=now + 18 * H).seconds == 6 * H
+    # 近期没课（假期 / 开学前 / 结课后）：至少一天一刷
+    assert t(last_seen_at=now - H, next_class_at=None).seconds == 24 * H
+    assert t(last_seen_at=now - H, next_class_at=now + 20 * D).reason == "近期没有课"
+    # 刚调过课：减半，但不低于 15 分钟
+    changed = t(last_seen_at=now - H, next_class_at=now + H, last_change_at=now - D)
+    assert changed.seconds == 15 * M and "变动" in changed.reason
+    assert t(last_seen_at=now - H, last_change_at=now - D).seconds == 2 * H
+
+
+def test_refresh_policy_overdue_and_requests():
+    from app import refresh_policy as P
+    now = 1_000_000_000.0
+    sig = P.Signals(last_seen_at=now, last_success_at=now - 3600, next_class_at=now + 5 * 86400)
+    assert 0.24 < P.overdue(sig, now) < 0.26  # 目标 4 小时，过了 1 小时
+    assert P.next_due(sig, now) == now + 3 * 3600
+    requested = P.Signals(**{**sig.__dict__, "refresh_requested_at": now - 60})
+    assert P.overdue(requested, now) >= P.REQUESTED_BOOST and P.next_due(requested, now) == now
+    # 请求早于上次成功：已经处理过了，不再加权
+    handled = P.Signals(**{**sig.__dict__, "refresh_requested_at": now - 7200})  # 早于上次成功
+    assert P.overdue(handled, now) < 1
+    assert P.overdue(P.Signals(), now) >= P.REQUESTED_BOOST  # 从没成功过
+
+
+def test_scheduler_budget_aimd():
+    from app import scheduler
+    b = scheduler.Budget(max_rps=0.6, tick=30)
+    assert abs(b.refill() - 0.6 * 30 / scheduler.REQUESTS_PER_REFRESH) < 1e-9
+    assert b.refill() == 2 * 0.6 * 30 / scheduler.REQUESTS_PER_REFRESH  # 最多攒两个 tick
+    b.adjust(penalty=2.0, cooldown=0)
+    assert b.rate == 0.3
+    b.adjust(penalty=0, cooldown=10)
+    assert b.rate == 0.15
+    for _ in range(3):
+        b.adjust(0, 0)
+    assert abs(b.rate - (0.15 + 3 * 0.06)) < 1e-9
+    for _ in range(50):
+        b.adjust(0, 0)
+    assert b.rate == 0.6
+    for _ in range(50):
+        b.adjust(5, 0)
+    assert b.rate == scheduler.MIN_RATE

@@ -5,7 +5,7 @@ import datetime as dt
 import hashlib
 import logging
 
-from .config import REFRESH_INTERVAL_HOURS, TIMEZONE
+from .config import TIMEZONE
 
 log = logging.getLogger("kebiao.ics")
 
@@ -58,10 +58,8 @@ def unit_times(activities: list[dict]) -> dict[int, tuple[str, str]]:
 
 
 def _refresh_interval() -> str:
-    hours = max(1.0, float(REFRESH_INTERVAL_HOURS))
-    if hours == int(hours):
-        return f"PT{int(hours)}H"
-    return f"PT{int(hours * 60)}M"
+    # 服务端按需动态刷新；日历客户端每小时来取一次就够了（多数客户端会自行放宽）
+    return "PT1H"
 
 
 def build(student_id: str, semesters: list[tuple[dict, str]]) -> str:

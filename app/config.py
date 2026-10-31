@@ -46,23 +46,6 @@ def _float(name: str, default: float, minimum: float = 0.0) -> float:
     return value
 
 
-def _hours(name: str, spec: str) -> set[int]:
-    """"0-7,12,22-23" → {0..7,12,22,23}，非法配置直接报错而不是静默少刷。"""
-    out: set[int] = set()
-    for part in filter(None, (p.strip() for p in spec.split(","))):
-        a, sep, b = part.partition("-")
-        try:
-            lo, hi = int(a), int(b) if sep else int(a)
-        except ValueError:
-            raise RuntimeError(f"{name} 的时段格式不正确：{part!r}（示例：0-7,12-13,22-23）") from None
-        if not (0 <= lo <= hi <= 23):
-            raise RuntimeError(f"{name} 的小时必须在 0–23 之间：{part!r}")
-        out.update(range(lo, hi + 1))
-    if not out:
-        raise RuntimeError(f"{name} 不能为空（示例：0-7,12-13,22-23）")
-    return out
-
-
 _key_b64 = os.getenv("APP_SECRET_KEY", "")
 if not _key_b64:
     raise RuntimeError(
@@ -95,13 +78,13 @@ SESSION_DAYS_LONG = _int("SESSION_DAYS_LONG", 180, minimum=1)
 SESSION_DAYS_SHORT = _int("SESSION_DAYS_SHORT", 7, minimum=1)
 
 SCHEDULER_ENABLED = _bool("SCHEDULER_ENABLED", True)
-REFRESH_INTERVAL_HOURS = _float("REFRESH_INTERVAL_HOURS", 12.0, minimum=1.0)
-REFRESH_ALLOWED_HOURS = _hours("REFRESH_ALLOWED_HOURS", os.getenv("REFRESH_ALLOWED_HOURS", "0-7,12-13,22-23"))
 REFRESH_MAX_FAILS = _int("REFRESH_MAX_FAILS", 3, minimum=1)
-MAX_USER_REFRESH_TIMES = _int("MAX_USER_REFRESH_TIMES", 3)  # 用户每天最多自选几个刷新时间
-if len(REFRESH_ALLOWED_HOURS) < MAX_USER_REFRESH_TIMES:
-    raise RuntimeError("MAX_USER_REFRESH_TIMES 不能大于 REFRESH_ALLOWED_HOURS 的小时数")
-SCHEDULER_TICK = _int("SCHEDULER_TICK", 60, minimum=5)
+# 后台刷新每秒最多花掉多少次对学校的请求（全站硬上限是 1 次/秒，留出余量给登录和手动刷新）。
+# 学校出错 / 变慢时调度器会自动减半，恢复后逐步加回这个值。
+REFRESH_BUDGET_RPS = _float("REFRESH_BUDGET_RPS", 0.65, minimum=0.05)
+if REFRESH_BUDGET_RPS > 0.9:
+    raise RuntimeError("REFRESH_BUDGET_RPS 不能超过 0.9（全站上限 1 次/秒，要给登录和手动刷新留余量）")
+SCHEDULER_TICK = _int("SCHEDULER_TICK", 30, minimum=5)
 # 手动刷新：两次之间至少隔几秒（无论成败）；课表在多少秒内刚抓过就直接用已存的，不再打扰学校
 MANUAL_REFRESH_MIN_GAP = _int("MANUAL_REFRESH_MIN_GAP", 20)
 MANUAL_REFRESH_FRESH_SECONDS = _int("MANUAL_REFRESH_FRESH_SECONDS", 120)

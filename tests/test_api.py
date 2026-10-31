@@ -534,18 +534,30 @@ def test_captcha_stops_retry(up):
     up.captcha.add("2023001")
     r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
     assert r["status"] == "captcha"
-    assert service.due_users(10) == []
+    assert _queued(far_future=True) == []
 
 
-def test_scheduler_updates_last_refresh(up, monkeypatch):
+def _queued(far_future=False):
+    now = db.now() + (60 * 86400 if far_future else 0)
+    return [uid for _score, uid in service.candidates(now)]
+
+
+def _budget(tokens=10):
+    b = scheduler.Budget(max_rps=0.65, tick=30)
+    b.tokens = tokens
+    b.refill = lambda: b.tokens
+    return b
+
+
+def test_scheduler_refreshes_overdue_users(up, monkeypatch):
     c = TestClient(app)
     _login(c, "2023001")
     before = c.get("/api/me").json()["last_refresh_at"]
+    assert _queued() == []  # 刚登录，数据新鲜
     with db.tx() as conn:
-        conn.execute("UPDATE users SET next_refresh_at=0")
-    monkeypatch.setattr(scheduler, "_allowed_now", lambda: True)
+        conn.execute("UPDATE users SET last_success_at=last_success_at-30*86400")
     monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
-    assert scheduler.run_once() == 1
+    assert scheduler.run_once(_budget()) == 1
     me = c.get("/api/me").json()
     assert me["last_refresh_at"] > before and me["next_refresh_at"] > me["last_refresh_at"]
     assert c.get("/api/refresh-log").json()[0]["trigger"] == "scheduled"
@@ -620,7 +632,7 @@ def test_background_mfa_stops_retry(up):
     up.mfa.add("2023001")
     r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
     assert r["status"] == "needs_rebind" and "短信" in r["message"]
-    assert service.due_users(10) == []
+    assert _queued(far_future=True) == []
 
 
 def test_device_id_is_stable_per_user(up):
@@ -632,46 +644,6 @@ def test_device_id_is_stable_per_user(up):
     assert len(up.devices) == 3 and len(set(up.devices)) == 1  # 两次站点登录 + 一次后台重登，同一设备
     _login(TestClient(app), "2023002")
     assert up.devices[-1] != up.devices[0]
-
-
-def test_next_scheduled_picks_next_chosen_hour():
-    import datetime as dt
-    from zoneinfo import ZoneInfo
-    tz = ZoneInfo("Asia/Shanghai")
-    now = dt.datetime(2026, 10, 28, 14, 50, tzinfo=tz).timestamp()
-    for _ in range(20):
-        t = dt.datetime.fromtimestamp(service.next_scheduled([6, 22], now), tz)
-        assert (t.day, t.hour) == (28, 22) and t.minute <= 45
-    # 距离不足 1 小时的整点跳过，顺延到下一个
-    now = dt.datetime(2026, 10, 28, 21, 30, tzinfo=tz).timestamp()
-    t = dt.datetime.fromtimestamp(service.next_scheduled([6, 22], now), tz)
-    assert (t.day, t.hour) == (29, 6)
-    # 没选 → 默认间隔 ±15%
-    d = service.next_scheduled(None, now) - now
-    assert 12 * 3600 * 0.85 <= d <= 12 * 3600 * 1.15
-
-
-def test_refresh_hours_api(up):
-    import datetime as dt
-    from zoneinfo import ZoneInfo
-    c = TestClient(app)
-    _login(c, "2023001")
-    me = c.get("/api/me").json()
-    assert me["refresh_hours"] == [] and 22 in me["refresh_allowed_hours"] and me["refresh_max_times"] == 3
-    r = c.post("/api/settings/refresh-hours", headers=_csrf(c), json={"hours": [5, 22]}).json()
-    assert dt.datetime.fromtimestamp(r["next_refresh_at"], ZoneInfo("Asia/Shanghai")).hour in (5, 22)
-    assert c.get("/api/me").json()["refresh_hours"] == [5, 22]
-    # 上课时段 / 超过 3 个 / 无 CSRF 都拒绝
-    assert c.post("/api/settings/refresh-hours", headers=_csrf(c), json={"hours": [9]}).status_code == 400
-    assert c.post("/api/settings/refresh-hours", headers=_csrf(c), json={"hours": [0, 1, 2, 3]}).status_code == 400
-    assert c.post("/api/settings/refresh-hours", headers=ORIGIN, json={"hours": [1]}).status_code == 403
-    # 成功刷新后也按自选时间排下一次
-    c.post("/api/refresh", headers=_csrf(c), json={})
-    nxt = c.get("/api/me").json()["next_refresh_at"]
-    assert dt.datetime.fromtimestamp(nxt, ZoneInfo("Asia/Shanghai")).hour in (5, 22)
-    # 清空 = 恢复默认
-    c.post("/api/settings/refresh-hours", headers=_csrf(c), json={"hours": []})
-    assert c.get("/api/me").json()["refresh_hours"] == []
 
 
 def _qr_start(c, keep=False):
@@ -1009,10 +981,10 @@ def test_corrupt_semester_json_does_not_break_me(up):
     c = TestClient(app)
     _login(c, "2023001")
     with db.tx() as conn:
-        conn.execute("UPDATE users SET semesters_json=?, refresh_hours=?, enc_ics_token=? WHERE student_id=?",
-                     ("not json", "[[", b"\x01bad", "2023001"))
+        conn.execute("UPDATE users SET semesters_json=?, enc_ics_token=? WHERE student_id=?",
+                     ("not json", b"\x01bad", "2023001"))
     me = c.get("/api/me").json()
-    assert me["semesters"] == [] and me["refresh_hours"] == [] and me["ics_url"] is None
+    assert me["semesters"] == [] and me["ics_url"] is None
 
 
 def test_frontend_index_references_existing_assets(up):
@@ -1356,3 +1328,114 @@ def test_widget_token_removed_with_account(up):
     path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
     c.post("/api/account/delete", headers=_csrf(c))
     assert TestClient(app).get(path).status_code == 404
+
+
+# ---------- 动态刷新 ----------
+
+def _set_week1(monday_iso):
+    with db.tx() as conn:
+        conn.execute("""INSERT INTO semesters(semester_id, name, week1_monday) VALUES(161, '2026-2027-1', ?)
+                        ON CONFLICT(semester_id) DO UPDATE SET week1_monday=excluded.week1_monday""", (monday_iso,))
+
+
+def _row(student_id, cols="*"):
+    return db.connect().execute(f"SELECT {cols} FROM users WHERE student_id=?", (student_id,)).fetchone()
+
+
+def test_next_class_computed_from_saved_timetable(up):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    today = dt.datetime.now(tz).date()
+    _set_week1((today - dt.timedelta(days=today.weekday())).isoformat())  # 本周是第 1 周
+    c = TestClient(app)
+    _login(c, "2023001")
+    at = _row("2023001")["next_class_at"]
+    # 示例课程：每周一 08:20，1~16 周
+    t = dt.datetime.fromtimestamp(at, tz)
+    assert t.weekday() == 0 and (t.hour, t.minute) == (8, 20) and at > db.now()
+    me = c.get("/api/me").json()
+    assert me["refresh_target_minutes"] >= 15 and me["refresh_reason"]
+
+
+def test_opening_stale_page_queues_background_refresh(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.get("/api/me").json()["refresh_pending"] is False
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_success_at=last_success_at-30*86400")
+    me = c.get("/api/me").json()
+    assert me["refresh_pending"] is True and me["next_refresh_at"] <= db.now() + 1
+    assert _row("2023001", "refresh_request_reason")[0] == "打开时数据已过期"
+    assert _queued()[0] == service_uid("2023001")
+    # 刷新之后请求清掉
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    assert c.get("/api/me").json()["refresh_pending"] is False
+
+
+def test_widget_and_ics_record_activity(up, monkeypatch):
+    monkeypatch.setattr(service, "_touched", {})
+    c = TestClient(app)
+    _login(c, "2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_seen_at=NULL")
+    service._touched.clear()
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    service._touched.clear()
+    TestClient(app).get(path)
+    assert _row("2023001", "last_seen_at")[0] > db.now() - 5
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_seen_at=NULL")
+    service._touched.clear()
+    ics = c.post("/api/ics/rotate", headers=_csrf(c)).json()["ics_url"].removeprefix("http://testserver")
+    service._touched.clear()
+    TestClient(app).get(ics)
+    assert _row("2023001", "last_seen_at")[0] > db.now() - 5
+
+
+def test_touch_is_throttled(up, monkeypatch):
+    _login(TestClient(app), "2023001")
+    uid = service_uid("2023001")
+    service._touched.clear()
+    service.touch(uid, now=1000.0)
+    service.touch(uid, now=1000.0 + 60)  # 10 分钟内不再写库
+    assert _row("2023001", "last_seen_at")[0] == 1000.0
+    service.touch(uid, now=1000.0 + service.TOUCH_EVERY + 1)
+    assert _row("2023001", "last_seen_at")[0] == 1000.0 + service.TOUCH_EVERY + 1
+
+
+def test_change_alerts_classmates(up):
+    up.course_override = "高数"  # 两个人上同一节课
+    a, b = TestClient(app), TestClient(app)
+    _login(a, "2023001")
+    _login(b, "2023002")
+    assert _row("2023002", "refresh_requested_at")[0] is None
+    up.room_override = "B202"  # 调了教室
+    a.post("/api/refresh", headers=_csrf(a), json={})
+    row = _row("2023002", "refresh_requested_at, refresh_request_reason")
+    assert row[0] is not None and row[1] == "同班同学的课表有变动"
+    assert _queued()[0] == service_uid("2023002")  # 同学排到队首
+    assert _row("2023001", "last_change_at")[0] is not None
+    # 同学刷新后（也看到了新教室）请求清掉，不会连锁再提醒回去
+    b.post("/api/refresh", headers=_csrf(b), json={})
+    assert _row("2023002", "refresh_requested_at")[0] is None
+    assert _row("2023001", "refresh_requested_at")[0] is None
+
+
+def test_unrelated_users_not_alerted(up):
+    a, b = TestClient(app), TestClient(app)
+    _login(a, "2023001")  # 高数
+    _login(b, "2023002")  # 英语
+    up.course_override = "线代"
+    a.post("/api/refresh", headers=_csrf(a), json={})
+    assert _row("2023002", "refresh_requested_at")[0] is None
+
+
+def test_failure_clears_pending_request(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    service.request_refresh(service_uid("2023001"), "test")
+    up.expired.add("2023001")
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    assert _row("2023001", "refresh_requested_at")[0] is None
+    assert service_uid("2023001") not in _queued(far_future=True)  # needs_rebind：暂停

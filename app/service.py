@@ -21,13 +21,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
-from . import cas, crypto, db, ics, jwxt, notify
+from . import cas, crypto, db, ics, jwxt, notify, refresh_policy, widget
 from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
-    MAX_USER_REFRESH_TIMES,
-    REFRESH_ALLOWED_HOURS,
-    REFRESH_INTERVAL_HOURS,
     REFRESH_MAX_FAILS,
     TIMEZONE,
     semester_overrides,
@@ -609,8 +606,15 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
             changes = _save_success(c, uid, s, data, trigger)
     except UserGone:
         return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
-    if changes and trigger == "scheduled":
-        _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
+    if changes:
+        if trigger == "scheduled":
+            _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
+        try:
+            n = alert_classmates(uid, changes["semester_id"], changes["slots"], changes["removed"])
+            if n:
+                log.info("user %s: timetable changed, asked %s classmates to refresh", uid, n)
+        except Exception as e:
+            log.warning("alert classmates failed for user %s: %s", uid, type(e).__name__)
     return {"ok": True}
 
 
@@ -622,59 +626,201 @@ def _notify_safely(fn, *args) -> None:
         log.warning("notify %s failed for user %s: %s", fn.__name__, args[0], type(e).__name__)
 
 
-def next_scheduled(hours: list[int] | None, now: float | None = None) -> float:
-    """下次自动刷新时间。
+# ---------- 动态刷新：信号、下一节课、按需请求 ----------
 
-    用户选了整点：取最近一个（至少 1 小时之后的）整点，再在该小时内随机偏移 0~45 分钟，
-    避免所有人同一时刻打到学校。没选：按默认间隔 ± 15% 抖动。
-    """
+_SIGNAL_COLS = "last_seen_at, last_success_at, last_change_at, next_class_at, refresh_requested_at"
+NEXT_CLASS_LOOKAHEAD_DAYS = 60
+NEXT_CLASS_RECHECK = 6 * 3600   # 两个月内都没课时，隔这么久再按已存课表重算一次（校历可能改了）
+TOUCH_EVERY = 600               # 秒：last_seen_at 最多每 10 分钟写一次库
+
+
+def signals_of(row) -> refresh_policy.Signals:
+    return refresh_policy.Signals(
+        last_seen_at=row["last_seen_at"], last_success_at=row["last_success_at"],
+        last_change_at=row["last_change_at"], next_class_at=row["next_class_at"],
+        refresh_requested_at=row["refresh_requested_at"])
+
+
+def compute_next_class(uid: int, now: float | None = None, conn=None) -> float | None:
+    """按已存的当前学期课表算下一节课的开始时刻（不访问学校）。"""
+    conn = conn or db.connect()
     now = db.now() if now is None else now
-    if not hours:
-        return now + REFRESH_INTERVAL_HOURS * 3600 * random.uniform(0.85, 1.15)
-    tz = ZoneInfo(TIMEZONE)
-    base = dt.datetime.fromtimestamp(now, tz).replace(minute=0, second=0, microsecond=0)
-    starts = sorted(
-        (base.replace(hour=h) + dt.timedelta(days=d)).timestamp()
-        for d in (0, 1, 2) for h in hours
-    )
-    start = next(s for s in starts if s >= now + 3600)
-    return start + random.uniform(0, 45 * 60)
-
-
-def validate_refresh_hours(hours: list[int]) -> list[int]:
-    hours = sorted(set(hours))
-    if len(hours) > MAX_USER_REFRESH_TIMES:
-        raise ValueError(f"每天最多选择 {MAX_USER_REFRESH_TIMES} 个刷新时间")
-    bad = [h for h in hours if h not in REFRESH_ALLOWED_HOURS]
-    if bad:
-        raise ValueError(f"{', '.join(f'{h}:00' for h in bad)} 不在允许的时段内（为减轻学校服务器压力，仅开放夜间和午间）")
-    return hours
-
-
-def set_refresh_hours(uid: int, hours: list[int]) -> float | None:
-    """保存用户自选刷新时间，并据此重排下次刷新（暂停/退避中的状态不动）。"""
-    hours = validate_refresh_hours(hours)
-    with db.tx() as c:
-        c.execute("UPDATE users SET refresh_hours=? WHERE id=?", (json.dumps(hours) if hours else None, uid))
-        row = c.execute("SELECT status, next_refresh_at FROM users WHERE id=?", (uid,)).fetchone()
-        if row is None:
-            raise KeyError(uid)
-        if row["status"] != "ok" or row["next_refresh_at"] is None:
-            return row["next_refresh_at"]
-        nxt = next_scheduled(hours)
-        c.execute("UPDATE users SET next_refresh_at=? WHERE id=?", (nxt, uid))
-        return nxt
-
-
-def _user_hours(c, uid: int) -> list[int] | None:
-    row = c.execute("SELECT refresh_hours FROM users WHERE id=?", (uid,)).fetchone()
-    if not row or not row["refresh_hours"]:
+    user = conn.execute("SELECT current_semester_id FROM users WHERE id=?", (uid,)).fetchone()
+    view = timetable_view(uid, user["current_semester_id"] if user else None)
+    if not view or not view.get("week1_monday"):
         return None
     try:
-        hours = json.loads(row["refresh_hours"])
-    except (TypeError, ValueError):
+        week1 = dt.date.fromisoformat(view["week1_monday"])
+    except ValueError:
         return None
-    return [h for h in hours if isinstance(h, int)] if isinstance(hours, list) else None
+    tz = ZoneInfo(TIMEZONE)
+    today = dt.datetime.fromtimestamp(now, tz).date()
+    acts = [a for a in (view.get("activities") or []) if isinstance(a, dict)]
+    units = ics.unit_times(acts)
+    for i in range(NEXT_CLASS_LOOKAHEAD_DAYS):
+        day = today + dt.timedelta(days=i)
+        for lesson in widget.lessons_on(day, acts, week1, units, {}):
+            h, m = map(int, lesson["start"].split(":"))
+            at = dt.datetime.combine(day, dt.time(h, m), tz).timestamp()
+            if at > now:
+                return at
+    return None
+
+
+def _store_next_class(c, uid: int, now: float) -> float | None:
+    at = compute_next_class(uid, now, c)
+    c.execute("UPDATE users SET next_class_at=?, next_class_checked_at=? WHERE id=?", (at, now, uid))
+    return at
+
+
+def refresh_outlook(uid: int, now: float | None = None) -> dict:
+    """给界面展示：目标间隔、原因、预计下次刷新。"""
+    now = db.now() if now is None else now
+    row = db.connect().execute(f"SELECT status, next_refresh_at, {_SIGNAL_COLS} FROM users WHERE id=?",
+                               (uid,)).fetchone()
+    if not row:
+        return {}
+    sig = signals_of(row)
+    tgt = refresh_policy.target(sig, now)
+    if row["status"] in ("needs_rebind", "captcha"):
+        nxt = None
+    elif row["status"] == "error":
+        nxt = row["next_refresh_at"]
+    else:
+        nxt = refresh_policy.next_due(sig, now)
+    pending = bool(sig.refresh_requested_at and sig.refresh_requested_at > (sig.last_success_at or 0))
+    return {"target_minutes": round(tgt.seconds / 60), "reason": tgt.reason, "next_refresh_at": nxt,
+            "pending": pending and row["status"] == "ok"}
+
+
+_touched: dict[int, float] = {}
+_touch_lock = threading.Lock()
+
+
+def touch(uid: int, now: float | None = None) -> None:
+    """记录“这个人还在用”（网站 / 小组件 / 日历订阅）。内存里节流，避免每次请求都写库。"""
+    now = db.now() if now is None else now
+    with _touch_lock:
+        if now - _touched.get(uid, 0) < TOUCH_EVERY:
+            return
+        _touched[uid] = now
+    with db.tx() as c:
+        c.execute("UPDATE users SET last_seen_at=? WHERE id=?", (now, uid))
+
+
+def request_refresh(uid: int, reason: str, now: float | None = None, conn=None) -> None:
+    """请求尽快刷新：调度器会把这个人排到队首（仍受全站预算约束）。"""
+    now = db.now() if now is None else now
+    sql = ("""UPDATE users SET refresh_requested_at=?, refresh_request_reason=?
+              WHERE id=? AND status='ok' AND (refresh_requested_at IS NULL
+                    OR refresh_requested_at <= COALESCE(last_success_at, 0))""")
+    if conn is not None:
+        conn.execute(sql, (now, reason, uid))
+    else:
+        with db.tx() as c:
+            c.execute(sql, (now, reason, uid))
+
+
+def request_if_stale(uid: int, now: float | None = None) -> bool:
+    """有人打开页面 / 小组件时：数据已经比他的目标间隔还旧，就排一次后台刷新。返回是否排了。"""
+    now = db.now() if now is None else now
+    row = db.connect().execute(f"SELECT status, {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or row["status"] != "ok":
+        return False
+    sig = signals_of(row)
+    if sig.refresh_requested_at and sig.refresh_requested_at > (sig.last_success_at or 0):
+        return True  # 已经在排队
+    if refresh_policy.overdue(sig, now) < 1:
+        return False
+    request_refresh(uid, "打开时数据已过期", now)
+    return True
+
+
+def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, int]]:
+    """该刷的人，按逾期程度从高到低：[(score, uid)]。顺带惰性重算过期的“下一节课”。"""
+    now = db.now() if now is None else now
+    conn = db.connect()
+    rows = conn.execute(
+        f"""SELECT id, status, next_refresh_at, next_class_checked_at, {_SIGNAL_COLS} FROM users
+            WHERE status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?)""",
+        (now,)).fetchall()
+    stale_next = [r["id"] for r in rows
+                  if (r["next_class_at"] and r["next_class_at"] <= now)
+                  or (not r["next_class_at"] and now - (r["next_class_checked_at"] or 0) > NEXT_CLASS_RECHECK)]
+    if stale_next:
+        with db.tx() as c:
+            fresh = {uid: _store_next_class(c, uid, now) for uid in stale_next}
+    else:
+        fresh = {}
+    out = []
+    for r in rows:
+        sig = signals_of(r)
+        if r["id"] in fresh:
+            sig = refresh_policy.Signals(sig.last_seen_at, sig.last_success_at, sig.last_change_at,
+                                         fresh[r["id"]], sig.refresh_requested_at)
+        # 失败退避已到期的人按“该刷了”处理，但排在主动请求之后
+        score = max(refresh_policy.overdue(sig, now), 1.0) if r["status"] == "error" else refresh_policy.overdue(sig, now)
+        if score >= 1:
+            out.append((score, r["id"]))
+    out.sort(reverse=True)
+    return out[:limit]
+
+
+def still_due(uid: int, now: float | None = None) -> bool:
+    """真正开刷前再看一眼：期间可能有人手动刷过了。"""
+    now = db.now() if now is None else now
+    row = db.connect().execute(f"SELECT status, next_refresh_at, {_SIGNAL_COLS} FROM users WHERE id=?",
+                               (uid,)).fetchone()
+    if not row:
+        return False
+    if row["status"] == "error":
+        return bool(row["next_refresh_at"]) and row["next_refresh_at"] <= now
+    return row["status"] == "ok" and refresh_policy.overdue(signals_of(row), now) >= 1
+
+
+# ---------- 同班同学：一人发现调课，其他人立刻排上 ----------
+
+def slot_key(semester_id, a: dict) -> str:
+    """同一节课的身份：课程、教师、星期、开始节次、周次（不含教室和具体钟点——它们正是会被调的部分）。"""
+    teachers = ",".join(sorted(t for t in (a.get("teachers") or []) if isinstance(t, str)))
+    weeks = a.get("weeksStr") or ",".join(str(w) for w in (a.get("weekIndexes") or []))
+    raw = f"{semester_id}|{a.get('courseName')}|{teachers}|{a.get('weekday')}|{a.get('startUnit')}|{weeks}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:24]
+
+
+def _store_slots(c, uid: int, semester_id, activities: list) -> None:
+    keys = {slot_key(semester_id, a) for a in activities if isinstance(a, dict)}
+    c.execute("DELETE FROM lesson_slots WHERE user_id=? AND semester_id=?", (uid, semester_id))
+    c.executemany("INSERT OR IGNORE INTO lesson_slots(user_id, semester_id, slot_key) VALUES(?,?,?)",
+                  [(uid, semester_id, k) for k in keys])
+
+
+def alert_classmates(uid: int, semester_id, keys: list[str], old_lines: list[str]) -> int:
+    """被改动的课（按改动前的身份）还有谁在上，且他存的课表里还是旧安排：请求他尽快刷新。返回人数。
+
+    只提醒“还停留在旧安排”的人：已经刷到新安排的同学不会被反复叫醒，也不会互相连锁提醒。
+    """
+    if not keys or not old_lines:
+        return 0
+    now = db.now()
+    stale_lines = set(old_lines)
+    alerted = 0
+    with db.tx() as c:
+        marks = ",".join("?" * len(keys))
+        rows = c.execute(
+            f"""SELECT DISTINCT s.user_id, t.data_json FROM lesson_slots s
+                JOIN timetables t ON t.user_id = s.user_id AND t.semester_id = s.semester_id
+                WHERE s.semester_id=? AND s.slot_key IN ({marks}) AND s.user_id<>?""",
+            (semester_id, *keys, uid)).fetchall()
+        for r in rows:
+            try:
+                acts = json.loads(r["data_json"]).get("activities") or []
+            except (TypeError, ValueError, AttributeError):
+                acts = []
+            if any(isinstance(a, dict) and _lesson_line(a) in stale_lines for a in acts):
+                request_refresh(r["user_id"], "同班同学的课表有变动", now, conn=c)
+                alerted += 1
+    return alerted
 
 
 _WEEKDAY = "一二三四五六日"
@@ -713,7 +859,10 @@ def _old_activities(c, uid: int, semester_id) -> list | None:
 
 
 def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
-    """保存结果；返回课表变动 {"semester_name", "added", "removed"}（首次抓取或无变化时为 None）。"""
+    """保存结果；返回课表变动 {"semester_name", "added", "removed", "slots"}（首次抓取或无变化时为 None）。
+
+    slots：被改动的课在改动前的 slot_key，用来提醒同班同学。
+    """
     now = db.now()
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         raise UserGone(uid)
@@ -727,20 +876,29 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
          json.dumps({"student": data["student"], "activities": data["activities"]}, ensure_ascii=False), now))
     c.execute(
         """UPDATE users SET name=?, enc_cookies=?, status='ok', fail_count=0, last_error=NULL,
-           last_refresh_at=?, last_success_at=?, next_refresh_at=?, current_semester_id=?, semesters_json=?
+           last_refresh_at=?, last_success_at=?, current_semester_id=?, semesters_json=?,
+           refresh_requested_at=NULL, refresh_request_reason=NULL
            WHERE id=?""",
         (data["student"].get("name"), crypto.encrypt_json(dump_cookies(s), "cookies", uid), now, now,
-         next_scheduled(_user_hours(c, uid)), data["current_semester_id"],
-         json.dumps(data["semesters"], ensure_ascii=False), uid))
+         data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False), uid))
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
-    if old is None:
-        return None
-    added, removed = timetable_diff(old, data["activities"])
-    if not (added or removed):
-        return None
-    return {"semester_name": data["semester_name"], "added": added, "removed": removed}
+    _store_slots(c, uid, data["semester_id"], data["activities"])
+    changes = None
+    if old is not None:
+        added, removed = timetable_diff(old, data["activities"])
+        if added or removed:
+            new_lines = {_lesson_line(a) for a in data["activities"] if isinstance(a, dict)}
+            slots = sorted({slot_key(data["semester_id"], a) for a in old
+                            if isinstance(a, dict) and _lesson_line(a) not in new_lines})
+            changes = {"semester_name": data["semester_name"], "semester_id": data["semester_id"],
+                       "added": added, "removed": removed, "slots": slots}
+            c.execute("UPDATE users SET last_change_at=? WHERE id=?", (now, uid))
+    _store_next_class(c, uid, now)
+    row = c.execute(f"SELECT {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
+    c.execute("UPDATE users SET next_refresh_at=? WHERE id=?", (refresh_policy.next_due(signals_of(row), now), uid))
+    return changes
 
 
 def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
@@ -758,7 +916,9 @@ def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
                 message = f"已连续失败 {fails} 次。{message}"
         else:
             nxt = None  # 验证码 / 需重新绑定：停止自动重试
-        c.execute("UPDATE users SET status=?, fail_count=?, last_error=?, last_refresh_at=?, next_refresh_at=? WHERE id=?",
+        # 失败后由退避控制重试，清掉待刷新请求，避免反复抢队首
+        c.execute("""UPDATE users SET status=?, fail_count=?, last_error=?, last_refresh_at=?, next_refresh_at=?,
+                     refresh_requested_at=NULL, refresh_request_reason=NULL WHERE id=?""",
                   (status, fails, message, now, nxt, uid))
         c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,0,?)",
                   (uid, now, trigger, message))
@@ -844,7 +1004,7 @@ def account_snapshot(uid: int) -> dict | None:
     """刷新接口带回的账号状态，前端不必再请求 /api/me。"""
     row = db.connect().execute(
         """SELECT student_id, name, cred_mode, status, last_error, fail_count, last_refresh_at,
-                  last_success_at, next_refresh_at, current_semester_id, semesters_json, refresh_hours
+                  last_success_at, next_refresh_at, current_semester_id, semesters_json
            FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return None
@@ -860,22 +1020,16 @@ def account_snapshot(uid: int) -> dict | None:
         "next_refresh_at": row["next_refresh_at"],
         "current_semester_id": row["current_semester_id"],
         "semesters": _json_list(row["semesters_json"]),
-        "refresh_hours": _json_list(row["refresh_hours"]),
+        **_outlook_fields(uid),
     }
 
 
-def due_users(limit: int) -> list[int]:
-    rows = db.connect().execute(
-        """SELECT id FROM users WHERE status IN ('ok','error') AND next_refresh_at IS NOT NULL
-           AND next_refresh_at <= ? ORDER BY next_refresh_at LIMIT ?""", (db.now(), limit)).fetchall()
-    return [r["id"] for r in rows]
+def _outlook_fields(uid: int) -> dict:
+    o = refresh_outlook(uid)
+    return {"next_refresh_at": o.get("next_refresh_at"), "refresh_target_minutes": o.get("target_minutes"),
+            "refresh_reason": o.get("reason")}
 
 
-def still_due(uid: int) -> bool:
-    row = db.connect().execute(
-        """SELECT 1 FROM users WHERE id=? AND status IN ('ok','error') AND next_refresh_at IS NOT NULL
-           AND next_refresh_at <= ?""", (uid, db.now())).fetchone()
-    return row is not None
 
 
 def housekeeping() -> None:

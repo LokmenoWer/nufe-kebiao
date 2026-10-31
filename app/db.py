@@ -27,19 +27,33 @@ CREATE TABLE IF NOT EXISTS users (
     last_error       TEXT,
     last_refresh_at  REAL,
     last_success_at  REAL,
-    next_refresh_at  REAL,
+    next_refresh_at  REAL,             -- 状态 ok：预计下次刷新（展示用）；error：退避到这之前不重试；NULL：暂停
     current_semester_id INTEGER,
     semesters_json   TEXT,
     ics_token_hash   TEXT UNIQUE,
     enc_ics_token    BLOB,
     enc_device_id    BLOB,             -- 本服务作为该用户"设备"的指纹，二次认证/信任设备绑定于此
-    refresh_hours    TEXT,             -- 用户自选的每日刷新整点（JSON 列表）；NULL = 按默认间隔
+    refresh_hours    TEXT,             -- 已废弃（旧版的自选刷新整点），保留列以兼容老库
     enc_email        BLOB,             -- AES-GCM(已验证的通知邮箱)
     email_verified_at REAL,
     notify_status    INTEGER NOT NULL DEFAULT 1,   -- 自动刷新暂停 / 连续失败时发邮件
     notify_changes   INTEGER NOT NULL DEFAULT 1,   -- 后台刷新发现课表变动时发邮件
     widget_token_hash TEXT,            -- 桌面小组件只读链接的 token 哈希（唯一索引见 init）
-    enc_widget_token BLOB
+    enc_widget_token BLOB,
+    -- 动态刷新的信号（见 refresh_policy.py）
+    last_seen_at     REAL,             -- 最近一次打开网站 / 小组件 / 日历订阅
+    last_change_at   REAL,             -- 最近一次刷新发现课表有变动
+    next_class_at    REAL,             -- 下一节课的开始时刻（按已存课表算，过期后惰性重算）
+    next_class_checked_at REAL,
+    refresh_requested_at  REAL,        -- 有人请求尽快刷新（打开了过期的页面 / 同班同学课表有变动）
+    refresh_request_reason TEXT
+);
+-- 谁上同一节课：一个人发现调课，同班其他人立刻排到队首
+CREATE TABLE IF NOT EXISTS lesson_slots (
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    semester_id INTEGER NOT NULL,
+    slot_key    TEXT NOT NULL,
+    PRIMARY KEY (user_id, semester_id, slot_key)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash  TEXT PRIMARY KEY,
@@ -144,11 +158,14 @@ def init() -> None:
     for col, typ in (("enc_device_id", "BLOB"), ("refresh_hours", "TEXT"), ("enc_email", "BLOB"),
                      ("email_verified_at", "REAL"), ("notify_status", "INTEGER NOT NULL DEFAULT 1"),
                      ("notify_changes", "INTEGER NOT NULL DEFAULT 1"), ("widget_token_hash", "TEXT"),
-                     ("enc_widget_token", "BLOB")):
+                     ("enc_widget_token", "BLOB"), ("last_seen_at", "REAL"), ("last_change_at", "REAL"),
+                     ("next_class_at", "REAL"), ("next_class_checked_at", "REAL"),
+                     ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
     # 老库是 ALTER 补的列，唯一索引只能在补完列之后建
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget ON users(widget_token_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_slots_key ON lesson_slots(semester_id, slot_key)")
     session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
     if "persistent" not in session_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")

@@ -84,7 +84,53 @@ class TimetableController {
     this.renderAll();
     this.loadTimetable({ initial: true });
     this.timer = window.setInterval(() => this.tick(), 30_000);
+    this.watchBackgroundRefresh();
     return this;
+  }
+
+  /**
+   * 打开页面时数据已过期，服务器会排一次后台刷新（me.refresh_pending）。
+   * 每 15 秒看一眼，最多 2 分钟；刷完就静默换上新课表，不闪骨架屏。
+   */
+  watchBackgroundRefresh() {
+    if (!this.me?.refresh_pending || this.pendingWatch) return;
+    const since = this.me.last_success_at || 0;
+    let tries = 0;
+    const stop = () => {
+      window.clearInterval(this.pendingWatch);
+      this.pendingWatch = 0;
+    };
+    this.pendingWatch = window.setInterval(async () => {
+      tries += 1;
+      try {
+        const me = await api.get("api/me");
+        if (this.destroyed) return stop();
+        if ((me.last_success_at || 0) > since) {
+          stop();
+          this.me = { ...this.me, ...me };
+          this.onMeChanged?.(this.me);
+          await this.reloadQuietly();
+          return;
+        }
+        if (!me.refresh_pending || tries >= 8) stop();
+      } catch {
+        stop();
+      }
+    }, 15_000);
+    this.disposers.push(stop);
+  }
+
+  async reloadQuietly() {
+    const token = ++this.loadToken;
+    try {
+      const data = await api.get(withQuery("api/timetable", { semester_id: this.state.semesterId }));
+      if (this.destroyed || token !== this.loadToken) return;
+      this.state.timetable = data;
+      this.state.error = null;
+    } catch {
+      return;
+    }
+    this.renderAll();
   }
 
   destroy() {

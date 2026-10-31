@@ -106,6 +106,12 @@ def _record(status: int | None, retry_after: str | None = None) -> None:
             _penalty = _penalty / 2 if _penalty >= 0.5 else 0.0
 
 
+def health() -> tuple[float, float]:
+    """(当前惩罚间隔, 剩余暂停秒数)：调度器据此调整后台刷新预算。"""
+    with _health_lock:
+        return _penalty, max(0.0, _cooldown_until - time.monotonic())
+
+
 def cooldown_remaining() -> float:
     with _health_lock:
         return max(0.0, _cooldown_until - time.monotonic())

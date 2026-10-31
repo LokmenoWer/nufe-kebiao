@@ -30,6 +30,15 @@ function iconButton(label, iconName, onClick, className = "btn btn-icon btn-ghos
   }, icon(iconName));
 }
 
+function refreshPace(me) {
+  if (me.status === "needs_rebind" || me.status === "captcha") return "已暂停（需要重新登录）";
+  const minutes = me.refresh_target_minutes;
+  if (!minutes) return "—";
+  const every = minutes < 60 ? `${minutes} 分钟` : minutes % 60 === 0 && minutes < 1440
+    ? `${minutes / 60} 小时` : minutes < 1440 ? `${(minutes / 60).toFixed(1)} 小时` : `${Math.round(minutes / 1440)} 天`;
+  return `约每 ${every}${me.refresh_reason ? `（${me.refresh_reason}）` : ""}`;
+}
+
 export function openSettings({
   me,
   onUpdated,
@@ -39,9 +48,7 @@ export function openSettings({
   onAccountDeleted,
 } = {}) {
   let current = { ...me };
-  let hours = new Set(Array.isArray(current.refresh_hours) ? current.refresh_hours : []);
   let icsUrl = current.ics_url || null;
-  let busy = false;
 
   const closeBtn = iconButton("关闭设置", "x", () => dialog.close("close"));
 
@@ -56,12 +63,7 @@ export function openSettings({
   }, "删除已保存的密码");
 
   const refreshInfo = h("dl", { class: "kv" });
-  const chips = h("div", { class: "chips", role: "group", "aria-label": "每天自动刷新时间" });
-  const saveHoursBtn = h("button", {
-    type: "button", class: "btn btn-sm", disabled: true,
-    onClick: () => saveHours(),
-  }, "保存刷新时间");
-  const refreshHint = h("p", { class: "hint" });
+
   const logList = h("ul", { class: "log-list" }, h("li", { class: "muted" }, "加载中…"));
   const logDetails = h("details", { class: "log-details" },
     h("summary", {}, "最近刷新记录"),
@@ -138,10 +140,8 @@ export function openSettings({
 
     section("自动刷新",
       refreshInfo,
-      h("p", { class: "hint" }, "选择每天自动刷新的整点（最多几个见下方说明）。实际开始时间会在该小时内随机几分钟，避开整点高峰。"),
-      chips,
-      refreshHint,
-      h("div", { class: "button-row" }, saveHoursBtn),
+      h("p", { class: "hint" }, "刷新频率自动调整：临近上课、常打开、课表刚有变动时刷得更勤，放假或很久不用时放缓；"
+        + "同班有人先发现调课，你也会被优先刷新。对学校服务器的总请求量有全站上限。"),
       logDetails),
 
     emailSection ? section("邮件通知", emailSection.el) : null,
@@ -192,42 +192,8 @@ export function openSettings({
       ["状态", tone().label],
       ["上次成功", T.formatDateTime(current.last_success_at)],
       ["下次计划", current.next_refresh_at ? T.formatDateTime(current.next_refresh_at) : "已暂停"],
+      ["刷新频率", refreshPace(current)],
     ].flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, String(value))]));
-  }
-
-  function renderChips() {
-    const allowed = Array.isArray(current.refresh_allowed_hours) ? current.refresh_allowed_hours : [];
-    const max = current.refresh_max_times ?? 3;
-    chips.replaceChildren(...allowed.map((hour) => {
-      const selected = hours.has(hour);
-      const disabled = !selected && hours.size >= max;
-      return h("button", {
-        type: "button",
-        dataset: { hour: String(hour) },
-        "aria-pressed": String(selected),
-        disabled,
-        title: disabled ? `每天最多选择 ${max} 个时间` : undefined,
-        onClick: () => {
-          if (selected) hours.delete(hour);
-          else if (hours.size < max) hours.add(hour);
-          else {
-            showToast(`每天最多选择 ${max} 个时间`, { type: "warn" });
-            return;
-          }
-          renderChips();
-          updateSaveState();
-        },
-      }, `${String(hour).padStart(2, "0")}:00`);
-    }));
-    refreshHint.textContent =
-      `每天最多选 ${max} 个整点；不选则约每 ${current.refresh_default_interval_hours ?? 12} 小时刷新一次。`
-      + "为减轻学校服务器压力，只开放夜间和午间。";
-  }
-
-  function updateSaveState() {
-    const original = new Set(Array.isArray(current.refresh_hours) ? current.refresh_hours : []);
-    const same = original.size === hours.size && [...hours].every((hour) => original.has(hour));
-    saveHoursBtn.disabled = busy || same;
   }
 
   function renderIcs() {
@@ -247,34 +213,11 @@ export function openSettings({
   function renderAll() {
     renderAccount();
     renderRefreshInfo();
-    renderChips();
-    updateSaveState();
     renderIcs();
     renderTheme();
   }
 
   // ---- 操作 ----
-  async function saveHours() {
-    if (busy) return;
-    busy = true;
-    saveHoursBtn.disabled = true;
-    saveHoursBtn.textContent = "保存中…";
-    try {
-      const result = await api.post("api/settings/refresh-hours", { hours: [...hours].sort((a, b) => a - b) });
-      current.refresh_hours = [...hours].sort((a, b) => a - b);
-      current.next_refresh_at = result.next_refresh_at;
-      onUpdated?.(current);
-      renderRefreshInfo();
-      showToast(hours.size ? `已保存，下次自动刷新约 ${T.formatDateTime(result.next_refresh_at)}` : "已恢复默认刷新频率", { type: "success" });
-    } catch (error) {
-      showToast(error.message, { type: "error" });
-    } finally {
-      busy = false;
-      saveHoursBtn.textContent = "保存刷新时间";
-      updateSaveState();
-    }
-  }
-
   async function forgetPassword() {
     if (!await confirmDialog({
       title: "删除已保存的密码？",
