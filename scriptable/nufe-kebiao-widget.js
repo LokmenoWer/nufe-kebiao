@@ -22,7 +22,7 @@
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
  */
 const WIDGET_URL = "__WIDGET_URL__";
-const SCRIPT_VERSION = "2026.11.04";
+const SCRIPT_VERSION = "__SCRIPT_VERSION__"; // 服务器下发时填入脚本内容的哈希，无需手改
 
 const TZ_OFFSET_MINUTES = 8 * 60;      // 北京时间，学校课表按它算
 const STALE_SECONDS = 2 * 86400;       // 课表超过这么久没更新就提示
@@ -97,9 +97,9 @@ function daysBetween(fromIso, toIso) {
   return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86400000);
 }
 
-/** 版本号形如 2026.11.01，按字符串比较即可。 */
-function isNewer(latest, current) {
-  return Boolean(latest) && String(latest) > String(current);
+/** 版本号是服务器上脚本内容的哈希（sha-xxxxxxxxxxxx）：只要和服务器的不一样，就是有新脚本。 */
+function isOutdated(latest, current) {
+  return Boolean(latest) && String(latest) !== String(current);
 }
 
 function fnv(text) {
@@ -301,7 +301,7 @@ function headerNote(payload, offline, day, family, extra = {}) {
   if (extra.resync) return { text: "点按更新提醒", tone: "warn" };
   const recent = payload && payload.changed_at && nowSec - payload.changed_at < CHANGE_NOTE_SECONDS;
   if (extra.changed || recent) return { text: "有调课", tone: "warn" };
-  if (payload && isNewer(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
+  if (payload && isOutdated(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
   if (day && day.week && family !== "small") return { text: `第 ${day.week} 周`, tone: "faint" };
   return null;
 }
@@ -876,7 +876,7 @@ async function updateScript() {
   req.timeoutInterval = 15;
   const code = await req.loadString();
   const status = req.response && req.response.statusCode;
-  if (status !== 200 || !code.includes("const SCRIPT_VERSION") || !code.includes(WIDGET_URL)) {
+  if (status !== 200 || !/const SCRIPT_VERSION = "sha-[0-9a-f]+"/.test(code) || !code.includes(WIDGET_URL)) {
     throw new Error(status === 404 ? "链接已失效，请到网站重新复制脚本" : `下载失败（${status || "网络错误"}）`);
   }
   const version = (code.match(/const SCRIPT_VERSION = "([^"]+)"/) || [])[1] || "?";
@@ -920,7 +920,7 @@ async function inAppMenu(result, mode, remindNote) {
   const alert = new Alert();
   alert.title = "南财课表小组件";
   const latest = result.data && result.data.script_version;
-  const versionNote = `脚本版本 ${SCRIPT_VERSION}${isNewer(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
+  const versionNote = `脚本版本 ${SCRIPT_VERSION}${isOutdated(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
   alert.message = remindNote ? `${versionNote}\n${remindNote}` : versionNote;
   const preview = (family, m) => buildWidget(result.data, { family, mode: m, offline: result.offline });
   const actions = [
@@ -979,7 +979,7 @@ async function main() {
 if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
-    SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isNewer, cacheName, siteLink,
+    SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };

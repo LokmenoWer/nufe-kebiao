@@ -570,17 +570,25 @@ def ics_disable(sess=Depends(csrf_protected)):
 # ---------- iOS 桌面小组件（Scriptable） ----------
 
 WIDGET_SCRIPT = ROOT / "scriptable" / "nufe-kebiao-widget.js"
-_script_cache: tuple[int, str, str | None] | None = None
+_script_cache: tuple[int, str, str] | None = None
 
 
-def _widget_template() -> tuple[str, str | None]:
-    """(脚本模板, 版本号)；按 mtime 缓存，部署新脚本后不用重启。"""
+def script_version(template: str) -> str:
+    """脚本版本 = 模板内容的哈希：改了脚本就自动换版本，不用手工维护。
+
+    以字母开头：比旧脚本的日期版本（"2026.11.04"）按字符串比较更大，老用户也会看到“可更新”。
+    """
+    return "sha-" + hashlib.sha256(template.encode()).hexdigest()[:12]
+
+
+def _widget_template() -> tuple[str, str]:
+    """(填好版本号的脚本模板, 版本号)；按 mtime 缓存，部署新脚本后不用重启。"""
     global _script_cache
     mtime = WIDGET_SCRIPT.stat().st_mtime_ns
     if not _script_cache or _script_cache[0] != mtime:
         text = WIDGET_SCRIPT.read_text("utf-8")
-        m = re.search(r'const SCRIPT_VERSION = "([^"]+)"', text)
-        _script_cache = (mtime, text, m.group(1) if m else None)
+        version = script_version(text)
+        _script_cache = (mtime, text.replace("__SCRIPT_VERSION__", version), version)
     return _script_cache[1], _script_cache[2]
 
 

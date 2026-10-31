@@ -8,7 +8,8 @@ import { runWidgetScript } from "./scriptable-shim.js";
 // 纯逻辑：脚本在没有 ListWidget 的环境里只导出函数
 const ctx = { console };
 ctx.globalThis = ctx;
-vm.runInNewContext(fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8"), ctx);
+const SOURCE = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
+vm.runInNewContext(SOURCE.replace("__SCRIPT_VERSION__", "sha-000000000001"), ctx);
 const W = ctx.__nufeWidget;
 
 // 2026-10-26（周一）10:30 北京时间
@@ -21,7 +22,7 @@ const PAYLOAD = {
   semester: "2026-2027-1",
   semester_id: 161,
   updated_at: NOW / 1000 - 3600,
-  script_version: "2026.11.01",
+  script_version: "sha-000000000001",
   term: { first_day: "2026-09-07", last_day: "2027-01-08" },
   today: day("2026-10-26", 1, [
     L("高等数学", "08:20", "09:45"), L("概率论", "10:00", "12:15", "B202", "#0f8b8d"),
@@ -228,7 +229,7 @@ test("标题栏提示的优先级：登录失效 > 数据过旧 > 离线 > 更�
   assert.equal(W.headerNote(fresh, true, d, "medium").text, "离线");
   assert.equal(W.headerNote({ ...fresh, refresh: { pending: true } }, true, d, "medium").text, "离线");
   assert.equal(W.headerNote({ ...fresh, refresh: { pending: true } }, false, d, "medium").text, "更新中");
-  assert.equal(W.headerNote({ ...fresh, script_version: "2099.01.01" }, false, d, "medium").text, "脚本可更新");
+  assert.equal(W.headerNote({ ...fresh, script_version: "sha-000000000002" }, false, d, "medium").text, "脚本可更新");
   assert.equal(W.headerNote(fresh, false, d, "medium").text, "第 8 周");
   assert.equal(W.headerNote(fresh, false, d, "small"), null);
 });
@@ -315,7 +316,9 @@ test("上课提醒：未来的课提前通知，已开始和不足 1 分钟的�
 });
 
 test("工具函数：版本比较、缓存文件名、网站深链接", () => {
-  assert.ok(W.isNewer("2026.11.02", "2026.11.01") && !W.isNewer("2026.11.01", "2026.11.01") && !W.isNewer(null, "x"));
+  assert.equal(W.SCRIPT_VERSION, "sha-000000000001");
+  assert.ok(W.isOutdated("sha-000000000002", W.SCRIPT_VERSION) && !W.isOutdated(W.SCRIPT_VERSION, W.SCRIPT_VERSION));
+  assert.ok(!W.isOutdated(null, W.SCRIPT_VERSION) && !W.isOutdated("", W.SCRIPT_VERSION));
   assert.notEqual(W.cacheName("https://a/widget/1.json"), W.cacheName("https://a/widget/2.json"));
   assert.match(W.cacheName("x"), /^nufe-kebiao-[0-9a-f]+\.json$/);
   assert.equal(W.siteLink("https://s/", { semester_id: 161 }, { week: 9, weekday: 3 }), "https://s/#sem=161&w=9&view=day&d=2");
@@ -453,20 +456,20 @@ test("在 Scriptable 里运行：菜单可预览，也能更新脚本", async ()
   assert.equal(preview.presented[0].presented, "large");
   assert.ok(preview.alerts[0].actions.includes("更新脚本") && preview.alerts[0].actions.includes("打开网站"));
 
-  const newer = `// x\nconst WIDGET_URL = "${URL_OK}";\nconst SCRIPT_VERSION = "2099.01.01";\n`;
+  const newer = `// x\nconst WIDGET_URL = "${URL_OK}";\nconst SCRIPT_VERSION = "sha-000000000002";\n`;
   const cache = new Map();
   const up = await runWidgetScript({
-    payload: { ...PAYLOAD, script_version: "2099.01.01" }, url: URL_OK, nowMs: NOW, inApp: true,
+    payload: { ...PAYLOAD, script_version: "sha-000000000002" }, url: URL_OK, nowMs: NOW, inApp: true,
     choose: ["更新脚本"], scriptBody: newer, cache,
   });
-  assert.match(up.alerts[0].message, /可更新到 2099\.01\.01/);
+  assert.match(up.alerts[0].message, /可更新到 sha-000000000002/);
   assert.equal(cache.get("/Documents/南财课表.js"), newer); // 没开 iCloud：写到本地脚本文件
   assert.equal(up.alerts[1].title, "已更新");
 
   // 下载回来的不是本人的脚本（比如链接被换过）：拒绝覆盖
   const bad = await runWidgetScript({
     payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, choose: ["更新脚本"],
-    scriptBody: "const SCRIPT_VERSION = \"x\"; // other user", cache: new Map(),
+    scriptBody: "const SCRIPT_VERSION = \"sha-000000000002\"; // other user", cache: new Map(),
   });
   assert.equal(bad.alerts[1].title, "出错了");
 });

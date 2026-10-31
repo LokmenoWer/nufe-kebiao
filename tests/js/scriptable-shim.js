@@ -144,10 +144,11 @@ class Size {
 
 export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
-  inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [],
+  inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [], version = "sha-000000000001",
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
+  source = source.replace("__SCRIPT_VERSION__", version);
   const files = cache || new Map();
   let result = null;
   let done;

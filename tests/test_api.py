@@ -1310,8 +1310,12 @@ def test_widget_script_self_update_by_token(up):
     js = anon.get(url.removeprefix("http://testserver").removesuffix(".json") + ".js")
     assert js.status_code == 200 and url in js.text and "no-store" in js.headers["cache-control"]
     version = re.search(r'const SCRIPT_VERSION = "([^"]+)"', js.text).group(1)
+    assert re.fullmatch(r"sha-[0-9a-f]{12}", version) and "__SCRIPT_VERSION__" not in js.text
+    assert version > "2026.11.04"  # 旧的日期版本脚本按字符串比较也会提示更新
     payload = anon.get(url.removeprefix("http://testserver")).json()
     assert payload["script_version"] == version and payload["semester_id"] == 161
+    # 设置页复制的脚本和自我更新拿到的是同一个版本
+    assert f'const SCRIPT_VERSION = "{version}"' in c.get("/api/widget/script").text
     assert anon.get("/widget/nope.js").status_code == 404
 
 
