@@ -66,7 +66,9 @@ class WidgetText {
     this.text = text;
   }
 
-  centerAlignText() {}
+  centerAlignText() {
+    this.center = true;
+  }
 }
 
 class WidgetDate {
@@ -98,9 +100,14 @@ class WidgetStack extends Node {
 
   layoutHorizontally() {}
 
-  centerAlignContent() {}
+  // 对齐方式记下来，widget_preview.mjs 按它画
+  centerAlignContent() {
+    this.align = "center";
+  }
 
-  topAlignContent() {}
+  topAlignContent() {
+    this.align = "top";
+  }
 }
 
 class ListWidget extends Node {

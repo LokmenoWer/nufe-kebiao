@@ -37,17 +37,21 @@ const MAX_REDRAW_MS = 30 * 60000;      // 最长 30 分钟重画一次
 const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两分钟后再看
 const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
-const ROW_GAP_MINUTES = 60;            // 周视图：开始时间相差不到这么久的课排在同一行
-const FULL_GAP = 6;                    // 铺满模式：上午 / 下午 / 晚上之间压缩成这么高的间隔
-const LABEL_H = 13;                    // 铺满模式：时间轴一个标签占的高度
+const FULL_GAP = 6;                    // 周视图 / 铺满：午休、傍晚这些没课的时段压成这么高的间隔
+const LABEL_H = 13;                    // 周视图 / 铺满：时间轴一个标签占的高度
 // 各机型（竖屏，pt）的小组件尺寸：[屏宽, 屏高, 小号边长, 中/大号宽, 大号高]。来自 Apple 的小组件尺寸表
 const WIDGET_SIZES = [
   [440, 956, 170, 364, 382], [430, 932, 170, 364, 382], [428, 926, 170, 364, 382],
   [414, 896, 169, 360, 379], [414, 736, 159, 348, 357], [402, 874, 158, 338, 354],
   [393, 852, 158, 338, 354], [390, 844, 158, 338, 354], [375, 812, 155, 329, 345],
-  [375, 667, 148, 321, 324], [320, 568, 141, 292, 311],
+  [375, 667, 148, 321, 324], [360, 780, 155, 329, 345], [320, 568, 141, 292, 311],
 ];
-const SEGMENTS = [{ first: 0, label: "上午" }, { first: 12 * 60, label: "下午" }, { first: 18 * 60, label: "晚上" }];
+// iPad（竖屏）：[屏宽, 屏高, 小号边长, 中/大号宽, 大号高, 超大号宽]
+const IPAD_WIDGET_SIZES = [
+  [1024, 1366, 170, 379, 379, 795], [834, 1194, 155, 342, 342, 715], [820, 1180, 155, 342, 342, 715],
+  [834, 1112, 150, 328, 328, 676], [810, 1080, 146, 320, 320, 676], [768, 1024, 141, 306, 306, 634],
+  [744, 1133, 141, 305, 305, 634],
+];
 const MODE_ALIASES = {
   today: "today", 今天: "today", 今日: "today", "": "today",
   tomorrow: "tomorrow", 明天: "tomorrow", 明日: "tomorrow",
@@ -290,71 +294,52 @@ function hm(minutes) {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-/**
- * 周视图的行：按上课时间对齐，而不是每天从第一格往下堆——
- * 只有一节下午课的那天，这节课也画在下午那一行。
- * 开始时间相差不到 ROW_GAP_MINUTES 的归一行（08:00 和 08:20 是同一大节），行标签取最早的那个；
- * 行数放不下时退成上午 / 下午 / 晚上三行。
- */
-function timeRows(columns, maxRows) {
-  const starts = new Set();
-  for (const col of columns) {
-    for (const x of [...(col.lessons || []), ...(col.cancelled || [])]) starts.add(toMinutes(x.start));
-  }
-  const rows = [];
-  for (const m of [...starts].sort((a, b) => a - b)) {
-    if (!rows.length || m - rows[rows.length - 1].first >= ROW_GAP_MINUTES) rows.push({ first: m, label: hm(m) });
-  }
-  if (rows.length <= maxRows) return rows;
-  return SEGMENTS.filter((seg, i) => [...starts].some((m) => m >= seg.first && (i === SEGMENTS.length - 1 || m < SEGMENTS[i + 1].first)));
+/** 课的节次：“3–5” → [3, 5]，“6” → [6, 6]；没写节次时返回 null。 */
+function unitRange(item) {
+  const m = /^(\d+)(?:\D+(\d+))?$/.exec(String((item && item.units) || "").trim());
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = m[2] ? Number(m[2]) : a;
+  return b >= a ? [a, b] : null;
 }
 
-function rowOf(rows, minutes) {
-  let index = 0;
-  rows.forEach((row, i) => { if (minutes >= row.first) index = i; });
-  return index;
-}
-
-/** { rows, cells }：cells[列][行] = { lessons, cancelled }。同一格里有两节（撞课）时都留着。 */
-function weekGrid(columns, maxRows) {
-  const rows = timeRows(columns, maxRows);
-  const cells = columns.map((col) => {
-    const out = rows.map(() => ({ lessons: [], cancelled: [] }));
-    for (const lesson of col.lessons || []) out[rowOf(rows, toMinutes(lesson.start))].lessons.push(lesson);
-    for (const c of col.cancelled || []) out[rowOf(rows, toMinutes(c.start))].cancelled.push(c);
-    return out;
-  });
-  return { rows, cells };
-}
-
-/** 本机的小组件尺寸（pt）。认不出的机型按相近屏宽估；iPad 的超大号按两倍中号宽估。 */
-function widgetSizeFor(screen, family) {
-  const w = screen ? Math.min(screen.w, screen.h) : 0;
-  const h = screen ? Math.max(screen.w, screen.h) : 0;
-  const row = WIDGET_SIZES.find((r) => r[0] === w && r[1] === h)
-    || WIDGET_SIZES.find((r) => r[0] <= w) || WIDGET_SIZES[8];
-  const [, , small, wide, tall] = row;
-  if (family === "small") return { w: small, h: small };
-  if (family === "medium") return { w: wide, h: small };
-  if (family === "extraLarge") return { w: wide * 2 + 16, h: tall };
-  return { w: wide, h: tall };
+/** 一周里每节课（lessons + cancelled，按列）：{ kind, item, col, s, e, units }，去掉起止时间不对的。 */
+function gridItems(columns) {
+  return columns.map((col, c) => [
+    ...(col.lessons || []).map((item) => ({ kind: "lesson", item })),
+    ...(col.cancelled || []).map((item) => ({ kind: "cancelled", item })),
+  ].map((it) => ({ ...it, col: c, s: toMinutes(it.item.start), e: toMinutes(it.item.end), units: unitRange(it.item) }))
+    .filter((it) => it.e > it.s)
+    .sort((a, b) => a.s - b.s || (a.kind === "lesson" ? -1 : 1)));
 }
 
 /**
- * 铺满模式的版面：纵轴是时间，课的高度和时长成正比；一周里没人上课的时段（午休、傍晚）压成 FULL_GAP。
- * 返回 { labels: [{ top, text }], cols: [[{ kind, item, top, height, more }]] }，单位 pt。
+ * 没写节次的课，按同一周里别的课补上：开始时间相同的取它的起始节，结束时间相同的取它的结束节。
+ * 有一节补不上就返回 false——这时整张表按真实时间排，免得画错位置。
  */
-function fullLayout(columns, height) {
-  const spans = [];
-  for (const col of columns) {
-    for (const x of [...(col.lessons || []), ...(col.cancelled || [])]) {
-      const s = toMinutes(x.start);
-      const e = toMinutes(x.end);
-      if (e > s) spans.push([s, e]);
-    }
+function fillUnits(all) {
+  const first = new Map();
+  const last = new Map();
+  for (const it of all) {
+    if (!it.units) continue;
+    first.set(it.s, it.units[0]);
+    last.set(it.e, it.units[1]);
   }
-  if (!spans.length) return { labels: [], cols: columns.map(() => []) };
-  spans.sort((a, b) => a[0] - b[0]);
+  for (const it of all) {
+    if (it.units) continue;
+    const a = first.get(it.s);
+    const b = last.get(it.e);
+    if (a === undefined || b === undefined || b < a) return false;
+    it.units = [a, b];
+  }
+  return all.length > 0;
+}
+
+/**
+ * 按真实时间：课的高度和时长成正比，一周里没人上课的时段压成 FULL_GAP。返回 y(分钟) → pt。
+ */
+function timeScale(all, height) {
+  const spans = all.map((it) => [it.s, it.e]).sort((a, b) => a[0] - b[0]);
   const blocks = [];
   for (const [s, e] of spans) {
     const last = blocks[blocks.length - 1];
@@ -371,34 +356,99 @@ function fullLayout(columns, height) {
     }
     return offset - FULL_GAP;
   };
-  const cols = columns.map((col) => {
-    const items = [
-      ...(col.lessons || []).map((item) => ({ kind: "lesson", item })),
-      ...(col.cancelled || []).map((item) => ({ kind: "cancelled", item })),
-    ].filter(({ item }) => toMinutes(item.end) > toMinutes(item.start))
-      .sort((a, b) => toMinutes(a.item.start) - toMinutes(b.item.start) || (a.kind === "lesson" ? -1 : 1));
+  return { top: (it) => y(it.s), bottom: (it) => y(it.e) };
+}
+
+/**
+ * 按节次：用到的每一节一样高，课从起始节画到结束节——和学校课表一个样子，两节课和四节课一眼分得出。
+ * 节号不连续（中间那节一周都没课）或前后两节隔了半小时以上（午休、傍晚）的地方断开，空出 FULL_GAP。
+ */
+function unitScale(all, height) {
+  const used = new Set();
+  const startOf = new Map();
+  const endOf = new Map();
+  for (const it of all) {
+    for (let u = it.units[0]; u <= it.units[1]; u += 1) used.add(u);
+    startOf.set(it.units[0], Math.min(startOf.get(it.units[0]) ?? Infinity, it.s));
+    endOf.set(it.units[1], Math.max(endOf.get(it.units[1]) ?? -Infinity, it.e));
+  }
+  const units = [...used].sort((a, b) => a - b);
+  const isBreak = (u, i) => i > 0 && (u !== units[i - 1] + 1
+    || (startOf.has(u) && endOf.has(u - 1) && startOf.get(u) - endOf.get(u - 1) >= 30));
+  const unitH = (height - units.filter(isBreak).length * FULL_GAP) / units.length;
+  const topOf = new Map();
+  let y = 0;
+  units.forEach((u, i) => {
+    if (isBreak(u, i)) y += FULL_GAP;
+    topOf.set(u, y);
+    y += unitH;
+  });
+  return { top: (it) => topOf.get(it.units[0]), bottom: (it) => topOf.get(it.units[1]) + unitH, unitH };
+}
+
+/**
+ * 周视图 / 铺满共用的版面。scale 为 "unit"（周视图，按节次）或 "time"（铺满，按真实时间）；
+ * 有课没写节次又补不上时，按节次也退成按时间。
+ * 两种都把课画在自己真实的起止位置：不再把开始时间相近的课并成一行，不撞课的课一节都不会被藏起来；
+ * 真撞课（时间重叠）画不下第二张，记在前一张上（“+1”）。
+ * 返回 { scale, labels: [{ top, text, unit }], cols: [[{ kind, item, top, height, more, labeled }]] }，单位 pt；
+ * labeled 表示这节课的开始时间正好标在时间轴上它那一格旁边，卡片上可以不写。
+ */
+function gridLayout(columns, height, { scale = "time" } = {}) {
+  const perCol = gridItems(columns);
+  const all = perCol.flat();
+  if (!all.length) return { scale, labels: [], cols: columns.map(() => []) };
+  const mode = scale === "unit" && fillUnits(all) ? "unit" : "time";
+  const ys = mode === "unit" ? unitScale(all, height) : timeScale(all, height);
+  // 时间轴：每个不同的开始时间标在它那节课的顶上；挨得太近就省掉后一个（那节课的卡片自己写时间）
+  const labels = [];
+  const starts = [...new Map(all.map((it) => [it.s, it])).values()].sort((a, b) => ys.top(a) - ys.top(b) || a.s - b.s);
+  for (const it of starts) {
+    const top = ys.top(it);
+    if (labels.length && top < labels[labels.length - 1].top + LABEL_H) continue;
+    labels.push({ top, text: hm(it.s), minutes: it.s, unit: mode === "unit" ? it.units[0] : null });
+  }
+  const labeled = new Map(labels.map((l) => [l.minutes, l.top]));
+  const cols = perCol.map((items) => {
     const out = [];
     let busyUntil = -1;
     for (const it of items) {
-      const s = toMinutes(it.item.start);
-      const e = toMinutes(it.item.end);
-      if (s < busyUntil) {
-        // 撞课：画不下第二张，记在前一张上；停课的空位被别的课占了就不画
+      if (it.s < busyUntil) {
         if (it.kind === "lesson" && out.length) out[out.length - 1].more += 1;
         continue;
       }
-      out.push({ ...it, top: y(s), height: y(e) - y(s), more: 0 });
-      busyUntil = e;
+      const top = ys.top(it);
+      out.push({
+        kind: it.kind, item: it.item, top, height: ys.bottom(it) - top, more: 0,
+        labeled: labeled.has(it.s) && Math.abs(labeled.get(it.s) - top) < 0.5,
+      });
+      busyUntil = it.e;
     }
     return out;
   });
-  const labels = [];
-  for (const s of [...new Set(spans.map(([start]) => start))]) {
-    const top = y(s);
-    if (labels.length && top < labels[labels.length - 1].top + LABEL_H) continue; // 挨得太近就省掉
-    labels.push({ top, text: hm(s) });
+  return { scale: mode, labels, cols, unitH: ys.unitH };
+}
+
+/**
+ * 本机的小组件尺寸（pt）：{ w, h }。先按屏幕尺寸查 Apple 的尺寸表（iPhone、iPad 各一张）；
+ * 查不到（新机型、“放大显示”）就取最接近的一行，屏幕比它窄时按比例缩小——只缩不放，估大了会溢出。
+ */
+function widgetSizeFor(screen, family) {
+  const w = screen ? Math.min(screen.w, screen.h) : 0;
+  const h = screen ? Math.max(screen.w, screen.h) : 0;
+  const table = w >= 600 ? IPAD_WIDGET_SIZES : WIDGET_SIZES;
+  let row = table.find((r) => r[0] === w && r[1] === h);
+  let k = 1;
+  if (!row) {
+    row = w ? table.reduce((best, r) => (Math.hypot(r[0] - w, r[1] - h) < Math.hypot(best[0] - w, best[1] - h) ? r : best))
+      : WIDGET_SIZES.find((r) => r[0] === 375 && r[1] === 812); // 认不出屏幕：按常见的小屏估
+    k = w ? Math.min(1, w / row[0], h / row[1]) : 1;
   }
-  return { labels, cols };
+  const [, , small, wide, tall, xl] = row.map((v) => Math.floor(v * k));
+  if (family === "small") return { w: small, h: small };
+  if (family === "medium") return { w: wide, h: small };
+  if (family === "extraLarge") return { w: xl || wide * 2 + 16, h: tall };
+  return { w: wide, h: tall };
 }
 
 /** 画面上有没有调课 / 停课标记。 */
@@ -635,31 +685,92 @@ function roomText(lesson, room = lesson.room) {
 }
 
 /**
- * 粗估一行字的宽度（pt）。Scriptable 量不了文字，只能估，宁可估宽：估窄了会被截成“…”，估宽了只是多折一行。
- * 汉字一个字号宽；字母数字按 0.68 个（真机上“08:20–09:45”在 8.5pt 下超过 52pt，SF 半粗体数字比 0.62 宽）；
- * 冒号、点按 0.35 个，“-”0.45 个，空格 0.3 个，“–”0.75 个。
+ * 系统字体 SF 半粗体（小字号光学尺寸）每个字符的宽度，单位是字号（em）。
+ * 由 scripts/measure_sf_widths.py 从 macOS 自带的同一套字体量出；脚本里所有字重都按最宽的半粗体估。
+ */
+const SF_WIDTHS = { "0": 0.665, "1": 0.494, "2": 0.628, "3": 0.653, "4": 0.671, "5": 0.647, "6": 0.667, "7": 0.592, "8": 0.674, "9": 0.667, a: 0.576, b: 0.638, c: 0.577, d: 0.638, e: 0.59, f: 0.391, g: 0.632, h: 0.616, i: 0.272, j: 0.272, k: 0.58, l: 0.279, m: 0.909, n: 0.611, o: 0.609, p: 0.633, q: 0.633, r: 0.415, s: 0.551, t: 0.395, u: 0.611, v: 0.568, w: 0.82, x: 0.56, y: 0.577, z: 0.556, A: 0.711, B: 0.68, C: 0.732, D: 0.74, E: 0.612, F: 0.588, G: 0.755, H: 0.768, I: 0.3, J: 0.578, K: 0.691, L: 0.585, M: 0.895, N: 0.759, O: 0.781, P: 0.66, Q: 0.781, R: 0.679, S: 0.661, T: 0.65, U: 0.752, V: 0.704, W: 0.994, X: 0.711, Y: 0.688, Z: 0.67, " ": 0.267, ":": 0.329, ".": 0.329, "-": 0.479, "–": 0.611, "+": 0.656, "(": 0.412, ")": 0.412, "/": 0.324, "·": 0.329 };
+// 小字号的字距比字形本身略宽，“粗体文本”辅助功能也会加宽：西文统一多估 6%。汉字（苹方）一个字号宽
+const WIDTH_MARGIN = 1.06;
+const LINE_RATIO = 1.2;       // SF 行高 1.178 个字号
+const CJK_LINE_RATIO = 1.42;  // 带汉字的行由苹方撑高：1.40 个字号（按 1.2 估会少算，系统就从课名里砍一行）
+
+function isWide(ch) {
+  return ch.charCodeAt(0) >= 0x2e80;
+}
+
+/**
+ * 估一行字的宽度（pt）。Scriptable 量不了文字，只能按字符查表估，宁可估宽：估窄了会被截成“…”，估宽了只是多折一行。
  */
 function textWidth(text, size) {
   let w = 0;
-  for (const ch of String(text || "")) {
-    w += size * (ch === "–" ? 0.75 : /[\u2e80-\uffff]/.test(ch) ? 1 : ch === "-" ? 0.45 : ch === " " ? 0.3 : /[:.]/.test(ch) ? 0.35 : 0.68);
-  }
-  return w;
+  for (const ch of String(text || "")) w += isWide(ch) ? 1 : (SF_WIDTHS[ch] || 0.75) * WIDTH_MARGIN;
+  return w * size;
 }
 
-/** 按字逐个排，估一段字在这么宽的格子里折成几行（最多 max 行）。 */
-function linesNeeded(text, width, size, max = 3) {
-  let lines = 1;
-  let w = 0;
-  for (const ch of String(text || "")) {
-    const cw = textWidth(ch, size);
-    if (w > 0 && w + cw > width) {
-      lines += 1;
-      w = 0;
+/** 估几行字的高度（pt）：有汉字的按苹方行高，纯西文按 SF。 */
+function lineHeight(text, size, lines = 1) {
+  return size * ([...String(text || "")].some(isWide) ? CJK_LINE_RATIO : LINE_RATIO) * lines;
+}
+
+// 不能放在行首的标点（系统折行时会带上前一个字一起换行）、不能放在行尾的开括号
+const NO_LINE_START = "）】」』》〉，。、：；！？·)]}%,.:;!?";
+const NO_LINE_END = "（【「『《〈([{";
+
+/**
+ * 切成折行时不能拆开的小段：汉字一个字一段；连着的字母数字（“Python”“Z4-106”）一段；
+ * 行首禁则的标点粘在前一段后面，开括号粘在后一段前面——和系统排版一样。
+ */
+function breakUnits(line) {
+  const out = [];
+  let glue = "";
+  for (const ch of line) {
+    const last = out[out.length - 1];
+    if (glue) {
+      glue += ch;
+      if (!NO_LINE_END.includes(ch)) {
+        out.push(glue);
+        glue = "";
+      }
+    } else if (NO_LINE_END.includes(ch)) {
+      glue = ch;
+    } else if (last !== undefined && (NO_LINE_START.includes(ch) || (/[A-Za-z0-9\-]/.test(ch) && /[A-Za-z0-9\-]$/.test(last)))) {
+      out[out.length - 1] = last + ch;
+    } else {
+      out.push(ch);
     }
-    w += cw;
   }
-  return Math.min(max, lines);
+  if (glue) out.push(glue);
+  return out;
+}
+
+/** 估一段字在这么宽的格子里折成几行（最多 max 行）：按不能拆开的小段逐个排，太长的一段只好按字拆。 */
+function linesNeeded(text, width, size, max = 3) {
+  let lines = 0;
+  for (const line of String(text || "").split("\n")) {
+    lines += 1;
+    let w = 0;
+    for (const unit of breakUnits(line)) {
+      const uw = textWidth(unit, size);
+      if (uw > width) {
+        // 一整段比一行还宽：系统按字拆开
+        for (const ch of unit) {
+          const cw = textWidth(ch, size);
+          if (w > 0 && w + cw > width) {
+            lines += 1;
+            w = 0;
+          }
+          w += cw;
+        }
+        continue;
+      }
+      if (w > 0 && w + uw > width) {
+        lines += 1;
+        w = 0;
+      }
+      w += uw;
+    }
+  }
+  return Math.min(max, Math.max(1, lines));
 }
 
 /**
@@ -679,67 +790,91 @@ function splitRoom(room, width, size) {
 }
 
 const CHIP_SCALES = [1, 0.9, 0.8];  // 卡片字号最多缩到 0.8 倍，再小就看不清
-const LINE_RATIO = 1.2;             // 行高 ≈ 字号 × 1.2
-const CHIP_SLACK = 2;               // 行高是估的，每张卡片留一点余量
+const CHIP_SLACK = 1;               // 行高估得已经偏高（苹方 1.42 倍、实测约 1.38–1.40 倍），每张卡片再留 1pt
 
 /**
  * 一张课程卡片怎么排：依次试几档字号，每档按优先级往格子里放——
- *   课名第一行 → 教室编号 → 开始时间 → 课名写全 → 结束时间（一行放不下就分两行）→ 教室楼名 → 教师，
- * 取信息最全的一档，一样全就取字大的。起止时间单独按宽度定字号（最多小 20%），放不下再分两行。楼名和教师不计分：不为它们缩字，放得下才写。
+ *   课名第一行 → 教室编号 → 课名写全 → 开始时间 → 结束时间（一行放不下就分两行）→ 教室楼名 → 教师，
+ * 取信息最全的一档，一样全就取字大的。开始时间已经准确地标在左边时间轴上、卡片的位置和长短也是按真实时间画的，
+ * 所以卡片上的时间排在课名后面；needTime：时间轴上没标出这节课的开始时间（挨得太近被省掉），开始时间排到最前，
+ * 保证每节课的开始时间要么在轴上、要么在卡片上，而且是准的。
+ * 起止时间单独按宽度定字号（最多小 20%），放不下再分两行。楼名和教师不计分：不为它们缩字，放得下才写。
  * 所有文字都按估出来的宽度和行数排好，不靠系统自动缩字（缩到下限还放不下就会截成“…”）。
  * 返回的 left 是估计还剩下的高度，chipBody 用定长空白把内容顶到上面。
  * sizes：{ time, name, room } 的基准字号；padV：卡片上下内边距之和。
  */
-function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teacher = false }) {
-  const inner = width - 6;
+function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teacher = false, needTime = false }) {
+  const inner = width - 7; // 左右内边距 6pt，再留 1pt：字宽是估的
   const mark = lesson.changed ? " 调" : "";
   const fullRoom = room ? roomText(lesson) : "";
   let best = null;
   for (const scale of CHIP_SCALES) {
     const sz = { time: sizes.time * scale, name: sizes.name * scale, room: sizes.room * scale };
-    const lh = (size, lines = 1) => size * LINE_RATIO * lines;
-    let left = height - padV - CHIP_SLACK - lh(sz.name);
+    let left = height - padV - CHIP_SLACK - lineHeight(name, sz.name);
     const take = (h) => {
       if (h > left + 0.5) return false;
       left -= h;
       return true;
     };
     const plan = { scale, sz, time: "", timeSize: sz.time, timeLines: 1, nameLines: 1, nameFull: false, room: "", roomLines: 1, teacher: false, score: 0 };
-    if (fullRoom) {
-      const code = roomText(lesson, fitRoom(lesson.room, inner, sz.room));
-      const lines = linesNeeded(code, inner, sz.room, 2);
-      if (take(lh(sz.room, lines))) Object.assign(plan, { room: code, roomLines: lines, score: plan.score + 16 });
-    }
-    if (take(lh(sz.time))) {
+    // 时间的字号按宽度算：放不下就缩，最多缩到基准的 70%，再小就不写
+    const fitTime = (...parts) => Math.min(sz.time, ...parts.map((t) => inner / textWidth(t, 1)));
+    const addTime = () => {
+      const size = fitTime(`${lesson.start}${mark}`);
+      if (size < sizes.time * 0.7 || !take(lineHeight(lesson.start, size))) return;
       plan.time = `${lesson.start}${mark}`;
-      plan.score += 8;
+      plan.timeSize = size;
+      plan.score += needTime ? 32 : 4;
+    };
+    if (needTime) addTime();
+    if (fullRoom) {
+      // 先只放编号（“Z4-106”），楼名最后有空再补：楼名不该挤掉课名的第二行
+      const code = roomText(lesson, fitRoom(lesson.room, 0, sz.room));
+      const lines = linesNeeded(code, inner, sz.room, 2);
+      if (take(lineHeight(code, sz.room, lines))) Object.assign(plan, { room: code, roomLines: lines, score: plan.score + 16 });
     }
     const need = linesNeeded(name, inner, sz.name, 4);
-    while (plan.nameLines < need && take(lh(sz.name))) plan.nameLines += 1;
+    // 课名多写一行也算分（比卡片上的时间重要：时间轴上已经有了），免得为了挤进时间把课名砍成一行
+    while (plan.nameLines < need && take(lineHeight(name, sz.name))) {
+      plan.nameLines += 1;
+      plan.score += 5;
+    }
     if (plan.nameLines >= need) {
       plan.nameFull = true;
-      plan.score += 4;
+      plan.score += 8;
     }
+    if (!needTime) addTime();
     if (plan.time) {
       // 起止写一行：字号按宽度算出来，最多比基准小 20%，再小就分两行。门槛按基准字号算，同一块小组件里各卡片写法一致
       const one = `${lesson.start}–${lesson.end}${mark}`;
       const fit = inner / textWidth(one, 1);
+      const twoSize = fitTime(`${lesson.start}–`, `${lesson.end}${mark}`);
       if (fit >= sizes.time * 0.8) {
+        left += lineHeight(lesson.start, plan.timeSize) - lineHeight(lesson.start, Math.min(sz.time, fit));
         plan.time = one;
         plan.timeSize = Math.min(sz.time, fit);
         plan.score += 2;
-      } else if (take(lh(sz.time))) {
+      } else if (twoSize >= sizes.time * 0.7 && take(lineHeight(lesson.end, twoSize) * 2 - lineHeight(lesson.start, plan.timeSize))) {
         plan.time = `${lesson.start}–\n${lesson.end}${mark}`;
+        plan.timeSize = twoSize;
         plan.timeLines = 2;
         plan.score += 2;
       }
     }
-    const two = plan.room && plan.room !== fullRoom ? splitRoom(lesson.room, inner, sz.room) : null;
-    if (two && take(lh(sz.room))) {
-      plan.room = roomText(lesson, two);
-      plan.roomLines += 1;
+    if (plan.room && plan.room !== fullRoom) {
+      // 补楼名：一行写得下就写一行（“德业楼Z4-106”），否则楼名单独一行（“德业楼\nZ4-106”）
+      const two = splitRoom(lesson.room, 0, sz.room);
+      const options = [[fullRoom, linesNeeded(fullRoom, inner, sz.room, 3)], two && [roomText(lesson, two), linesNeeded(roomText(lesson, two), inner, sz.room, 3)]]
+        .filter((o) => o && o[1] <= (o[0].includes("\n") ? 2 : 1));
+      for (const [text, lines] of options) {
+        if (take(lineHeight(text, sz.room, lines) - lineHeight(plan.room, sz.room, plan.roomLines))) {
+          plan.room = text;
+          plan.roomLines = lines;
+          break;
+        }
+      }
     }
-    if (teacher && lesson.teachers && take(lh(sz.room))) plan.teacher = true;
+    if (teacher && lesson.teachers && textWidth(lesson.teachers, sz.room) <= inner && take(lineHeight(lesson.teachers, sz.room))) plan.teacher = true;
     plan.left = left;
     if (!best || plan.score > best.score) best = plan;
   }
@@ -903,32 +1038,44 @@ function tintText(hex) {
   return Color.dynamic(new Color(base), new Color(mixHex(base, "#ffffff", 0.4)));
 }
 
-function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
+/** 卡片基准字号：中号小一档；列宽富余（5 列、大屏）时最多放大 12%，窄列靠 chipPlan 自己往下缩。 */
+function chipSizes(large, colW) {
+  const k = Math.min(1.12, Math.max(1, colW / 52));
+  const base = large ? { time: 9, name: 10, room: 8.5 } : { time: 8.5, name: 9.5, room: 8 };
+  return { time: base.time * k, name: base.name * k, room: base.room * k };
+}
+
+function lessonChip(cell, C, lesson, { width, height, large, more, needTime }) {
   const tint = new Color(lesson.color || "#4b63e0");
   const chip = vstack(cell);
   chip.size = new Size(width, height);
-  chip.setPadding(2, 4, 2, 2);
-  chip.cornerRadius = 5;
-  chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.18);
+  chip.setPadding(2, 4, 1, 2); // 上下边距压到 3pt：两节课的格子只有 35pt 上下，多 2pt 就能多写一行课名
+  chip.cornerRadius = 6;
+  chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.2);
   if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
     chip.borderColor = lesson.state === "live" ? tint : C.warn;
     chip.borderWidth = 1.5;
   }
-  // 撞课：同一格里还有别的课，名字后面注“+1”
+  // 撞课：同一时间还有别的课，名字后面注“+1”
   const name = `${lesson.name}${more ? ` +${more}` : ""}`;
-  const sizes = large ? { time: 9, name: 10, room: 8.5 } : { time: 8.5, name: 9.5, room: 8 };
-  chipBody(chip, C, lesson, name, chipPlan(lesson, name, { width, height, padV: 4, sizes }), "medium");
+  const plan = chipPlan(lesson, name, { width, height, padV: 3, sizes: chipSizes(large, width), teacher: large, needTime });
+  chipBody(chip, C, lesson, name, plan, "semibold");
 }
 
 function cancelledChip(cell, C, c, { width, height }) {
   const chip = vstack(cell);
   chip.size = new Size(width, height);
-  chip.setPadding(2, 4, 2, 2);
-  chip.cornerRadius = 5;
+  chip.setPadding(3, 4, 2, 2);
+  chip.cornerRadius = 6;
   chip.borderColor = C.warn;
   chip.borderWidth = 1;
-  addText(chip, `停 ${c.name}`, { size: 9, weight: "medium", color: C.warn, lines: height >= 28 ? 2 : 1, scale: 0.6 });
-  chip.addSpacer();
+  const text = `停 ${c.name}`;
+  const room = height - 5 - CHIP_SLACK;
+  const lines = Math.max(1, Math.min(linesNeeded(text, width - 6, 9, 3), Math.floor(room / lineHeight(text, 9))));
+  addText(chip, text, { size: 9, weight: "medium", color: C.warn, lines, scale: 0.8 });
+  // 定长空白把字顶到上面（弹性 Spacer 的最小高度会挤掉字，原因同 chipBody）
+  const left = room - lineHeight(text, 9, lines);
+  if (left >= 1) chip.addSpacer(Math.floor(left));
 }
 
 /** 时间轴宽度：放得下最宽的“00:00”，再加列间距和 1pt 余量。 */
@@ -936,91 +1083,22 @@ function axisWidth(size, gap) {
   return Math.ceil(textWidth("00:00", size)) + gap + 1;
 }
 
-/** 周视图：左边一列是上课时间，每天一列，课画在它开始时间那一行；没课的格子留空。 */
-function renderWeek(widget, C, columns, family, payload, size) {
+/**
+ * 周视图（scale "unit"）和铺满（scale "time"）：左边是时间轴，每天一列，课画在它真实的起止位置。
+ * 周视图按节次——每节一样高，轴上写开始时间，放得下时在下面注“第几节”；铺满按真实时长。
+ * 布局全部按本机小组件尺寸算（widgetSize），格子里只用定长空白，不用弹性 Spacer。
+ */
+function renderGrid(widget, C, columns, family, payload, size, scale) {
   const large = family === "large" || family === "extraLarge";
-  const { rows, cells } = weekGrid(columns, large ? 7 : 5);
-  const width = size.w - 28;
+  const showDate = large && scale === "time";
   const gap = 3;
-  const axisW = axisWidth(large ? 9 : 8.5, gap);
-  const colW = Math.floor((width - axisW - columns.length * gap) / Math.max(columns.length, 1));
-  // 去掉内边距、标题栏、星期行，再留 4pt 余量，剩下的给课程格
-  const avail = size.h - 26 - 18 - 6 - 14 - 4 - 4;
-  // 大号行数少时（只有下午、晚上的课）行高放宽到 96，格子铺满整块，课名和教室不用挤在一起
-  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 96 : 32,
-    Math.floor((avail - Math.max(rows.length - 1, 0) * gap) / Math.max(rows.length, 1))));
-  const base = siteUrl();
-
-  widget.addSpacer(6);
-  const head = widget.addStack();
-  head.spacing = gap;
-  head.addSpacer(axisW);
-  for (const col of columns) {
-    // 定宽的格子会把内容居中；不用左右两个弹性 Spacer，它们各占至少 8pt，窄列里会把“周一”挤成“…”
-    const cell = head.addStack();
-    cell.size = new Size(colW, 0);
-    cell.url = siteLink(base, payload, col);
-    addText(cell, `周${WEEKDAY[col.weekday]}`, {
-      size: 11, weight: col.isToday ? "bold" : "medium", color: col.isToday ? C.accent : C.sub,
-    });
-  }
-  widget.addSpacer(4);
-
-  if (!rows.length) {
-    centered(widget, C, "这一周没有课", 12);
-    return;
-  }
-  rows.forEach((row, r) => {
-    if (r) widget.addSpacer(gap);
-    const line = widget.addStack();
-    line.spacing = gap;
-    line.topAlignContent();
-    const axis = vstack(line);
-    axis.size = new Size(axisW - gap, rowH);
-    addText(axis, row.label, { size: large ? 9 : 8.5, weight: "semibold", color: C.sub, scale: 0.9 });
-    axis.addSpacer();
-    columns.forEach((col, i) => {
-      const cell = vstack(line);
-      cell.size = new Size(colW, rowH);
-      cell.url = siteLink(base, payload, col);
-      const { lessons, cancelled } = cells[i][r];
-      const opts = { width: colW, height: rowH, large };
-      if (lessons.length) {
-        weekChip(cell, C, lessons[0], { ...opts, more: lessons.length - 1 });
-      } else if (cancelled.length) {
-        cancelledChip(cell, C, cancelled[0], opts);
-      }
-    });
-  });
-  widget.addSpacer();
-}
-
-function fullChip(cell, C, lesson, { width, height, large, more }) {
-  const tint = new Color(lesson.color || "#4b63e0");
-  const chip = vstack(cell);
-  chip.size = new Size(width, height);
-  chip.setPadding(3, 4, 2, 2);
-  chip.cornerRadius = 6;
-  chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.2);
-  if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
-    chip.borderColor = lesson.state === "live" ? tint : C.warn;
-    chip.borderWidth = 1.5;
-  }
-  const name = `${lesson.name}${more ? ` +${more}` : ""}`;
-  const sizes = large ? { time: 9, name: 10, room: 8.5 } : { time: 8.5, name: 9, room: 8 };
-  chipBody(chip, C, lesson, name, chipPlan(lesson, name, { width, height, padV: 5, sizes, teacher: large }), "semibold");
-}
-
-/** 铺满模式：时间轴按真实时长铺满整块小组件，课越长格子越高，信息按格子大小尽量多放。 */
-function renderFull(widget, C, columns, family, payload, size) {
-  const large = family === "large" || family === "extraLarge";
-  const gap = 3;
-  const axisW = axisWidth(large ? 9 : 8.5, gap);
+  const axisSize = large ? 9 : 8.5;
+  const axisW = axisWidth(axisSize, gap);
   const contentW = size.w - 28;
   const colW = Math.floor((contentW - axisW - columns.length * gap) / Math.max(columns.length, 1));
   // 内容区高度：去掉内边距、标题栏、星期行，再留 4pt 余量
-  const gridH = Math.max(60, size.h - 26 - 18 - 6 - (large ? 26 : 15) - 4 - 4);
-  const { labels, cols } = fullLayout(columns, gridH);
+  const gridH = Math.max(60, size.h - 26 - 18 - 6 - (showDate ? 26 : 15) - 4 - 4);
+  const layout = gridLayout(columns, gridH, { scale });
   const base = siteUrl();
 
   widget.addSpacer(6);
@@ -1031,13 +1109,13 @@ function renderFull(widget, C, columns, family, payload, size) {
     const cell = vstack(head);
     cell.size = new Size(colW, 0);
     cell.url = siteLink(base, payload, col);
-    // 定宽的横排会把文字居中，不用弹性 Spacer（原因同周视图）
+    // 定宽的横排会把文字居中；不用左右两个弹性 Spacer，它们各占至少 8pt，窄列里会把“周一”挤成“…”
     const top = hstack(cell);
     top.size = new Size(colW, 0);
     addText(top, `周${WEEKDAY[col.weekday]}`, {
       size: 11, weight: col.isToday ? "bold" : "medium", color: col.isToday ? C.accent : C.sub,
     });
-    if (large) {
+    if (showDate) {
       const sub = hstack(cell);
       sub.size = new Size(colW, 0);
       addText(sub, shortDate(col.date), { size: 9, color: col.isToday ? C.accent : C.faint });
@@ -1045,7 +1123,7 @@ function renderFull(widget, C, columns, family, payload, size) {
   }
   widget.addSpacer(4);
 
-  if (!labels.length) {
+  if (!layout.labels.length) {
     centered(widget, C, "这一周没有课", 12);
     return;
   }
@@ -1055,26 +1133,37 @@ function renderFull(widget, C, columns, family, payload, size) {
   const axis = vstack(grid);
   axis.size = new Size(axisW - gap, gridH);
   let cursor = 0;
-  for (const label of labels) {
+  layout.labels.forEach((label, i) => {
     if (label.top - cursor >= 0.5) axis.addSpacer(label.top - cursor);
     // 标签格里只放文字：弹性 Spacer 自带约 8pt 最小长度，横着会把“13:30”挤成“13:…”，
     // 竖着会把 12pt 高的格子挤得只剩 4pt，数字上下被切掉
     const row = hstack(axis);
     row.size = new Size(axisW - gap, LABEL_H);
-    addText(row, label.text, { size: large ? 9 : 8.5, weight: "semibold", color: C.sub, scale: 0.9 });
+    addText(row, label.text, { size: axisSize, weight: "semibold", color: C.sub, scale: 0.9 });
     cursor = label.top + LABEL_H;
-  }
+    const next = i + 1 < layout.labels.length ? layout.labels[i + 1].top : gridH;
+    const unit = label.unit ? `第${label.unit}节` : "";
+    if (unit && next - cursor >= LABEL_H && textWidth(unit, 8) <= axisW - gap) {
+      const sub = hstack(axis);
+      sub.size = new Size(axisW - gap, LABEL_H);
+      addText(sub, unit, { size: 8, color: C.faint, scale: 0.9 });
+      cursor += LABEL_H;
+    }
+  });
   if (gridH - cursor >= 1) axis.addSpacer(Math.floor(gridH - cursor));
   columns.forEach((col, i) => {
     const cell = vstack(grid);
     cell.size = new Size(colW, gridH);
     cell.url = siteLink(base, payload, col);
     let y = 0;
-    for (const it of cols[i]) {
+    for (const it of layout.cols[i]) {
       if (it.top - y >= 0.5) cell.addSpacer(it.top - y);
       const h = Math.max(10, it.height - 1.5); // 前后两节紧挨着时留一条缝
-      if (it.kind === "lesson") fullChip(cell, C, it.item, { width: colW, height: h, large, more: it.more });
-      else cancelledChip(cell, C, it.item, { width: colW, height: h });
+      if (it.kind === "lesson") {
+        lessonChip(cell, C, it.item, { width: colW, height: h, large, more: it.more, needTime: !it.labeled });
+      } else {
+        cancelledChip(cell, C, it.item, { width: colW, height: h });
+      }
       y = it.top + h;
     }
     // 补齐用定长空白：最后一节课排到底时，弹性 Spacer 的最小高度会把整列往上挤，和时间轴对不齐
@@ -1162,8 +1251,7 @@ function buildWidget(payload, { family, mode, offline, resync = false, nowMs = D
     widget.url = rerun || siteLink(base, payload, block.days && block.days[0], "week");
     header(widget, C, title, weekSubtitle(block),
       headerNote(payload, offline, block.days && block.days[0], family, { changed, resync: Boolean(rerun), nowMs }), family);
-    if (mode === "full") renderFull(widget, C, columns, family, payload, widgetSize(family));
-    else renderWeek(widget, C, columns, family, payload, widgetSize(family));
+    renderGrid(widget, C, columns, family, payload, widgetSize(family), mode === "full" ? "time" : "unit");
     return widget;
   }
 
@@ -1387,7 +1475,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {

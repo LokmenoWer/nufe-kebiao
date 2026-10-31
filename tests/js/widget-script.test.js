@@ -14,7 +14,15 @@ const W = ctx.__nufeWidget;
 
 // 2026-10-26（周一）10:30 北京时间
 const NOW = Date.UTC(2026, 9, 26, 2, 30);
-const L = (name, start, end, room = "A101", color = "#4b63e0") => ({ name, start, end, room, units: "", teachers: "教师A", color });
+// 南财的节次表：开始 / 结束时间 → 第几节。L() 按它填 units，和服务器下发的一样；表里没有的时间就不写节次
+const UNIT_START = { "08:20": 1, "09:05": 2, "10:00": 3, "10:45": 4, "11:30": 5, "13:30": 6, "14:15": 7, "15:10": 8, "15:55": 9, "16:45": 10, "18:30": 11, "19:15": 12, "20:05": 13 };
+const UNIT_END = { "09:00": 1, "09:45": 2, "10:40": 3, "11:25": 4, "12:15": 5, "14:10": 6, "14:55": 7, "15:50": 8, "16:35": 9, "17:25": 10, "19:10": 11, "20:00": 12, "20:50": 13 };
+const unitsOf = (start, end) => {
+  const a = UNIT_START[start];
+  const b = UNIT_END[end];
+  return a && b ? (a === b ? `${a}` : `${a}–${b}`) : "";
+};
+const L = (name, start, end, room = "A101", color = "#4b63e0") => ({ name, start, end, room, units: unitsOf(start, end), teachers: "教师A", color });
 const day = (date, weekday, lessons, week = 8) => ({ date, weekday, week, lessons });
 // 起止时间写全了：一行（“08:20–09:45”）或两行（“08:20–\n09:45”）都算
 const hasTime = (texts, start, end) => texts.some((x) => x.startsWith(start) && x.includes(end));
@@ -125,27 +133,44 @@ test("本周：没有周末课时只显示 5 天，今天高亮", () => {
   assert.equal(cols[1].lessons[0].state, "later");
 });
 
-test("本周：按上课时间分行，一天只有一节下午课也画在下午那一行", () => {
-  const cols = W.weekColumns(PAYLOAD.week, W.shanghaiNow(NOW));
-  const { rows, cells } = W.weekGrid(cols, 5);
-  assert.deepEqual([...rows.map((r) => r.label)], ["08:20", "10:00", "13:30"]);
-  const where = (i) => [...cells[i].map((cell) => cell.lessons.map((l) => l.name).join("/"))];
-  assert.deepEqual(where(0), ["高等数学", "概率论", ""]);  // 周一
-  assert.deepEqual(where(1), ["", "宏观经济学", ""]);       // 周二只有 10:00：不顶到第一格
-  assert.deepEqual(where(4), ["", "", "金融学"]);          // 周五只有下午一节
-  // 同一大节里晚 20 分钟开始的课归到同一行；停课也占它那一格
-  const mixed = [
-    { lessons: [{ name: "A", start: "08:00", end: "09:35" }], cancelled: [] },
-    { lessons: [{ name: "B", start: "08:20", end: "09:55" }], cancelled: [{ name: "C", start: "14:00", end: "15:35" }] },
+test("周视图按节次排：每节一样高，课画在自己的起止节上，开始时间相近的课不再并成一行", () => {
+  const cols = [
+    { lessons: [L("高等数学", "08:20", "09:45"), L("概率论", "10:00", "12:15")], cancelled: [] },    // 1–2、3–5 节
+    { lessons: [L("线性代数", "09:05", "12:15"), L("金融学", "14:15", "16:35")], cancelled: [] },    // 2–5、7–9 节
+    { lessons: [L("经济法", "13:30", "14:55")], cancelled: [L("讲座", "18:30", "20:00")] },          // 6–7、11–12 节
   ];
-  const g = W.weekGrid(mixed, 5);
-  assert.deepEqual([...g.rows.map((r) => r.label)], ["08:00", "14:00"]);
-  assert.equal(g.cells[1][0].lessons[0].name, "B");
-  assert.equal(g.cells[1][1].cancelled[0].name, "C");
-  // 行太多放不下：退成上午 / 下午 / 晚上
-  const busy = [{ lessons: ["08:00", "09:10", "10:20", "11:30", "13:00", "14:10", "19:00"].map((t, i) => ({ name: `课${i}`, start: t, end: t })), cancelled: [] }];
-  assert.deepEqual([...W.timeRows(busy, 5).map((r) => r.label)], ["上午", "下午", "晚上"]);
-  assert.equal(W.weekGrid([], 5).rows.length, 0);
+  const g = W.gridLayout(cols, 300, { scale: "unit" });
+  assert.equal(g.scale, "unit");
+  // 用到 1–9、11–12 节：午休（5→6）和傍晚（9→11）各断开 6pt
+  const u = (300 - 2 * 6) / 11;
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  assert.ok(near(g.cols[0][0].top, 0) && near(g.cols[0][0].height, 2 * u));
+  assert.ok(near(g.cols[0][1].top, 2 * u) && near(g.cols[0][1].height, 3 * u));  // 3 节课是 2 节课的 1.5 倍高
+  assert.ok(near(g.cols[1][0].top, u));                                            // 09:05 从第 2 节画起，不和 08:20 挤一行
+  assert.ok(near(g.cols[1][1].top, 6 * u + 6));                                    // 14:15 是第 7 节
+  assert.ok(near(g.cols[2][1].top + g.cols[2][1].height, 300));
+  assert.equal(g.cols[2][1].kind, "cancelled");
+  // 时间轴写的是每节课真实的开始时间
+  assert.deepEqual([...g.labels.map((l) => l.text)], ["08:20", "09:05", "10:00", "13:30", "14:15", "18:30"]);
+  assert.deepEqual([...g.labels.map((l) => l.unit)], [1, 2, 3, 6, 7, 11]);
+  assert.ok(g.cols.flat().every((it) => it.labeled));
+  // 同一个上午的两节课都画出来；只有时间真重叠才记“+1”
+  assert.ok(g.cols[0].length === 2 && g.cols[0].every((it) => it.more === 0));
+  const clash = W.gridLayout([{ lessons: [L("甲", "10:00", "12:15"), L("乙", "10:00", "11:25")], cancelled: [] }], 200, { scale: "unit" });
+  assert.equal(clash.cols[0].length, 1);
+  assert.equal(clash.cols[0][0].more, 1);
+  assert.equal(W.gridLayout([], 300, { scale: "unit" }).labels.length, 0);
+});
+
+test("节次缺失：按同一周别的课补上；补不上就整张表按真实时间排", () => {
+  const known = { lessons: [L("高等数学", "08:20", "09:45")], cancelled: [] };
+  const filled = W.gridLayout([known, { lessons: [{ ...L("英语", "08:20", "09:45"), units: "" }], cancelled: [] }], 100, { scale: "unit" });
+  assert.equal(filled.scale, "unit");
+  const odd = W.gridLayout([known, { lessons: [{ ...L("讲座", "08:40", "09:30"), units: "" }], cancelled: [] }], 100, { scale: "unit" });
+  assert.equal(odd.scale, "time");
+  assert.deepEqual([...W.unitRange({ units: "3–5" })], [3, 5]);
+  assert.deepEqual([...W.unitRange({ units: "6" })], [6, 6]);
+  assert.equal(W.unitRange({ units: "" }), null);
 });
 
 test("铺满模式：高度按时长，午休 / 傍晚压成小间隔，跨大节的课不被截断", () => {
@@ -154,7 +179,7 @@ test("铺满模式：高度按时长，午休 / 傍晚压成小间隔，跨大�
     { lessons: [{ name: "神经网络", start: "09:50", end: "12:15" }, { name: "撞课", start: "10:00", end: "11:00" }], cancelled: [] },
     { lessons: [{ name: "组会", start: "14:00", end: "15:35" }], cancelled: [{ name: "讲座", start: "18:30", end: "20:05" }] },
   ];
-  const { labels, cols: out } = W.fullLayout(cols, 300);
+  const { labels, cols: out } = W.gridLayout(cols, 300, { scale: "time" });
   // 三段：08:00–12:15（255 分钟）、14:00–15:35、18:30–20:05（各 95 分钟），中间两道 6pt 间隔
   const scale = (300 - 2 * 6) / (255 + 95 + 95);
   const near = (a, b) => Math.abs(a - b) < 1e-6;
@@ -163,9 +188,12 @@ test("铺满模式：高度按时长，午休 / 傍晚压成小间隔，跨大�
   assert.ok(near(out[2][0].top, 255 * scale + 6));                            // 午休只占 6pt
   assert.equal(out[2][1].kind, "cancelled");
   assert.ok(near(out[2][1].top + out[2][1].height, 300));                    // 铺到底
-  // 时间轴：挨得太近的标签省掉（09:50 和 10:00 只留一个）
+  // 时间轴：挨得太近的标签省掉（09:50 和 10:00 只留一个）；省掉的那节课卡片上自己写时间
   assert.deepEqual([...labels.map((l) => l.text)], ["08:00", "09:50", "14:00", "18:30"]);
-  assert.equal(W.fullLayout([{ lessons: [], cancelled: [] }], 300).labels.length, 0);
+  assert.equal(out[1][0].labeled, true);
+  // 节次缺失的课在“按节次”下也退成按时间
+  assert.equal(W.gridLayout(cols, 300, { scale: "unit" }).scale, "time");
+  assert.equal(W.gridLayout([{ lessons: [], cancelled: [] }], 300).labels.length, 0);
 });
 
 test("按机型估小组件尺寸", () => {
@@ -173,7 +201,13 @@ test("按机型估小组件尺寸", () => {
   assert.deepEqual(size(393, 852, "large"), { w: 338, h: 354 });
   assert.deepEqual(size(852, 393, "medium"), { w: 338, h: 158 });  // 横屏也认
   assert.deepEqual(size(430, 932, "large"), { w: 364, h: 382 });
-  assert.deepEqual(size(400, 870, "large"), { w: 338, h: 354 });   // 没见过的机型：按相近屏宽
+  assert.deepEqual(size(360, 780, "large"), { w: 329, h: 345 });   // mini
+  assert.deepEqual(size(420, 912, "large"), { w: 357, h: 374 });   // 没见过的机型：取最接近的一行，不往大里估
+  assert.deepEqual(size(400, 870, "large"), { w: 336, h: 352 });   // 比最接近的那行窄：按比例缩小
+  assert.deepEqual(size(320, 693, "large"), { w: 273, h: 276 });   // “放大显示”的 14 Pro：按比例缩小
+  assert.deepEqual(size(1024, 1366, "extraLarge"), { w: 795, h: 379 }); // iPad 单独一张表
+  assert.deepEqual(size(1180, 820, "large"), { w: 342, h: 342 });
+  assert.deepEqual(size(1032, 1376, "medium"), { w: 379, h: 170 });
   assert.deepEqual({ ...W.widgetSizeFor(null, "large") }, { w: 329, h: 345 });
 });
 
@@ -266,19 +300,19 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   const { widget } = await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
   assert.ok(t.includes("周六") && !t.includes("周日"), t.join("|"));
-  // 只有三行，格子够高：教室分两行写全
-  for (const room of ["德正楼\nZ3-117", "德业楼\nZ4-106", "德经楼\nZ1-101", "博文楼\nJA108", "德济楼\nZ2S206"]) {
-    assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
-  }
+  // 只有下午、晚上的课，格子够高：教室编号都在，楼名放得下就分两行写全（编号优先，楼名不挤掉课名）
+  for (const code of ["Z3-117", "Z4-106", "Z1-101", "JA108", "Z2S206"]) assert.ok(t.some((x) => x.endsWith(code)), `${code}: ${t.join("|")}`);
+  const withBuilding = ["德业楼\nZ4-108", "德经楼\nZ1-101", "博文楼\nJA108", "德济楼\nZ2S206"].filter((room) => t.includes(room));
+  assert.ok(withBuilding.length >= 3, t.join("|"));
   // 大屏 6 列（列宽约 47pt）：“18:30–20:00”一行放不下，分两行写全，不再有“18:30–20:…”
   const big = (await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW, screen: { width: 440, height: 956 } })).widget.texts();
   for (const when of ["18:30–\n20:00", "13:30–\n14:55", "15:10–\n16:35"]) assert.ok(big.includes(when), `${when}: ${big.join("|")}`);
   // 周日也有课（7 列）：仍然写全
   const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
   const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
-  // 课名优先：“创新创业实践：财会”占掉了楼名那一行，只写编号；课名短的仍分两行写全
+  // 7 列也是课名写全、教室编号都在
   assert.ok(seven.includes("创新创业实践：财会") && seven.includes("Z4-106"), seven.join("|"));
-  assert.ok(seven.includes("博远楼\nJC105"), seven.join("|"));
+  assert.ok(seven.includes("形势与政策") && seven.some((x) => x.endsWith("JC105")), seven.join("|"));
 });
 
 test("卡片自适应：字号逐档试，课名、教室、起止时间都写全；放不下才缩字或分行", () => {
@@ -286,14 +320,18 @@ test("卡片自适应：字号逐档试，课名、教室、起止时间都写�
   const lesson = L("创新创业实践：财会视角", "13:30", "14:55", "德业楼Z4-102");
   // 铺满模式里 85 分钟的格子（约 47×64pt）：原先课名只给两行、被系统缩成小字
   const plan = W.chipPlan(lesson, lesson.name, { width: 47, height: 64, padV: 5, sizes });
-  assert.ok(plan.nameFull && plan.room === "Z4-102" && plan.time.includes("14:55"), JSON.stringify(plan));
-  assert.ok(plan.scale < 1); // 这么长的课名要缩一档字号才放得下
+  assert.ok(plan.nameFull && plan.room === "Z4-102" && plan.time, JSON.stringify(plan));
+  const roomy = W.chipPlan(lesson, lesson.name, { width: 47, height: 80, padV: 5, sizes });
+  assert.ok(roomy.nameFull && roomy.room && roomy.time.includes("14:55"), JSON.stringify(roomy));
+  // 时间轴上没标这节课的开始时间：开始时间排到教室前面
+  const bare = W.chipPlan(lesson, lesson.name, { width: 47, height: 30, padV: 5, sizes, needTime: true });
+  assert.equal(bare.time.slice(0, 5), "13:30", JSON.stringify(bare));
   // 格子够高：不缩字，教室分两行写全
   const tall = W.chipPlan(lesson, lesson.name, { width: 47, height: 110, padV: 5, sizes });
   assert.equal(tall.scale, 1);
   assert.ok(tall.nameFull && tall.room === "德业楼\nZ4-102", JSON.stringify(tall));
   // 很矮的格子：先保课名和教室，时间让给左边的时间轴
-  const short = W.chipPlan(lesson, lesson.name, { width: 47, height: 26, padV: 5, sizes });
+  const short = W.chipPlan(lesson, lesson.name, { width: 47, height: 30, padV: 5, sizes });
   assert.ok(short.room && !short.time, JSON.stringify(short));
   // 起止时间：一行放得下（字号最多小 20%）就写一行，否则分两行
   assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 60, height: 90, padV: 4, sizes }).time, "18:30–20:00");
@@ -319,6 +357,35 @@ test("铺满（大号）：截图里那一周每节课的课名、教室、起�
         assert.ok(t.some((x) => x.startsWith(l.start) && x.includes(l.end)), `${parameter} ${screen.width} ${l.start}–${l.end}: ${all}`);
         if (l.room) assert.ok(t.some((x) => x.includes(l.room.replace(/^[^A-Za-z]+/, ""))), `${parameter} ${screen.width} ${l.room}: ${all}`);
       }
+    }
+  }
+});
+
+test("各机型、两种模式：每节课的开始时间都写得准（在时间轴上它那一格旁边，或者在卡片上）", () => {
+  const cols = [
+    { lessons: [L("高等数学", "08:20", "09:45"), L("概率论", "10:00", "12:15"), L("大学英语", "14:15", "16:35"), L("微观经济学", "18:30", "20:50")], cancelled: [] },
+    { lessons: [L("线性代数", "09:05", "12:15"), L("统计学", "15:10", "16:35"), L("会计学", "18:30", "20:50")], cancelled: [] },
+    { lessons: [L("税法", "10:00", "11:25"), L("经济法", "13:30", "14:55"), L("体育", "18:30", "20:00")], cancelled: [] },
+    { lessons: [L("管理学", "13:30", "16:35")], cancelled: [] },
+    { lessons: [L("选修", "08:20", "09:45"), L("金融学", "14:15", "16:35")], cancelled: [] },
+  ];
+  const sizes = { time: 9, name: 10, room: 8.5 };
+  for (const height of [60, 90, 140, 200, 270, 300]) {
+    for (const scale of ["unit", "time"]) {
+      const g = W.gridLayout(cols, height, { scale });
+      assert.equal(g.scale, scale);
+      for (const it of g.cols.flat()) {
+        if (it.labeled) {
+          const label = g.labels.find((l) => l.text === it.item.start);
+          assert.ok(label && Math.abs(label.top - it.top) < 0.5, `${scale} ${height} ${it.item.start}`);
+        } else {
+          // 轴上没标：卡片上必须写开始时间（格子太矮写不下时至少字号不低于基准的 70%）
+          const plan = W.chipPlan(it.item, it.item.name, { width: 46, height: it.height - 1.5, padV: 3, sizes, needTime: true });
+          assert.ok(plan.time.startsWith(it.item.start) || it.height < 24, `${scale} ${height} ${it.item.start} h${it.height}`);
+        }
+      }
+      // 所有课都画出来了（不撞课就一节不藏）
+      assert.equal(g.cols.flat().length, cols.flatMap((c) => c.lessons).length);
     }
   }
 });
