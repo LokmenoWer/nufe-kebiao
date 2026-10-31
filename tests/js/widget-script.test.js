@@ -16,6 +16,8 @@ const W = ctx.__nufeWidget;
 const NOW = Date.UTC(2026, 9, 26, 2, 30);
 const L = (name, start, end, room = "A101", color = "#4b63e0") => ({ name, start, end, room, units: "", teachers: "教师A", color });
 const day = (date, weekday, lessons, week = 8) => ({ date, weekday, week, lessons });
+// 起止时间写全了：一行（“08:20–09:45”）或两行（“08:20–\n09:45”）都算
+const hasTime = (texts, start, end) => texts.some((x) => x.startsWith(start) && x.includes(end));
 const PAYLOAD = {
   v: 1,
   status: "ok",
@@ -226,7 +228,8 @@ test("铺满（大号）：每天一列带日期，卡片写起止时间、课�
   const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "full", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
   assert.equal(t[0], "本周");
-  for (const x of ["周一", "10/26", "08:20", "08:20–09:45", "高等数学", "A101", "教师A", "金融学"]) assert.ok(t.includes(x), `${x}: ${t.join("|")}`);
+  for (const x of ["周一", "10/26", "08:20", "高等数学", "A101", "教师A", "金融学"]) assert.ok(t.includes(x), `${x}: ${t.join("|")}`);
+  assert.ok(hasTime(t, "08:20", "09:45"), t.join("|"));
   assert.ok(widget.urls().includes("https://kb.example.com/#sem=161&w=8&view=day&d=4"));
   const medium = await runWidgetScript({ payload: PAYLOAD, family: "medium", parameter: "full", url: URL_OK, nowMs: NOW });
   assert.ok(medium.widget.texts().includes("金融学") && !medium.widget.texts().includes("10/26"));
@@ -273,7 +276,9 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   // 周日也有课（7 列）：仍然写全
   const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
   const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
-  for (const room of ["德业楼\nZ4-106", "博远楼\nJC105"]) assert.ok(seven.includes(room), `${room}: ${seven.join("|")}`);
+  // 课名优先：“创新创业实践：财会”占掉了楼名那一行，只写编号；课名短的仍分两行写全
+  assert.ok(seven.includes("创新创业实践：财会") && seven.includes("Z4-106"), seven.join("|"));
+  assert.ok(seven.includes("博远楼\nJC105"), seven.join("|"));
 });
 
 test("卡片自适应：字号逐档试，课名、教室、起止时间都写全；放不下才缩字或分行", () => {
@@ -291,7 +296,7 @@ test("卡片自适应：字号逐档试，课名、教室、起止时间都写�
   const short = W.chipPlan(lesson, lesson.name, { width: 47, height: 26, padV: 5, sizes });
   assert.ok(short.room && !short.time, JSON.stringify(short));
   // 起止时间：一行放得下（字号最多小 20%）就写一行，否则分两行
-  assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 53, height: 90, padV: 4, sizes }).time, "18:30–20:00");
+  assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 60, height: 90, padV: 4, sizes }).time, "18:30–20:00");
   assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 47, height: 90, padV: 4, sizes }).time, "18:30–\n20:00");
 });
 
@@ -340,7 +345,7 @@ test("本周（大号）：每天一列，课程名和教室都在", async () =>
   // 左边是时间轴：每行一个上课时间
   assert.ok(t.includes("08:20") && t.includes("10:00") && t.includes("13:30"), t.join("|"));
   // 每张卡片顶上写自己的起止时间
-  assert.ok(t.includes("08:20–09:45") && t.includes("13:30–14:55"), t.join("|"));
+  assert.ok(hasTime(t, "08:20", "09:45") && hasTime(t, "13:30", "14:55"), t.join("|"));
   // 有周末课时格子太窄：只写开始时间；只有周六有课时不画空的周日
   const withWeekend = (...weekdays) => ({ ...PAYLOAD, week: { ...PAYLOAD.week, days: PAYLOAD.week.days.map((d) => (weekdays.includes(d.weekday) ? { ...d, lessons: [L("选修", "08:20", "09:45")] } : d)) } });
   const six = (await runWidgetScript({ payload: withWeekend(6), family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();

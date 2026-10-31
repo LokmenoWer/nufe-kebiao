@@ -39,7 +39,7 @@ const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认�
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const ROW_GAP_MINUTES = 60;            // 周视图：开始时间相差不到这么久的课排在同一行
 const FULL_GAP = 6;                    // 铺满模式：上午 / 下午 / 晚上之间压缩成这么高的间隔
-const LABEL_H = 12;                    // 铺满模式：时间轴一个标签占的高度
+const LABEL_H = 13;                    // 铺满模式：时间轴一个标签占的高度
 // 各机型（竖屏，pt）的小组件尺寸：[屏宽, 屏高, 小号边长, 中/大号宽, 大号高]。来自 Apple 的小组件尺寸表
 const WIDGET_SIZES = [
   [440, 956, 170, 364, 382], [430, 932, 170, 364, 382], [428, 926, 170, 364, 382],
@@ -635,13 +635,14 @@ function roomText(lesson, room = lesson.room) {
 }
 
 /**
- * 粗估一行字的宽度（pt）。Scriptable 量不了文字，只能估：汉字一个字号宽，字母数字约 0.62 个，
- * 冒号、点、空格约 0.3 个，“-”约 0.4 个，“–”约 0.55 个（按苹方 / SF 半粗体的实际字宽取偏大的值）。
+ * 粗估一行字的宽度（pt）。Scriptable 量不了文字，只能估，宁可估宽：估窄了会被截成“…”，估宽了只是多折一行。
+ * 汉字一个字号宽；字母数字按 0.68 个（真机上“08:20–09:45”在 8.5pt 下超过 52pt，SF 半粗体数字比 0.62 宽）；
+ * 冒号、点按 0.35 个，“-”0.45 个，空格 0.3 个，“–”0.75 个。
  */
 function textWidth(text, size) {
   let w = 0;
   for (const ch of String(text || "")) {
-    w += size * (ch === "–" ? 0.55 : /[\u2e80-\uffff]/.test(ch) ? 1 : ch === "-" ? 0.4 : /[:. ]/.test(ch) ? 0.3 : 0.62);
+    w += size * (ch === "–" ? 0.75 : /[\u2e80-\uffff]/.test(ch) ? 1 : ch === "-" ? 0.45 : ch === " " ? 0.3 : /[:.]/.test(ch) ? 0.35 : 0.68);
   }
   return w;
 }
@@ -679,12 +680,14 @@ function splitRoom(room, width, size) {
 
 const CHIP_SCALES = [1, 0.9, 0.8];  // 卡片字号最多缩到 0.8 倍，再小就看不清
 const LINE_RATIO = 1.2;             // 行高 ≈ 字号 × 1.2
+const CHIP_SLACK = 2;               // 行高是估的，每张卡片留一点余量
 
 /**
  * 一张课程卡片怎么排：依次试几档字号，每档按优先级往格子里放——
  *   课名第一行 → 教室编号 → 开始时间 → 课名写全 → 结束时间（一行放不下就分两行）→ 教室楼名 → 教师，
  * 取信息最全的一档，一样全就取字大的。起止时间单独按宽度定字号（最多小 20%），放不下再分两行。楼名和教师不计分：不为它们缩字，放得下才写。
  * 所有文字都按估出来的宽度和行数排好，不靠系统自动缩字（缩到下限还放不下就会截成“…”）。
+ * 返回的 left 是估计还剩下的高度，chipBody 用定长空白把内容顶到上面。
  * sizes：{ time, name, room } 的基准字号；padV：卡片上下内边距之和。
  */
 function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teacher = false }) {
@@ -695,7 +698,7 @@ function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teach
   for (const scale of CHIP_SCALES) {
     const sz = { time: sizes.time * scale, name: sizes.name * scale, room: sizes.room * scale };
     const lh = (size, lines = 1) => size * LINE_RATIO * lines;
-    let left = height - padV - lh(sz.name);
+    let left = height - padV - CHIP_SLACK - lh(sz.name);
     const take = (h) => {
       if (h > left + 0.5) return false;
       left -= h;
@@ -737,6 +740,7 @@ function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teach
       plan.roomLines += 1;
     }
     if (teacher && lesson.teachers && take(lh(sz.room))) plan.teacher = true;
+    plan.left = left;
     if (!best || plan.score > best.score) best = plan;
   }
   return best;
@@ -756,7 +760,9 @@ function chipBody(chip, C, lesson, name, plan, nameWeight) {
   });
   if (plan.room) addText(chip, plan.room, { size: sz.room, color: C.sub, lines: plan.roomLines, scale: 0.9 });
   if (plan.teacher) addText(chip, lesson.teachers, { size: sz.room, color: C.faint, scale: 0.9 });
-  chip.addSpacer();
+  // 把内容顶到上面：用定长空白而不是 addSpacer()——弹性 Spacer 自带约 8pt 最小高度，
+  // 格子排得满时系统会从课名里砍掉一行给它（“经济学…”就是这么来的）
+  if (plan.left >= 1) chip.addSpacer(Math.floor(plan.left));
 }
 
 function lessonMeta(lesson, showTeacher) {
@@ -936,7 +942,7 @@ function renderWeek(widget, C, columns, family, payload, size) {
   const { rows, cells } = weekGrid(columns, large ? 7 : 5);
   const width = size.w - 28;
   const gap = 3;
-  const axisW = axisWidth(large ? 9.5 : 8.5, gap);
+  const axisW = axisWidth(large ? 9 : 8.5, gap);
   const colW = Math.floor((width - axisW - columns.length * gap) / Math.max(columns.length, 1));
   // 去掉内边距、标题栏、星期行，再留 4pt 余量，剩下的给课程格
   const avail = size.h - 26 - 18 - 6 - 14 - 4 - 4;
@@ -950,14 +956,13 @@ function renderWeek(widget, C, columns, family, payload, size) {
   head.spacing = gap;
   head.addSpacer(axisW);
   for (const col of columns) {
+    // 定宽的格子会把内容居中；不用左右两个弹性 Spacer，它们各占至少 8pt，窄列里会把“周一”挤成“…”
     const cell = head.addStack();
     cell.size = new Size(colW, 0);
     cell.url = siteLink(base, payload, col);
-    cell.addSpacer();
     addText(cell, `周${WEEKDAY[col.weekday]}`, {
       size: 11, weight: col.isToday ? "bold" : "medium", color: col.isToday ? C.accent : C.sub,
     });
-    cell.addSpacer();
   }
   widget.addSpacer(4);
 
@@ -972,7 +977,7 @@ function renderWeek(widget, C, columns, family, payload, size) {
     line.topAlignContent();
     const axis = vstack(line);
     axis.size = new Size(axisW - gap, rowH);
-    addText(axis, row.label, { size: large ? 9.5 : 8.5, weight: "semibold", color: C.sub, scale: 0.7 });
+    addText(axis, row.label, { size: large ? 9 : 8.5, weight: "semibold", color: C.sub, scale: 0.9 });
     axis.addSpacer();
     columns.forEach((col, i) => {
       const cell = vstack(line);
@@ -1010,7 +1015,7 @@ function fullChip(cell, C, lesson, { width, height, large, more }) {
 function renderFull(widget, C, columns, family, payload, size) {
   const large = family === "large" || family === "extraLarge";
   const gap = 3;
-  const axisW = axisWidth(large ? 9.5 : 8.5, gap);
+  const axisW = axisWidth(large ? 9 : 8.5, gap);
   const contentW = size.w - 28;
   const colW = Math.floor((contentW - axisW - columns.length * gap) / Math.max(columns.length, 1));
   // 内容区高度：去掉内边距、标题栏、星期行，再留 4pt 余量
@@ -1026,17 +1031,16 @@ function renderFull(widget, C, columns, family, payload, size) {
     const cell = vstack(head);
     cell.size = new Size(colW, 0);
     cell.url = siteLink(base, payload, col);
+    // 定宽的横排会把文字居中，不用弹性 Spacer（原因同周视图）
     const top = hstack(cell);
-    top.addSpacer();
+    top.size = new Size(colW, 0);
     addText(top, `周${WEEKDAY[col.weekday]}`, {
       size: 11, weight: col.isToday ? "bold" : "medium", color: col.isToday ? C.accent : C.sub,
     });
-    top.addSpacer();
     if (large) {
       const sub = hstack(cell);
-      sub.addSpacer();
+      sub.size = new Size(colW, 0);
       addText(sub, shortDate(col.date), { size: 9, color: col.isToday ? C.accent : C.faint });
-      sub.addSpacer();
     }
   }
   widget.addSpacer(4);
@@ -1053,14 +1057,14 @@ function renderFull(widget, C, columns, family, payload, size) {
   let cursor = 0;
   for (const label of labels) {
     if (label.top - cursor >= 0.5) axis.addSpacer(label.top - cursor);
-    // 竖排：横排里的 Spacer 自带约 8pt 的最小宽度，会把“13:30”挤成“13:…”
-    const row = vstack(axis);
+    // 标签格里只放文字：弹性 Spacer 自带约 8pt 最小长度，横着会把“13:30”挤成“13:…”，
+    // 竖着会把 12pt 高的格子挤得只剩 4pt，数字上下被切掉
+    const row = hstack(axis);
     row.size = new Size(axisW - gap, LABEL_H);
-    addText(row, label.text, { size: large ? 9.5 : 8.5, weight: "semibold", color: C.sub, scale: 0.9 });
-    row.addSpacer();
+    addText(row, label.text, { size: large ? 9 : 8.5, weight: "semibold", color: C.sub, scale: 0.9 });
     cursor = label.top + LABEL_H;
   }
-  axis.addSpacer();
+  if (gridH - cursor >= 1) axis.addSpacer(Math.floor(gridH - cursor));
   columns.forEach((col, i) => {
     const cell = vstack(grid);
     cell.size = new Size(colW, gridH);
@@ -1073,7 +1077,8 @@ function renderFull(widget, C, columns, family, payload, size) {
       else cancelledChip(cell, C, it.item, { width: colW, height: h });
       y = it.top + h;
     }
-    cell.addSpacer();
+    // 补齐用定长空白：最后一节课排到底时，弹性 Spacer 的最小高度会把整列往上挤，和时间轴对不齐
+    if (gridH - y >= 1) cell.addSpacer(Math.floor(gridH - y));
   });
 }
 
