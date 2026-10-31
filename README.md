@@ -109,6 +109,7 @@ deploy/deploy.sh
 - 服务器上的 `.env`（含独立生成的 `APP_SECRET_KEY`）和 `data/` 只在首次部署时创建，之后不会被覆盖。
 - 反向代理示例（Apache）：在站点的 `*:443` vhost 里加一行 `Include /etc/apache2/kebiao-proxy.conf`（内容见 `deploy/apache-kebiao.conf`），把 `/kebiao/` 反代到 8010 并去掉前缀。前端全部使用相对路径，会话 cookie 的 path 是 `/kebiao/`。
 - 查看日志：`journalctl -u kebiao -f`
+- 看后台刷新在干什么：`journalctl -u kebiao | grep "tick:"`——有人到期、刷了人或预算变化时每个 tick 一行，如 `tick: due=12 refreshed=8 budget=0.65/s (max 0.65)`；学校报错导致预算减半时会写明。
 - 健康检查：`GET /healthz` 返回 `{"ok": true}`。
 
 > 订阅链接里的 token 就是凭证。应用已对自身的 uvicorn access log 做 `/ics/<redacted>` 脱敏；如果反向代理、CDN 或云厂商还会记录完整 URL，请自行对 `/ics/` 路径脱敏或不记录。

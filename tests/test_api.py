@@ -1439,3 +1439,26 @@ def test_failure_clears_pending_request(up):
     c.post("/api/refresh", headers=_csrf(c), json={})
     assert _row("2023001", "refresh_requested_at")[0] is None
     assert service_uid("2023001") not in _queued(far_future=True)  # needs_rebind：暂停
+
+
+def test_scheduler_tick_summary_log(up, monkeypatch, caplog):
+    import logging
+    c = TestClient(app)
+    _login(c, "2023001")
+    _login(TestClient(app), "2023002")
+    monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
+    caplog.set_level(logging.INFO, logger="kebiao.scheduler")
+    scheduler.run_once(_budget())  # 都是刚登录的新数据：没人到期，不记
+    assert not [r for r in caplog.records if "tick:" in r.getMessage()]
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_success_at=last_success_at-30*86400")
+    scheduler.run_once(_budget(tokens=1))  # 两人到期，预算只够刷一个
+    msg = [r.getMessage() for r in caplog.records if "tick:" in r.getMessage()][-1]
+    assert "due=2 refreshed=1" in msg and "budget=0.65/s" in msg
+    # 学校报错：预算减半并写明原因
+    from app import polite
+    monkeypatch.setattr(polite, "health", lambda: (2.0, 0.0))
+    b = _budget(tokens=0)
+    scheduler.run_once(b)
+    msg = [r.getMessage() for r in caplog.records if "tick:" in r.getMessage()][-1]
+    assert "budget=0.33/s" in msg and "减半" in msg

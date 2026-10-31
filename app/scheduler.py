@@ -55,10 +55,12 @@ _budget = Budget()
 def run_once(budget: Budget | None = None) -> int:
     """一个 tick：调整预算，从最逾期的人开始刷。返回刷了几个人。"""
     budget = budget or _budget
+    before = budget.rate
     budget.adjust(*polite.health())
     budget.refill()
+    due = service.candidates(limit=1_000_000)
     done = 0
-    for _score, uid in service.candidates(limit=int(budget.tokens) + 5):
+    for _score, uid in due:
         if _stop.is_set() or budget.tokens < 1:
             break
         if not service.still_due(uid):
@@ -81,6 +83,11 @@ def run_once(budget: Budget | None = None) -> int:
         done += 1
         if _stop.wait(random.uniform(*USER_GAP)):
             break
+    # 有人到期、刷了人、或预算变了才记一行：平时安静，需要时能看出调度器在干什么
+    if due or done or budget.rate != before:
+        log.info("tick: due=%d refreshed=%d budget=%.2f/s (max %.2f)%s",
+                 len(due), done, budget.rate, budget.max_rate,
+                 "" if budget.rate >= before else " ↓ 学校报错或要求暂停，预算减半")
     return done
 
 
