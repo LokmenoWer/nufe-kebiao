@@ -180,12 +180,14 @@ def reauth_method(html: str, reauth_type: str) -> str:
 
     sms = 短信验证码（reAuthType=3 或有 dynamicCode 输入框）；otp = 动态口令 / 身份验证器 App（otpCode 输入框）。
     其余（密保问题、邮箱、App 扫码确认等）返回描述文字，由调用方提示用户换一种方式。
+    学校的页面模板会把各种方式的输入框一起放进去、按 reAuthType 显示其一，所以先认 reAuthType，
+    两个输入框都在时按短信算（没绑身份验证器的人收不到动态口令）。
     """
     soup = BeautifulSoup(html or "", "html.parser")
-    if _has_input(soup, "otpCode"):
-        return "otp"
     if reauth_type == "3" or _has_input(soup, "dynamicCode"):
         return "sms"
+    if _has_input(soup, "otpCode"):
+        return "otp"
     if _has_input(soup, "answer1") or "密保" in (html or ""):
         return "密保问题"
     if "邮箱" in (html or ""):
@@ -265,12 +267,16 @@ def parse_reauth_page(url: str, html: str) -> dict:
     m = re.search(r"1\d{2}\*{4}\d{4}", html)
     if m:
         info["phone"] = m.group(0)
-    info["reAuthType"] = _reauth_param(html, "reAuthType") or "3"
+    raw_type = _reauth_param(html, "reAuthType")
+    info["reAuthType"] = raw_type or "3"
     info["isMultifactor"] = _reauth_param(html, "isMultifactor") or "true"
     info["userId"] = _reauth_param(html, "reAuthUserId")
     info["service"] = (_reauth_param(html, "service")
                        or (parse_qs(urlparse(url).query).get("service") or [""])[0])
-    info["method"] = reauth_method(html, info["reAuthType"])
+    # 用页面上真实的 reAuthType 判断；缺省值 3 只用于提交，不能让它把只有 otpCode 的页面认成短信
+    info["method"] = reauth_method(html, raw_type)
+    if info["method"].startswith("未知方式") and not raw_type:
+        info["method"] = "sms"  # 页面什么都没认出来时沿用以前的默认：短信
     return info
 
 

@@ -448,6 +448,11 @@ def test_slider_sign_matches_page_plugin():
 def test_reauth_method_detection():
     assert cas.reauth_method('<input id="dynamicCode">', "3") == "sms"
     assert cas.reauth_method('<input id="otpCode" name="otpCode">', "5") == "otp"
+    # 学校模板里两套输入框都在：按 reAuthType / 短信算，不能当成动态口令
+    both = '<input id="dynamicCode" name="dynamicCode"><input id="otpCode" name="otpCode">'
+    assert cas.reauth_method(both, "3") == "sms"
+    assert cas.reauth_method(both, "") == "sms"
+    assert cas.reauth_method('<input id="otpCode">', "") == "otp"
     assert cas.reauth_method('<input name="answer1"><input name="answer2">', "6") == "密保问题"
     assert cas.reauth_method("请输入邮箱验证码", "4") == "邮箱验证码"
     assert "reAuthType=9" in cas.reauth_method("<p>?</p>", "9")
