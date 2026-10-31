@@ -10,6 +10,7 @@
 }
 
 .week-grid {
+  --lesson-inset: 3px;
   display: grid;
   grid-template-columns: 58px repeat(var(--days, 7), minmax(0, 1fr));
   align-items: stretch;
@@ -339,39 +340,38 @@
 
 /* ---------- 小屏 ---------- */
 @media (max-width: 760px) {
-  /* 手机上把周视图变成可横向滚动的表格，列宽保持可读，时间轴固定在左侧 */
-  .week-card {
-    max-height: calc(100vh - 235px);
-    max-height: calc(100dvh - 235px);
-    overflow: auto;
-  }
+  /* 手机上整周压进一屏宽：不横向滚动、不套内层滚动框，随页面纵向滚动，表头吸顶 */
   .week-grid {
-    grid-template-columns: 38px repeat(var(--days, 7), minmax(96px, 1fr));
-    min-width: calc(38px + var(--days, 7) * 96px);
+    --lesson-inset: 1.5px;
+    grid-template-columns: 30px repeat(var(--days, 7), minmax(0, 1fr));
   }
-  .week-corner {
-    top: 0;
-    left: 0;
-    z-index: 10;
-  }
-  .week-day { top: 0; }
-  .week-axis {
-    position: sticky;
-    left: 0;
-    z-index: 6;
-    background: var(--surface);
-    box-shadow: 1px 0 0 var(--line);
-  }
-  .week-day { padding: 8px 0 6px; }
+  .week-day { padding: 7px 0 6px; gap: 1px; }
   .week-day-name { font-size: 11px; }
   .week-day-date { min-width: 22px; padding: 0 4px; font-size: 12px; }
-  .week-tick { right: 4px; font-size: 9.5px; }
-  .week-now-tag { right: 2px; font-size: 9px; padding: 0 3px; }
-  .lesson-block { padding: 4px 4px 4px 6px; border-left-width: 2px; border-radius: 7px; font-size: 10.5px; }
-  .lesson-name { font-size: 10.5px; -webkit-line-clamp: 3; }
-  .lesson-room { font-size: 9.5px; }
+  .week-tick { right: 3px; font-size: 9px; letter-spacing: -0.02em; }
+  .week-now-tag { right: 1px; font-size: 8.5px; padding: 0 2px; letter-spacing: -0.02em; }
+  .lesson-block {
+    padding: 3px 2px 3px 4px;
+    border-left-width: 2px;
+    border-radius: 6px;
+    font-size: 10px;
+    line-height: 1.25;
+  }
+  .lesson-name,
+  .lesson-room { overflow-wrap: anywhere; }
+  .lesson-name { font-size: 10.5px; line-height: 1.25; -webkit-line-clamp: 4; }
+  .lesson-room {
+    display: -webkit-box;
+    font-size: 9px;
+    line-height: 1.25;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
   .lesson-teacher { display: none; }
   .lesson-badge { display: none; }
+  .lesson-block.is-compact { padding-top: 2px; padding-bottom: 2px; }
+  .lesson-block.is-compact .lesson-name { font-size: 10px; -webkit-line-clamp: 2; }
   .day-strip { gap: 4px; margin-bottom: 12px; }
   .day-tab { padding: 7px 0 10px; border-radius: 11px; }
   .day-tab-name { font-size: 10.5px; }
@@ -383,9 +383,8 @@
 }
 
 @media (max-width: 420px) {
-  .week-grid { grid-template-columns: 32px repeat(var(--days, 7), minmax(0, 1fr)); }
+  .week-grid { grid-template-columns: 28px repeat(var(--days, 7), minmax(0, 1fr)); }
   .week-day-name { font-size: 10px; }
-  .lesson-block { padding: 3px 3px 3px 5px; }
   .lesson-name { font-size: 10px; }
   .day-tab { padding: 6px 0 9px; }
   .day-tab-date { font-size: 13px; }

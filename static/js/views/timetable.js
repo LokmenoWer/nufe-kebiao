@@ -60,8 +60,8 @@ class TimetableController {
       semesterId: preferredSemester && knownSemesters.has(Number(preferredSemester))
         ? Number(preferredSemester)
         : me?.current_semester_id || null,
-      view: hash.view || readViewPreference()
-        || (window.matchMedia("(max-width: 760px)").matches ? "day" : "week"),
+      // 手机上的周视图也会把整周压进一屏宽，默认先看整周
+      view: hash.view || readViewPreference() || "week",
       week: hash.week || 1,
       day: hash.day ?? T.dayIndex(new Date()),
       loading: true,
@@ -690,8 +690,8 @@ class TimetableController {
 
   pixelPerMinute() {
     const width = window.innerWidth;
-    if (width <= 420) return 0.78;
-    if (width <= 680) return 0.86;
+    // 手机上列很窄，课程名要折成多行，纵向反而要留得比桌面略高
+    if (width <= 760) return 0.92;
     if (width <= 1080) return 1.0;
     return 1.12;
   }
@@ -853,8 +853,8 @@ class TimetableController {
         "--c": item.color,
         top: `${top}px`,
         height: `${height}px`,
-        left: `calc(${item.lane * width}% + 3px)`,
-        width: `calc(${width}% - 6px)`,
+        left: `calc(${item.lane * width}% + var(--lesson-inset))`,
+        width: `calc(${width}% - 2 * var(--lesson-inset))`,
       },
       dataset: { start: String(item.start), end: String(item.end), day: String(item.day) },
       "aria-label": `${item.courseName}，${T.WEEKDAY_LONG[item.day]} ${T.formatMinutes(item.start)} 到 ${T.formatMinutes(item.end)}，${room}，${teachers}`,
