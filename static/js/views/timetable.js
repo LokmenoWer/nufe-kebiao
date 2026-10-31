@@ -348,6 +348,8 @@ class TimetableController {
     const next = T.clamp(day, 0, 6);
     if (next !== this.state.day) {
       this.state.day = next;
+      // “今天”按钮是否可用取决于选中的是不是今天，必须跟着刷新工具栏
+      this.renderToolbar();
       this.renderView();
       this.syncHash();
     }
@@ -368,12 +370,11 @@ class TimetableController {
     }
     const maxWeek = this.maxWeek();
     if (week < 1 || week > maxWeek) return;
-    if (week !== this.state.week) {
-      this.state.week = week;
-      this.renderToolbar();
-      this.renderMeta();
-    }
+    const weekChanged = week !== this.state.week;
+    this.state.week = week;
     this.state.day = day;
+    this.renderToolbar();
+    if (weekChanged) this.renderMeta();
     this.renderView();
     this.syncHash();
     this.updateTitle();
