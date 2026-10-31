@@ -1,4 +1,4 @@
-/** 设置抽屉：账号、自动刷新、邮件通知、日历订阅、外观、删除数据。 */
+/** 设置抽屉：账号、自动刷新、邮件通知、日历订阅、桌面小组件、外观、删除数据。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -9,6 +9,7 @@ import * as T from "../time.js";
 import { initialOf } from "../courses.js";
 import { getThemeMode, setThemeMode } from "../theme.js";
 import { createEmailSection } from "./settings-email.js";
+import { createWidgetSection } from "./settings-widget.js";
 
 const STATUS = {
   ok: { label: "正常", tone: "ok" },
@@ -113,6 +114,14 @@ export function openSettings({
     })
     : null;
 
+  const widgetSection = createWidgetSection({
+    widgetUrl: current.widget_url,
+    onChange: (url) => {
+      current.widget_url = url;
+      onUpdated?.(current);
+    },
+  });
+
   const content = h("div", { class: "settings-body" },
     h("header", { class: "settings-head" },
       h("h2", { id: "settings-title" }, "账号与设置"),
@@ -142,6 +151,8 @@ export function openSettings({
       h("div", { class: "copy-row" }, icsInput, copyBtn),
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
       icsInfo),
+
+    section("桌面小组件（iOS）", widgetSection.el),
 
     section("外观", themeButtons),
 

@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import cas, crypto, db, mailer, notify, scheduler, service
+from . import cas, crypto, db, mailer, notify, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     MAX_USER_REFRESH_TIMES,
@@ -51,23 +51,27 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("kebiao.web")
 
 
-class _RedactIcsPath(logging.Filter):
-    """订阅链接本身就是凭证，不能出现在 uvicorn 的访问日志里。"""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.args, tuple):
-            record.args = tuple(
-                "/ics/<redacted>" if isinstance(arg, str) and arg.split("?", 1)[0].startswith("/ics/") else arg
-                for arg in record.args
-            )
-        return True
-
-
-logging.getLogger("uvicorn.access").addFilter(_RedactIcsPath())
+_TOKEN_PATHS = ("/ics/", "/widget/")
 
 
 def _safe_log_path(path: str) -> str:
-    return "/ics/<redacted>" if path.startswith("/ics/") else path
+    """订阅 / 小组件链接本身就是凭证：日志里只留前缀。"""
+    for prefix in _TOKEN_PATHS:
+        if path.split("?", 1)[0].startswith(prefix):
+            return f"{prefix}<redacted>"
+    return path
+
+
+class _RedactTokenPaths(logging.Filter):
+    """不能让带 token 的链接出现在 uvicorn 的访问日志里。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_safe_log_path(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokenPaths())
 
 
 _upstream = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix="upstream")
@@ -378,6 +382,18 @@ def _ics_url(uid: int) -> str | None:
     return f"{PUBLIC_BASE_URL}/ics/{token}.ics"
 
 
+def _widget_url(uid: int) -> str | None:
+    row = db.connect().execute("SELECT enc_widget_token FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["enc_widget_token"]:
+        return None
+    try:
+        token = crypto.decrypt(row["enc_widget_token"], "widget", uid).decode()
+    except (crypto.CryptoError, UnicodeDecodeError):
+        log.warning("user %s: widget token cannot be decrypted", uid)
+        return None
+    return f"{PUBLIC_BASE_URL}/widget/{token}.json"
+
+
 def _json_list(raw: str | None) -> list:
     try:
         value = json.loads(raw or "[]")
@@ -411,6 +427,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "refresh_max_times": MAX_USER_REFRESH_TIMES,
         "refresh_default_interval_hours": REFRESH_INTERVAL_HOURS,
         "mail": notify.snapshot(sess["id"]),
+        "widget_url": _widget_url(sess["id"]),
     }
 
 
@@ -553,6 +570,60 @@ def ics_disable(sess=Depends(csrf_protected)):
     with db.tx() as c:
         c.execute("UPDATE users SET ics_token_hash=NULL, enc_ics_token=NULL WHERE id=?", (sess["id"],))
     return {"ok": True}
+
+
+# ---------- iOS 桌面小组件（Scriptable） ----------
+
+WIDGET_SCRIPT = ROOT / "scriptable" / "nufe-kebiao-widget.js"
+
+
+@app.post("/api/widget/rotate")
+def widget_rotate(sess=Depends(csrf_protected)):
+    token = secrets.token_urlsafe(24)
+    with db.tx() as c:
+        if not c.execute("SELECT 1 FROM users WHERE id=?", (sess["id"],)).fetchone():
+            raise HTTPException(401, "会话已失效")
+        c.execute("UPDATE users SET widget_token_hash=?, enc_widget_token=? WHERE id=?",
+                  (crypto.token_hash(token), crypto.encrypt(token.encode(), "widget", sess["id"]), sess["id"]))
+    return {"widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json"}
+
+
+@app.post("/api/widget/disable")
+def widget_disable(sess=Depends(csrf_protected)):
+    with db.tx() as c:
+        c.execute("UPDATE users SET widget_token_hash=NULL, enc_widget_token=NULL WHERE id=?", (sess["id"],))
+    return {"ok": True}
+
+
+@app.get("/api/widget/script")
+def widget_script(sess=Depends(current_session)):
+    """把本人的只读链接填进 Scriptable 脚本模板，设置页一键复制。"""
+    url = _widget_url(sess["id"])
+    if not url:
+        raise HTTPException(404, "请先生成小组件链接")
+    template = WIDGET_SCRIPT.read_text("utf-8")
+    return PlainTextResponse(template.replace("__WIDGET_URL__", url),
+                             media_type="text/javascript; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/widget/{token}.json")
+def widget_feed(token: str, request: Request):
+    if not token or len(token) > 128:
+        raise HTTPException(404)
+    user = db.connect().execute(
+        "SELECT id, status, current_semester_id FROM users WHERE widget_token_hash=?",
+        (crypto.token_hash(token),)).fetchone()
+    if not user:
+        raise HTTPException(404)
+    view = service.timetable_view(user["id"], None)
+    week1 = view.get("week1_monday") if view else None
+    payload = widget.build(view, week1, status=user["status"])
+    headers = {
+        # 内容随时间变化（今天 / 明天），只做很短的缓存
+        "Cache-Control": "private, max-age=60",
+        "X-Robots-Tag": "noindex, nofollow, noarchive",
+    }
+    return JSONResponse(payload, headers=headers)
 
 
 @app.post("/api/account/delete")

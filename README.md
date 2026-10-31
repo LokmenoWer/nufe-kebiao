@@ -11,6 +11,7 @@
 - **现代前端**：无构建步骤的 ES modules，原生 `dialog` / `popover` / `color-mix`，浅色/深色/跟随系统，移动端底部抽屉设置页。
 - **后台刷新**：按用户自选时段串行刷新，失败指数退避；登录态过期、验证码、二次认证会在界面顶部提示并暂停自动重试。
 - **邮件通知**（可选）：绑定邮箱后，后台自动刷新暂停（需要重新登录 / 验证码）、连续失败或发现课表变动时发邮件提醒；两类提醒可分别关闭。
+- **iOS 桌面小组件**（Scriptable）：桌面和锁屏显示今天 / 明天 / 本周的课，正在上课和下一节高亮，周末预告下次上课。
 - **日历订阅**：生成可撤销的 `.ics` 链接，iOS / macOS 日历、Google 日历、Outlook 均可添加。
 - **数据自主**：可删除已保存密码，也可一键删除账号与全部数据。
 
@@ -174,6 +175,15 @@ MAIL_FROM_NAME=南财课表
   - 课表变动：与上次保存的同一学期课表比较（课程名、星期、节次与时间、地点、周次），列出新增和取消的条目。首次抓取不算变动。
 - 每封信末尾都说明可在设置里关闭或解绑。
 
+### iOS 桌面小组件（Scriptable）
+
+设置 → “桌面小组件（iOS）”：生成只读链接 → “复制脚本”（脚本里已填好本人链接）→ 粘进免费的 [Scriptable](https://apps.apple.com/cn/app/scriptable/id1405459188) → 桌面添加 Scriptable 小组件并选这个脚本。Parameter 填 `today`（默认）/ `tomorrow` / `week`。
+
+- 数据来自 `GET /widget/<token>.json`：服务端按北京时间算好今天、明天、本周（以及两周内下一个有课的日子），周次、缺失时间的兜底、课程颜色都和网页 / ICS 用同一套规则，脚本只负责排版。
+- token 与日历订阅分开，可单独重新生成 / 停用；库里只存 SHA-256，访问日志对 `/widget/` 脱敏；删号即失效。
+- 脚本源码在 `scriptable/nufe-kebiao-widget.js`：支持小 / 中 / 大 / 超大号和三种锁屏样式；在下一次上下课、零点或最多 30 分钟后请求刷新（实际时机由 iOS 决定）；离线时用上次缓存并标注；学校登录态失效时在标题栏提示“需重新登录”。
+- 测试：`tests/js/scriptable-shim.js` 是一个极简的 Scriptable 运行时替身，`npm test` 会在 Node 里把整个脚本按各尺寸 / 模式跑一遍。
+
 ### 会话与设备
 
 - 同一账号可在多台设备同时登录，每人最多保留最近 8 个会话（`MAX_SESSIONS_PER_USER`）；设置里有“退出所有设备”。
@@ -217,6 +227,7 @@ app/
   ics.py        iCalendar 导出
   mailer.py     SMTP 发信后台队列
   notify.py     通知邮箱绑定（验证码）与刷新暂停 / 课表变动提醒
+  widget.py     桌面小组件数据（今天 / 明天 / 本周）
   security.py   会话、CSRF、限速
   main.py       FastAPI 路由 + 安全响应头 + 静态资源版本
 static/
@@ -227,6 +238,7 @@ tests/
   test_api.py   Web/API 端到端（上游打桩）
   test_core.py  解析、加解密、ICS、节流
   js/           前端纯逻辑 node:test
+scriptable/     iOS 桌面小组件脚本（Scriptable）
 examples/       脱敏示例课表
 scripts/        离线演示服务器
 deploy/         systemd / Apache 示例与部署脚本

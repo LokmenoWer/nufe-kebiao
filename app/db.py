@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS users (
     enc_email        BLOB,             -- AES-GCM(已验证的通知邮箱)
     email_verified_at REAL,
     notify_status    INTEGER NOT NULL DEFAULT 1,   -- 自动刷新暂停 / 连续失败时发邮件
-    notify_changes   INTEGER NOT NULL DEFAULT 1    -- 后台刷新发现课表变动时发邮件
+    notify_changes   INTEGER NOT NULL DEFAULT 1,   -- 后台刷新发现课表变动时发邮件
+    widget_token_hash TEXT,            -- 桌面小组件只读链接的 token 哈希（唯一索引见 init）
+    enc_widget_token BLOB
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash  TEXT PRIMARY KEY,
@@ -141,9 +143,12 @@ def init() -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     for col, typ in (("enc_device_id", "BLOB"), ("refresh_hours", "TEXT"), ("enc_email", "BLOB"),
                      ("email_verified_at", "REAL"), ("notify_status", "INTEGER NOT NULL DEFAULT 1"),
-                     ("notify_changes", "INTEGER NOT NULL DEFAULT 1")):
+                     ("notify_changes", "INTEGER NOT NULL DEFAULT 1"), ("widget_token_hash", "TEXT"),
+                     ("enc_widget_token", "BLOB")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+    # 老库是 ALTER 补的列，唯一索引只能在补完列之后建
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget ON users(widget_token_hash)")
     session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
     if "persistent" not in session_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")

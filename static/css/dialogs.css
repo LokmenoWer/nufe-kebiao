@@ -266,3 +266,32 @@ dialog[open] { animation: modal-in 0.16s ease-out; }
 .email-address { overflow-wrap: anywhere; }
 .email-settings .code-row input { letter-spacing: normal; font-size: 15px; }
 .email-settings .code-row .btn { height: 42px; }
+
+/* ---------- 桌面小组件 ---------- */
+.widget-settings { display: flex; flex-direction: column; gap: 10px; }
+.widget-settings [hidden] { display: none; }
+.widget-script {
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+.widget-help summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; }
+.widget-steps {
+  margin: 8px 0 0;
+  padding-left: 1.3em;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.widget-steps code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+}

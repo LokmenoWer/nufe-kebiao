@@ -500,3 +500,62 @@ def test_timetable_diff_lines():
     assert added == ["高数 · 周一 第1–2节 08:00–09:35 · B202 · 第1-16周"]
     assert removed == ["高数 · 周一 第1–2节 08:00–09:35 · A101 · 第1-16周"]
     assert service.timetable_diff([a], [dict(a)]) == ([], [])
+
+
+# ---------- 桌面小组件数据 ----------
+
+def _widget_view():
+    acts = [
+        {"courseName": "高数", "weekday": 1, "startUnit": 1, "endUnit": 2, "startTime": "08:20", "endTime": "09:45",
+         "weekIndexes": [1, 2], "room": "A101", "teachers": ["甲"]},
+        {"courseName": "英语", "weekday": 1, "startUnit": 3, "endUnit": 4, "startTime": "", "endTime": "",
+         "weekIndexes": [1], "room": "", "building": "B楼", "teachers": []},
+        {"courseName": "线代", "weekday": 2, "startUnit": 3, "endUnit": 4, "startTime": "10:00", "endTime": "11:35",
+         "weekIndexes": [1], "room": "C303"},
+        {"courseName": "高数", "weekday": 1, "startUnit": 3, "endUnit": 4, "startTime": "10:00", "endTime": "11:35",
+         "weekIndexes": [3], "room": "A101"},
+    ]
+    return {"semester_name": "2026-2027-1", "fetched_at": 1.0, "activities": acts}
+
+
+def test_widget_payload_today_tomorrow_week():
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from app import widget
+    now = dt.datetime(2026, 9, 7, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # 第 1 周周一 09:00
+    p = widget.build(_widget_view(), "2026-09-07", now=now)
+    assert p["v"] == 1 and p["today"]["week"] == 1 and p["today"]["weekday"] == 1
+    names = [(x["name"], x["start"], x["end"], x["room"]) for x in p["today"]["lessons"]]
+    # 英语缺时间：用同节次别的课的时间兜底；缺教室用楼名
+    assert names == [("高数", "08:20", "09:45", "A101"), ("英语", "10:00", "11:35", "B楼")]
+    assert p["today"]["lessons"][0]["units"] == "1–2" and p["today"]["lessons"][0]["color"].startswith("#")
+    assert [x["name"] for x in p["tomorrow"]["lessons"]] == ["线代"]
+    assert len(p["week"]["days"]) == 7 and p["week"]["monday"] == "2026-09-07"
+    assert p["next_change"] == "2026-09-07T09:45:00+08:00"  # 下一个上下课时刻
+    assert p["upcoming"]["date"] == "2026-09-08"  # 明天就有课
+    # 周二晚上：下次上课是第 2 周周一（第 1 周周三之后都没课）
+    late = dt.datetime(2026, 9, 8, 22, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert widget.build(_widget_view(), "2026-09-07", now=late)["upcoming"]["date"] == "2026-09-14"
+
+
+def test_widget_payload_vacation_and_missing_calendar():
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from app import widget
+    before = dt.datetime(2026, 9, 1, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))  # 开学前
+    p = widget.build(_widget_view(), "2026-09-07", now=before)
+    assert p["today"]["week"] is None and p["today"]["lessons"] == []
+    p = widget.build(_widget_view(), None, now=before)
+    assert p["has_calendar"] is False and p["week"]["days"][0]["lessons"] == []
+    assert widget.build(None, None, now=before)["today"]["lessons"] == []
+
+
+def test_widget_colors_match_frontend():
+    from app import widget
+    acts = [{"courseName": n} for n in ["高等数学", "大学英语", "线性代数", "宏观经济学", "Data Structures", "概率论与数理统计"]]
+    # 与 static/js/courses.js 的 buildColorMap 在同样输入下的输出一致
+    assert widget.color_map(acts) == {
+        "Data Structures": "#6741d9", "大学英语": "#2f9e44", "宏观经济学": "#1971c2",
+        "概率论与数理统计": "#74b816", "线性代数": "#ae3ec9", "高等数学": "#e67700"}

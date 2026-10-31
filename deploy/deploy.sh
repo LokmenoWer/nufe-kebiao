@@ -51,7 +51,7 @@ chown root:kebiao "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 [ -x "$APP_DIR/.venv/bin/python" ] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static"
+chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static" "$APP_DIR/scriptable"
 
 # 先确认新代码能在服务器的 Python 上编译、导入，再重启服务；失败则保留旧进程
 cd "$APP_DIR"

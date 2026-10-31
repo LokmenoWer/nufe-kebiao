@@ -1092,15 +1092,16 @@ def test_frontend_module_graph_and_security_hygiene(up):
 def test_ics_access_log_and_error_paths_are_redacted():
     import logging
 
-    from app.main import _RedactIcsPath, _safe_log_path
+    from app.main import _RedactTokenPaths, _safe_log_path
 
     record = logging.LogRecord(
         "uvicorn.access", logging.INFO, "", 0,
         '%s - "%s %s HTTP/%s" %d',
         ("1.2.3.4", "GET", "/ics/secret-token.ics", "1.1", 200), None)
-    assert _RedactIcsPath().filter(record) is True
+    assert _RedactTokenPaths().filter(record) is True
     assert "secret-token" not in record.getMessage() and "<redacted>" in record.getMessage()
     assert _safe_log_path("/ics/secret-token.ics") == "/ics/<redacted>"
+    assert _safe_log_path("/widget/secret-token.json?x=1") == "/widget/<redacted>"
     assert _safe_log_path("/api/me") == "/api/me"
 
 
@@ -1293,3 +1294,50 @@ def test_delete_account_removes_email(up, outbox):
     conn = db.connect()
     assert conn.execute("SELECT COUNT(*) FROM users WHERE student_id='2023001'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM email_verifications").fetchone()[0] == 0
+
+
+# ---------- 桌面小组件 ----------
+
+def test_widget_link_lifecycle(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.get("/api/me").json()["widget_url"] is None
+    assert c.get("/api/widget/script").status_code == 404  # 还没生成链接
+    url = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"]
+    assert url.startswith("http://testserver/widget/") and url.endswith(".json")
+    assert c.get("/api/me").json()["widget_url"] == url
+    path = url.removeprefix("http://testserver")
+    anon = TestClient(app)  # 链接本身就是凭证，不需要登录
+    r = anon.get(path)
+    assert r.status_code == 200 and r.json()["v"] == 1 and r.json()["semester"] == "2026-2027-1"
+    assert r.headers["x-robots-tag"].startswith("noindex") and "private" in r.headers["cache-control"]
+    script = c.get("/api/widget/script")
+    assert script.status_code == 200 and url in script.text and "__WIDGET_URL__" not in script.text
+    assert "no-store" in script.headers["cache-control"]
+    # 重新生成：旧链接立即失效
+    url2 = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"]
+    assert anon.get(path).status_code == 404 and anon.get(url2.removeprefix("http://testserver")).status_code == 200
+    c.post("/api/widget/disable", headers=_csrf(c))
+    assert anon.get(url2.removeprefix("http://testserver")).status_code == 404
+    assert c.get("/api/me").json()["widget_url"] is None
+
+
+def test_widget_requires_login_and_reports_status(up):
+    anon = TestClient(app)
+    assert anon.get("/api/widget/script").status_code == 401
+    assert anon.post("/api/widget/rotate", headers=ORIGIN).status_code == 401
+    assert anon.get("/widget/" + "x" * 200 + ".json").status_code == 404
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    up.expired.add("2023001")
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    assert anon.get(path).json()["status"] == "needs_rebind"  # 小组件据此提示重新登录
+
+
+def test_widget_token_removed_with_account(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    c.post("/api/account/delete", headers=_csrf(c))
+    assert TestClient(app).get(path).status_code == 404
