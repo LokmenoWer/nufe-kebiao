@@ -52,6 +52,13 @@ chown root:kebiao "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static"
 
+# 先确认新代码能在服务器的 Python 上编译、导入，再重启服务；失败则保留旧进程
+cd "$APP_DIR"
+PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -m compileall -q app
+PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "import app.main" \
+  && echo "import check: ok" \
+  || { echo "import check failed; service not restarted" >&2; exit 1; }
+
 install -m 644 "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service
 systemctl daemon-reload
 systemctl enable -q kebiao
