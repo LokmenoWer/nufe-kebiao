@@ -324,6 +324,8 @@ class LoginFlow:
             "execution": self.qr_fields["execution"],
             "_eventId": "submit",
             "rmShown": self.qr_fields.get("rmShown", "1"),
+            # 和账号密码登录一样勾上“记住我”：CASTGC 活得更久，教务会话过期后可以静默续期
+            "rememberMe": "true",
         })
         self._dump("after-qr-submit", r)
         if is_auth_login_url(r.url):
@@ -481,6 +483,26 @@ def need_captcha(session: requests.Session, username: str) -> bool:
         return bool(r.json().get("isNeed"))
     except ValueError:
         return False
+
+
+def renew_with_tgc(session: requests.Session) -> bool:
+    """教务会话过期、但认证中心的 CASTGC 还有效时，走一次 SSO 让认证中心静默签发新 ticket。
+
+    教务过期后先落到自己的 /student/login，不会自动跳 CAS，所以必须主动访问 JW_SSO_URL。
+    返回 True：已续上（课表页挂在 session.kebiao_course_html，fetch_timetable 会直接用）；
+    返回 False：CASTGC 也失效了，或认证中心要求二次认证，需要真人重新登录。
+    """
+    if not any(c.name == "CASTGC" for c in session.cookies):
+        return False
+    r = session.get(JW_SSO_URL)
+    if r.status_code >= 500:
+        raise CasError("统一身份认证服务暂时不可用，请稍后再试")
+    if is_auth_login_url(r.url) or is_reauth_page(r.url, r.text):
+        return False
+    flow = LoginFlow(session, "", "")
+    flow._finish()
+    session.kebiao_course_html = flow.course_html
+    return True
 
 
 def login(session: requests.Session, username: str, password: str, device_id: str | None = None) -> None:

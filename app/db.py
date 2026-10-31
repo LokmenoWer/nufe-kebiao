@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import DB_PATH
+from .config import DB_PATH, SESSION_DAYS_SHORT
 
 log = logging.getLogger("kebiao.db")
 
@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     csrf        TEXT NOT NULL,
     created_at  REAL NOT NULL,
-    expires_at  REAL NOT NULL
+    expires_at  REAL NOT NULL,
+    persistent  INTEGER NOT NULL DEFAULT 0   -- 1 = 勾了“保持登录”，cookie 带 max_age
 );
 CREATE TABLE IF NOT EXISTS timetables (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -129,6 +130,12 @@ def init() -> None:
     for col, typ in (("enc_device_id", "BLOB"), ("refresh_hours", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+    session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "persistent" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")
+        # 老会话没记是否“保持登录”：有效期比短会话上限还长的，就是当初勾了的
+        conn.execute("UPDATE sessions SET persistent=1 WHERE expires_at - created_at > ?",
+                     (SESSION_DAYS_SHORT * 86400 + 3600,))
 
 
 def now() -> float:

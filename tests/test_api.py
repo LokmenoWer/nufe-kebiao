@@ -33,6 +33,9 @@ class FakeUpstream:
         self.devices = []
         self.qr = "waiting"       # waiting | scanned | expired | <学号>（= 该学号已在手机上确认）
         self.qr_mfa = False
+        self.tgc_alive = set()    # 教务会话过期但 CASTGC 仍有效：可以静默续期
+        self.renewals = 0
+        self.fetches = 0
 
     def login(self, session, username, password, device_id=None):
         self.devices.append(device_id)
@@ -46,7 +49,17 @@ class FakeUpstream:
         session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver")
         self.expired.discard(username)
 
+    def renew(self, session):
+        tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
+        sid = tgc.removeprefix("tgc-") if tgc else None
+        if not sid or sid not in self.tgc_alive:
+            return False
+        self.renewals += 1
+        self.expired.discard(sid)
+        return True
+
     def fetch(self, session, semester_id=None, page_html=None):
+        self.fetches += 1
         tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
         sid = tgc.removeprefix("tgc-") if tgc else None
         if not sid or sid in self.expired:
@@ -150,17 +163,28 @@ def up(monkeypatch):
     FakeFlow.up = fake
     monkeypatch.setattr(cas, "LoginFlow", FakeFlow)
     monkeypatch.setattr(jwxt, "fetch_timetable", fake.fetch)
+    monkeypatch.setattr(cas, "renew_with_tgc", fake.renew)
+    # 手动刷新的冷却 / 新鲜度闸门单独测；其余用例里连续刷新不应被它挡住
+    monkeypatch.setattr(service, "MANUAL_REFRESH_MIN_GAP", 0)
+    monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 0)
+    from app import polite
+    polite.reset_health()
     return fake
 
 
-def _login(client, sid, remember=False, pw=None):
+def _login(client, sid, remember=False, pw=None, keep=False):
     r = client.post("/api/login", headers=ORIGIN, json={
-        "student_id": sid, "password": pw or PASSWORDS[sid], "remember_password": remember, "agree_terms": True})
+        "student_id": sid, "password": pw or PASSWORDS[sid], "remember_password": remember, "agree_terms": True,
+        "keep_login": keep})
     return r
 
 
 def _csrf(client):
     return {**ORIGIN, "X-CSRF-Token": client.get("/api/me").json()["csrf"]}
+
+
+def service_uid(student_id):
+    return db.connect().execute("SELECT id FROM users WHERE student_id=?", (student_id,)).fetchone()["id"]
 
 
 def test_login_and_isolation(up):
@@ -225,6 +249,164 @@ def test_cookie_mode_expiry_needs_rebind(up):
     # 重新登录即恢复
     _login(c, "2023001")
     assert c.get("/api/me").json()["status"] == "ok"
+
+
+def test_cookie_mode_expiry_renews_via_castgc(up):
+    """教务会话过期但 CASTGC 还有效：静默续期，不要求用户重新登录，也不动用密码。"""
+    c = TestClient(app)
+    _login(c, "2023001")
+    up.expired.add("2023001")
+    up.tgc_alive.add("2023001")
+    logins_before = len(up.logins)
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is True and up.renewals == 1 and len(up.logins) == logins_before
+    assert c.get("/api/me").json()["status"] == "ok"
+
+
+def test_password_mode_prefers_castgc_over_password(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    up.expired.add("2023001")
+    up.tgc_alive.add("2023001")
+    logins_before = len(up.logins)
+    with scheduler.background_upstream():
+        assert service.refresh_user(service_uid("2023001"), "scheduled")["ok"] is True
+    assert up.renewals == 1 and len(up.logins) == logins_before
+
+
+def test_sso_renewal_outage_is_retryable_not_rebind(up, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    up.expired.add("2023001")
+
+    def broken(_session):
+        raise cas.CasError("统一身份认证服务暂时不可用")
+
+    monkeypatch.setattr(cas, "renew_with_tgc", broken)
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is False and r["status"] == "error"
+    me = c.get("/api/me").json()
+    assert me["status"] == "error" and me["next_refresh_at"] is not None
+
+
+def test_manual_refresh_min_gap(up, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    up.expired.add("2023001")
+    assert c.post("/api/refresh", headers=_csrf(c), json={}).json()["status"] == "needs_rebind"
+    # 状态不正常时不会走缓存；紧接着再点就要等
+    monkeypatch.setattr(service, "MANUAL_REFRESH_MIN_GAP", 30)
+    r = c.post("/api/refresh", headers=_csrf(c), json={})
+    assert r.status_code == 429 and 1 <= int(r.headers["Retry-After"]) <= 30
+    assert "秒后再试" in r.json()["detail"]
+
+
+def test_manual_refresh_serves_fresh_cache(up, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 120)
+    fetches = up.fetches
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is True and r["cached"] is True and r["timetable"]["semester_id"] == 161
+    assert up.fetches == fetches  # 没有打扰学校
+    # 状态不正常时不走缓存：用户点刷新就是想恢复
+    up.expired.add("2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='error'")
+    assert c.post("/api/refresh", headers=_csrf(c), json={}).json()["status"] == "needs_rebind"
+
+
+def test_refresh_right_after_login_is_cached_not_too_soon(up, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    monkeypatch.setattr(service, "MANUAL_REFRESH_MIN_GAP", 30)
+    monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 120)
+    r = c.post("/api/refresh", headers=_csrf(c), json={})
+    assert r.status_code == 200 and r.json()["cached"] is True
+
+
+def test_upstream_cooldown_during_manual_refresh(up, monkeypatch):
+    from app import polite
+    c = TestClient(app)
+    _login(c, "2023001")
+
+    def cooling(*_a, **_k):
+        raise polite.UpstreamCooldown(42)
+
+    monkeypatch.setattr(jwxt, "fetch_timetable", cooling)
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is False and r["status"] == "cooldown" and r["retry_after"] == 42
+    me = c.get("/api/me").json()
+    assert me["status"] == "ok" and me["fail_count"] == 0  # 不算这个用户的失败
+
+
+def test_login_upstream_error_is_503(up, monkeypatch):
+    from app import polite
+
+    def cooling(*_a, **_k):
+        raise polite.UpstreamCooldown(15)
+
+    monkeypatch.setattr(service, "login_start", cooling)
+    r = _login(TestClient(app), "2023001")
+    assert r.status_code == 503 and r.headers["Retry-After"] == "15"
+    assert "学校服务器" in r.json()["detail"]
+
+
+def _session_row(uid):
+    return db.connect().execute(
+        "SELECT expires_at, persistent FROM sessions WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchone()
+
+
+def test_session_sliding_renewal_keep_login(up):
+    from app import config
+    c = TestClient(app)
+    _login(c, "2023001", keep=True)
+    uid = service_uid("2023001")
+    assert _session_row(uid)["persistent"] == 1
+    # 一天之内重复打开页面：不续期、不重发 cookie
+    r = c.get("/api/me")
+    assert "kb_session" not in r.headers.get("set-cookie", "")
+    # 快到期了（只剩 3 天）：打开页面就续满，并重发带 max-age 的 cookie
+    with db.tx() as conn:
+        conn.execute("UPDATE sessions SET expires_at=? WHERE user_id=?", (db.now() + 3 * 86400, uid))
+    r = c.get("/api/me")
+    assert r.status_code == 200
+    cookie = r.headers.get("set-cookie", "")
+    assert "kb_session=" in cookie and f"Max-Age={config.SESSION_DAYS_LONG * 86400}" in cookie
+    left = _session_row(uid)["expires_at"] - db.now()
+    assert left > (config.SESSION_DAYS_LONG - 1) * 86400
+
+
+def test_session_sliding_renewal_browser_session(up):
+    from app import config
+    c = TestClient(app)
+    _login(c, "2023001")
+    uid = service_uid("2023001")
+    assert _session_row(uid)["persistent"] == 0
+    with db.tx() as conn:
+        conn.execute("UPDATE sessions SET expires_at=? WHERE user_id=?", (db.now() + 3600, uid))
+    r = c.get("/api/me")
+    assert r.status_code == 200
+    assert "kb_session" not in r.headers.get("set-cookie", "")  # 仍是关浏览器即失效的会话 cookie
+    left = _session_row(uid)["expires_at"] - db.now()
+    assert left > (config.SESSION_DAYS_SHORT - 1) * 86400
+
+
+def test_sessions_migration_infers_persistent(up):
+    from app import config
+    conn = db.connect()
+    conn.execute("DELETE FROM sessions")
+    conn.execute("ALTER TABLE sessions DROP COLUMN persistent")
+    try:
+        uid = conn.execute("INSERT INTO users(student_id, created_at) VALUES('2029999', ?)", (db.now(),)).lastrowid
+        now = db.now()
+        for tag, days in (("long", config.SESSION_DAYS_LONG), ("short", config.SESSION_DAYS_SHORT)):
+            conn.execute("INSERT INTO sessions(token_hash, user_id, csrf, created_at, expires_at) VALUES(?,?,?,?,?)",
+                         (tag, uid, "x", now, now + days * 86400))
+    finally:
+        db.init()
+    rows = dict(conn.execute("SELECT token_hash, persistent FROM sessions").fetchall())
+    assert rows == {"long": 1, "short": 0}
 
 
 def test_password_mode_auto_relogin(up):
@@ -518,10 +700,10 @@ def test_existing_session_gets_device_hint(up):
     assert not any(h.startswith("kb_dev=") for h in r.headers.get_list("set-cookie"))  # 已有就不重复下发
 
 
-def test_manual_refresh_not_rate_limited_per_user(up):
+def test_manual_refresh_repeats_when_gates_off(up):
     c = TestClient(app)
     _login(c, "2023001")
-    for _ in range(3):  # 不再有单用户冷却；对学校的频率由全站限速保证
+    for _ in range(3):  # 闸门关掉（fixture 里设为 0）时，连续刷新都真的打到上游
         r = c.post("/api/refresh", headers=_csrf(c), json={})
         assert r.status_code == 200 and r.json()["ok"] is True and r.json()["timetable"]["semester_id"] == 161
 

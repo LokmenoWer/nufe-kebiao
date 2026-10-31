@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 
 from . import cas, crypto, db, ics, jwxt
 from .config import (
+    MANUAL_REFRESH_FRESH_SECONDS,
+    MANUAL_REFRESH_MIN_GAP,
     MAX_USER_REFRESH_TIMES,
     REFRESH_ALLOWED_HOURS,
     REFRESH_INTERVAL_HOURS,
@@ -30,7 +32,7 @@ from .config import (
     TIMEZONE,
     semester_overrides,
 )
-from .polite import PoliteSession, UpstreamYield, dump_cookies, load_cookies
+from .polite import PoliteSession, UpstreamCooldown, UpstreamYield, dump_cookies, load_cookies
 
 log = logging.getLogger("kebiao.service")
 
@@ -47,6 +49,18 @@ class Busy(Exception):
 
 class UserGone(Exception):
     """刷新过程中账号被删除（或数据已不存在）。"""
+
+
+class TooSoon(Exception):
+    """手动刷新点得太密：还要等 retry_after 秒。"""
+
+    def __init__(self, retry_after: int):
+        super().__init__(retry_after)
+        self.retry_after = retry_after
+
+
+class UpstreamDown(Exception):
+    """学校服务暂时不可用：按普通失败退避重试，而不是让用户重新登录。"""
 
 
 class LoginRejected(Exception):
@@ -282,6 +296,13 @@ def _advance(p: PendingLogin, step, stash: bool = False) -> dict:
             return _need(p, str(e))  # 验证码错了之类：留在当前步骤让用户重试
         _drop(p)
         raise LoginRejected(f"统一身份认证登录失败：{e}") from None
+    except UpstreamCooldown as e:
+        # 全站暂停访问学校期间：已经走到扫码 / 验证码 / 短信这一步的，保留流程让用户稍后继续
+        msg = f"学校服务器繁忙，请约 {e.retry_after} 秒后再试"
+        if p.flow.stage in ("captcha", "mfa", "qr"):
+            return _need(p, msg)
+        _drop(p)
+        raise LoginRejected(msg) from None
     except Exception:
         _drop(p)
         raise
@@ -443,15 +464,55 @@ def delete_user(uid: int) -> None:
 # ---------- 刷新 ----------
 
 def refresh_user(uid: int, trigger: str, semester_id: int | None = None) -> dict:
-    """手动刷新不限次数：对学校的总频率由 polite 的全站限速（每秒最多 1 次）保证。
-    同一用户同一时刻只允许一个刷新在跑。"""
+    """同一用户同一时刻只允许一个刷新在跑。
+
+    手动刷新另有两道闸，避免连点把全站的上游额度都占掉：
+    - 该学期课表刚抓过（MANUAL_REFRESH_FRESH_SECONDS 内）且状态正常：直接返回已存的，不碰学校；
+    - 否则距上次尝试（无论成败）不足 MANUAL_REFRESH_MIN_GAP 秒：抛 TooSoon。
+    """
     lock = _locks[uid]
     if not lock.acquire(blocking=False):
         raise Busy()
     try:
+        if trigger == "manual":
+            cached = _manual_refresh_gate(uid, semester_id)
+            if cached:
+                return cached
         return _refresh_locked(uid, trigger, semester_id)
     finally:
         lock.release()
+
+
+def _manual_refresh_gate(uid: int, semester_id: int | None) -> dict | None:
+    conn = db.connect()
+    user = conn.execute(
+        "SELECT status, last_refresh_at, current_semester_id FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        raise KeyError(uid)
+    now = db.now()
+    # 先看新鲜度：刚登录 / 刚刷新完再点，给“已是最新”比报“太频繁”友好
+    sid = semester_id or user["current_semester_id"]
+    if user["status"] == "ok" and sid is not None:
+        row = conn.execute("SELECT fetched_at FROM timetables WHERE user_id=? AND semester_id=?",
+                           (uid, sid)).fetchone()
+        if row and now - row["fetched_at"] < MANUAL_REFRESH_FRESH_SECONDS:
+            return {"ok": True, "cached": True, "message": "课表刚刚同步过，已是最新"}
+    since = now - (user["last_refresh_at"] or 0)
+    if since < MANUAL_REFRESH_MIN_GAP:
+        raise TooSoon(math.ceil(MANUAL_REFRESH_MIN_GAP - since))
+    return None
+
+
+def _renew_with_tgc(s: PoliteSession, uid: int) -> bool:
+    try:
+        renewed = cas.renew_with_tgc(s)
+    except cas.CasError as e:
+        # 认证中心或教务一时出错：别把用户打成“需要重新登录”，按普通失败退避
+        log.warning("user %s: SSO renewal failed: %s", uid, type(e).__name__)
+        raise UpstreamDown() from None
+    if renewed:
+        log.info("user %s: jwxt session renewed via CASTGC", uid)
+    return renewed
 
 
 def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
@@ -472,18 +533,20 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         try:
             data = jwxt.fetch_timetable(s, semester_id)
         except jwxt.SessionExpired:
-            if user["cred_mode"] != "password" or not user["enc_password"]:
-                raise NeedsRebind("登录态已过期，请重新登录本站以续期") from None
-            log.info("user %s: session expired, re-login with stored credential", uid)
-            try:
-                device = (crypto.decrypt(user["enc_device_id"], "device", uid).decode()
-                          if user["enc_device_id"] else None)
-                password = crypto.decrypt(user["enc_password"], "password", uid).decode()
-            except crypto.CryptoError:
-                log.warning("user %s: stored credential unusable", uid)
-                return _save_failure(uid, trigger, "needs_rebind",
-                                     "保存的密码已无法解密（可能更换过服务器密钥），请重新登录本站")
-            cas.login(s, user["student_id"], password, device)
+            # 先用 CASTGC 静默续期（扫码 / 不存密码的用户也能续上），失败才动用保存的密码
+            if not _renew_with_tgc(s, uid):
+                if user["cred_mode"] != "password" or not user["enc_password"]:
+                    raise NeedsRebind("登录态已过期，请重新登录本站以续期") from None
+                log.info("user %s: session expired, re-login with stored credential", uid)
+                try:
+                    device = (crypto.decrypt(user["enc_device_id"], "device", uid).decode()
+                              if user["enc_device_id"] else None)
+                    password = crypto.decrypt(user["enc_password"], "password", uid).decode()
+                except crypto.CryptoError:
+                    log.warning("user %s: stored credential unusable", uid)
+                    return _save_failure(uid, trigger, "needs_rebind",
+                                         "保存的密码已无法解密（可能更换过服务器密钥），请重新登录本站")
+                cas.login(s, user["student_id"], password, device)
             data = jwxt.fetch_timetable(s, semester_id)
     except cas.CaptchaRequired:
         return _save_failure(uid, trigger, "captcha",
@@ -498,6 +561,10 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         return _save_failure(uid, trigger, "needs_rebind", str(e))
     except UpstreamYield:
         raise
+    except UpstreamCooldown as e:
+        # 全站在给学校“降温”，不是这个用户的问题：不记失败、不动退避
+        return {"ok": False, "status": "cooldown", "retry_after": e.retry_after,
+                "message": f"学校服务器繁忙，本站暂停访问中，请约 {e.retry_after} 秒后再试"}
     except Exception as e:  # 网络 / 学校服务异常：退避重试。不把异常原文存进库或返回给浏览器
         log.warning("user %s refresh failed: %s", uid, type(e).__name__)
         return _save_failure(uid, trigger, "error", "刷新失败，请稍后再试")

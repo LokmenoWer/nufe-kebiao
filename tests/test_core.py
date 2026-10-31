@@ -219,10 +219,11 @@ def test_pace_spacing_across_threads():
 
     from app import polite
     polite._last_request_at = 0.0
+    polite.reset_health()
     stamps, lock = [], threading.Lock()
 
     def worker():
-        polite._pace()
+        polite._pace(True)
         with lock:
             stamps.append(time.monotonic())
 
@@ -342,3 +343,58 @@ def test_db_tx_rolls_back_on_exception():
     count = db.connect().execute("SELECT COUNT(*) FROM semesters WHERE semester_id IN (987654,987655)").fetchone()[0]
     assert count == 1
     db.connect().execute("DELETE FROM semesters WHERE semester_id=?", (987654,))
+
+
+# ---------- 上游自适应退避 ----------
+
+def test_retry_after_pauses_and_background_yields():
+    import pytest
+
+    from app import polite
+    polite.reset_health()
+    try:
+        polite._record(429, "120")
+        assert 100 < polite.cooldown_remaining() <= 120
+        s = polite.PoliteSession()
+        # 暂停期间：后台刷新直接让路，交互请求不陪等 2 分钟，都不会真的发出请求
+        with polite.background_upstream(), pytest.raises(polite.UpstreamYield):
+            s.get("https://jwxt.invalid/")
+        with pytest.raises(polite.UpstreamCooldown) as e:
+            s.get("https://jwxt.invalid/")
+        assert 100 < e.value.retry_after <= 120
+    finally:
+        polite.reset_health()
+
+
+def test_retry_after_is_capped_and_defaulted():
+    from app import polite
+    polite.reset_health()
+    try:
+        polite._record(503, "999999")
+        assert polite.cooldown_remaining() <= polite.MAX_COOLDOWN
+        polite.reset_health()
+        polite._record(429, None)
+        assert 0 < polite.cooldown_remaining() <= polite.DEFAULT_COOLDOWN
+    finally:
+        polite.reset_health()
+
+
+def test_error_penalty_grows_and_decays():
+    from app import polite
+    polite.reset_health()
+    try:
+        for _ in range(10):
+            polite._record(None)  # 超时 / 连不上
+        assert polite._penalty == polite.MAX_PENALTY
+        assert polite.cooldown_remaining() == 0  # 普通 5xx/超时只放慢，不整体暂停
+        for _ in range(20):
+            polite._record(200)
+        assert polite._penalty == 0
+    finally:
+        polite.reset_health()
+
+
+def test_renew_with_tgc_needs_castgc():
+    import requests
+    # 没有 CASTGC 时直接返回 False，不发任何请求
+    assert cas.renew_with_tgc(requests.Session()) is False

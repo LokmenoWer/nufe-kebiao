@@ -11,6 +11,7 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -40,6 +41,7 @@ from .security import (
     login_by_ip,
     login_by_student,
     origin_ok,
+    renew_session,
     set_device_hint,
 )
 
@@ -97,6 +99,15 @@ STATIC = ROOT / "static"
 async def unhandled_exception(request: Request, exc: Exception):
     log.error("unhandled error on %s: %s", _safe_log_path(request.url.path), type(exc).__name__)
     return JSONResponse({"detail": "服务内部错误，请稍后重试"}, status_code=500)
+
+
+@app.exception_handler(requests.RequestException)
+async def upstream_exception(request: Request, exc: requests.RequestException):
+    # 学校服务器超时 / 连不上 / 本站正在给它降温：告诉用户是学校那边的问题，而不是笼统的 500
+    log.warning("upstream error on %s: %s", _safe_log_path(request.url.path), type(exc).__name__)
+    retry_after = getattr(exc, "retry_after", None)
+    headers = {"Retry-After": str(retry_after)} if retry_after else None
+    return JSONResponse({"detail": "学校服务器暂时无法访问，请稍后再试"}, status_code=503, headers=headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -321,6 +332,8 @@ def _json_list(raw: str | None) -> list:
 
 @app.get("/api/me")
 def me(request: Request, response: Response, sess=Depends(current_session)):
+    # 每次打开页面都会先调这里：顺手做会话滑动续期
+    renew_session(request, response, sess)
     if device_hint_uid(request) != sess["id"]:
         set_device_hint(response, sess["id"])  # 已登录的老会话也补上，下次扫码即可复用设备
     return {
@@ -383,6 +396,9 @@ async def refresh(body: RefreshIn, sess=Depends(csrf_protected)):
             result = service.refresh_user(uid, "manual", body.semester_id)
         except service.Busy:
             raise HTTPException(409, "正在刷新中") from None
+        except service.TooSoon as e:
+            raise HTTPException(429, f"刷新太频繁，请 {e.retry_after} 秒后再试",
+                                headers={"Retry-After": str(e.retry_after)}) from None
         except KeyError:
             raise HTTPException(401, "会话已失效") from None
         if result.get("status") == "deleted":

@@ -437,6 +437,8 @@ class TimetableController {
       this.renderAll();
       if (result.ok === false) {
         showToast(result.message || "刷新失败，请稍后再试", { type: "error" });
+      } else if (result.cached) {
+        showToast(result.message || "课表已是最新", { type: "info" });
       } else {
         showToast("课表已更新", { type: "success" });
       }

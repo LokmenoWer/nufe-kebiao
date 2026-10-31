@@ -19,6 +19,7 @@ SESSION_COOKIE = "kb_session"
 DEVICE_HINT_COOKIE = "kb_dev"
 DEVICE_HINT_DAYS = 180
 MAX_SESSIONS_PER_USER = 8
+RENEW_EVERY = 86400  # 秒：滑动续期的最小间隔
 
 
 def create_session(response: Response, uid: int, keep_login: bool = False) -> str:
@@ -30,17 +31,42 @@ def create_session(response: Response, uid: int, keep_login: bool = False) -> st
         if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
             raise HTTPException(401, "账号已删除，请重新登录")
         c.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
-        c.execute("INSERT INTO sessions(token_hash, user_id, csrf, created_at, expires_at) VALUES(?,?,?,?,?)",
-                  (crypto.token_hash(token), uid, csrf, now, now + days * 86400))
+        c.execute("""INSERT INTO sessions(token_hash, user_id, csrf, created_at, expires_at, persistent)
+                     VALUES(?,?,?,?,?,?)""",
+                  (crypto.token_hash(token), uid, csrf, now, now + days * 86400, int(keep_login)))
         # 允许手机、电脑同时在线，但每人最多保留最近 MAX_SESSIONS_PER_USER 个会话
         c.execute("""DELETE FROM sessions WHERE user_id=? AND token_hash NOT IN (
                          SELECT token_hash FROM sessions WHERE user_id=?
                          ORDER BY created_at DESC, rowid DESC LIMIT ?)""",
                   (uid, uid, MAX_SESSIONS_PER_USER))
-    # 不保持登录时不设 max_age：浏览器会话 cookie，关闭浏览器即失效
-    response.set_cookie(SESSION_COOKIE, token, max_age=days * 86400 if keep_login else None, httponly=True,
-                        secure=COOKIE_SECURE, samesite="lax", path=COOKIE_PATH)
+    _set_session_cookie(response, token, keep_login)
     return csrf
+
+
+def _set_session_cookie(response: Response, token: str, persistent: bool) -> None:
+    # 不保持登录时不设 max_age：浏览器会话 cookie，关闭浏览器即失效
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_DAYS_LONG * 86400 if persistent else None,
+                        httponly=True, secure=COOKIE_SECURE, samesite="lax", path=COOKIE_PATH)
+
+
+def renew_session(request: Request, response: Response, sess) -> None:
+    """滑动续期：只要还在用，会话就不会因为“从登录起满 N 天”而突然失效。
+
+    每天最多续一次（减少写库和 Set-Cookie）；勾了“保持登录”的同时把浏览器 cookie 的 max_age 续满。
+    """
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return
+    persistent = bool(sess["session_persistent"])
+    days = SESSION_DAYS_LONG if persistent else SESSION_DAYS_SHORT
+    new_expiry = db.now() + days * 86400
+    if new_expiry - sess["expires_at"] < RENEW_EVERY:
+        return
+    with db.tx() as c:
+        c.execute("UPDATE sessions SET expires_at=? WHERE token_hash=?", (new_expiry, crypto.token_hash(token)))
+    if persistent:
+        _set_session_cookie(response, token, True)
+        set_device_hint(response, sess["id"])
 
 
 def destroy_session(request: Request, response: Response) -> None:
@@ -85,7 +111,7 @@ def device_hint_uid(request: Request) -> int | None:
 
 # 会话校验不带出 cookie / 密码 / 设备指纹 / 订阅 token 密文
 _SESSION_USER_COLS = """
-    s.csrf, s.expires_at, u.id, u.student_id, u.name, u.created_at, u.cred_mode,
+    s.csrf, s.expires_at, s.persistent AS session_persistent, u.id, u.student_id, u.name, u.created_at, u.cred_mode,
     u.password_consent_at, u.status, u.fail_count, u.last_error, u.last_refresh_at,
     u.last_success_at, u.next_refresh_at, u.current_semester_id, u.semesters_json,
     u.ics_token_hash, u.refresh_hours
