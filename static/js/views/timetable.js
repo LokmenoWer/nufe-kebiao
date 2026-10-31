@@ -6,7 +6,7 @@ import { icon, REPO_URL } from "../icons.js";
 import { showToast } from "../components/toast.js";
 import { openDialog } from "../components/dialog.js";
 import * as T from "../time.js";
-import { lessonsOfWeek, maxWeekOf, formatUnits, initialOf } from "../courses.js";
+import { lessonsOfWeek, maxWeekOf, formatUnits, formatTimeRange, formatUnitsWithTime, initialOf } from "../courses.js";
 import { layoutItems } from "../overlap.js";
 import { parseHash, buildHash } from "../hash.js";
 import { readViewPreference, writeViewPreference, readSemesterPreference, writeSemesterPreference } from "../store.js";
@@ -847,6 +847,7 @@ class TimetableController {
     const width = 100 / item.lanes;
     const room = activity.room || activity.building || "";
     const teachers = Array.isArray(activity.teachers) ? activity.teachers.join("、") : "";
+    const units = formatUnits(activity);
 
     const block = h("button", {
       type: "button",
@@ -859,11 +860,14 @@ class TimetableController {
         width: `calc(${width}% - 2 * var(--lesson-inset))`,
       },
       dataset: { start: String(item.start), end: String(item.end), day: String(item.day) },
-      "aria-label": `${item.courseName}，${T.WEEKDAY_LONG[item.day]} ${T.formatMinutes(item.start)} 到 ${T.formatMinutes(item.end)}，${room}，${teachers}`,
+      "aria-label": `${item.courseName}，${T.WEEKDAY_LONG[item.day]} ${units ? `${units}，` : ""}${T.formatMinutes(item.start)} 到 ${T.formatMinutes(item.end)}，${room}，${teachers}`,
       onClick: () => this.openLessonDetail(item, monday),
     },
     live ? h("span", { class: "lesson-badge" }, "上课中") : null,
     h("span", { class: "lesson-name" }, item.courseName),
+    h("span", { class: "lesson-time" },
+      units ? h("span", { class: "lesson-units" }, units) : null,
+      h("span", { class: "lesson-clock" }, formatTimeRange(item))),
     room ? h("span", { class: "lesson-room" }, room) : null,
     teachers ? h("span", { class: "lesson-teacher" }, teachers) : null);
     return block;
@@ -1009,7 +1013,7 @@ class TimetableController {
       h("span", { class: "lesson-card-meta" },
         room ? h("span", {}, icon("pin"), room) : null,
         teachers ? h("span", {}, icon("user"), teachers) : null,
-        h("span", {}, icon("clock"), formatUnits(activity))),
+        h("span", {}, icon("clock"), formatUnitsWithTime(item))),
       live ? h("span", { class: "lesson-progress", "aria-hidden": "true" },
         h("i", {
           dataset: { start: String(item.start), end: String(item.end) },
@@ -1032,7 +1036,7 @@ class TimetableController {
         : "—");
 
     const rows = [
-      ["时间", `${T.WEEKDAY_LONG[item.day]}${date ? ` ${T.monthDay(date)}` : ""} ${T.formatMinutes(item.start)}–${T.formatMinutes(item.end)}（${formatUnits(activity)}）`],
+      ["时间", `${T.WEEKDAY_LONG[item.day]}${date ? ` ${T.monthDay(date)}` : ""} · ${formatUnitsWithTime(item)}`],
       ["周次", weeks],
       ["地点", room || "—"],
       ["教师", teachers || "—"],

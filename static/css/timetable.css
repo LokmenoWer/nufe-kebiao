@@ -169,6 +169,20 @@
   white-space: nowrap;
 }
 .lesson-teacher { opacity: 0.82; }
+.lesson-time {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 5px;
+  max-width: 100%;
+  color: var(--text);
+  color: color-mix(in srgb, var(--c) 45%, var(--text-2));
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.lesson-units,
+.lesson-clock { white-space: nowrap; }
 .lesson-badge {
   order: -1;
   margin-bottom: 1px;
@@ -185,6 +199,7 @@
 }
 .lesson-block.is-compact { padding-top: 4px; padding-bottom: 4px; gap: 0; }
 .lesson-block.is-compact .lesson-room,
+.lesson-block.is-compact .lesson-time,
 .lesson-block.is-compact .lesson-teacher,
 .lesson-block.is-compact .lesson-badge { display: none; }
 .lesson-block.is-compact .lesson-name {
@@ -369,6 +384,10 @@
     -webkit-line-clamp: 2;
   }
   .lesson-teacher { display: none; }
+  /* 窄列里只放具体时间（节次在详情里看），允许在“–”后折成两行 */
+  .lesson-units { display: none; }
+  .lesson-time { font-size: 9px; line-height: 1.25; letter-spacing: -0.02em; }
+  .lesson-clock { white-space: normal; }
   .lesson-badge { display: none; }
   .lesson-block.is-compact { padding-top: 2px; padding-bottom: 2px; }
   .lesson-block.is-compact .lesson-name { font-size: 10px; -webkit-line-clamp: 2; }

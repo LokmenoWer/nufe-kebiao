@@ -1,6 +1,6 @@
 /** 课表数据 → 周视图/日视图需要的课程块。纯函数，便于测试。 */
 
-import { minutesOf } from "./time.js";
+import { formatMinutes, minutesOf } from "./time.js";
 
 export const PALETTE = [
   "#4b63e0", "#0f8b8d", "#2f9e44", "#e8590c", "#ae3ec9", "#1971c2",
@@ -57,6 +57,17 @@ export function formatUnits(lesson) {
   const end = lesson.endUnit;
   if (!start) return "";
   return `第 ${start}${end && end !== start ? `–${end}` : ""} 节`;
+}
+
+/** 课程块的起止时间，例如 "10:00–11:35"。 */
+export function formatTimeRange(item) {
+  if (!item || !Number.isFinite(item.start) || !Number.isFinite(item.end)) return "";
+  return `${formatMinutes(item.start)}–${formatMinutes(item.end)}`;
+}
+
+/** 节次 + 具体时间，例如 "第 3–4 节 · 10:00–11:35"；缺哪个就只显示另一个。 */
+export function formatUnitsWithTime(item) {
+  return [formatUnits(item?.activity), formatTimeRange(item)].filter(Boolean).join(" · ");
 }
 
 /** 从有起止时间的课里推出每节课的上下课时间，给缺时间的课兜底。 */

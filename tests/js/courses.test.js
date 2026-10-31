@@ -5,7 +5,9 @@ import {
   PALETTE,
   buildColorMap,
   colorFor,
+  formatTimeRange,
   formatUnits,
+  formatUnitsWithTime,
   groupByDay,
   initialOf,
   lessonsOfWeek,
@@ -95,6 +97,17 @@ test("节次时间表与格式化", () => {
   assert.equal(formatUnits(activity({ startUnit: 3, endUnit: 5 })), "第 3–5 节");
   assert.equal(formatUnits(activity({ startUnit: 3, endUnit: 3 })), "第 3 节");
   assert.equal(formatUnits(null), "");
+});
+
+test("节次后面带上具体上课时间", () => {
+  const [item] = lessonsOfWeek(timetable([
+    activity({ startUnit: 3, endUnit: 4, startTime: "10:00", endTime: "11:35" }),
+  ]), 1);
+  assert.equal(formatTimeRange(item), "10:00–11:35");
+  assert.equal(formatUnitsWithTime(item), "第 3–4 节 · 10:00–11:35");
+  // 教务没给节次时只显示时间
+  assert.equal(formatUnitsWithTime({ ...item, activity: { ...item.activity, startUnit: null } }), "10:00–11:35");
+  assert.equal(formatUnitsWithTime(null), "");
 });
 
 test("同一学期内不超过调色板大小时颜色互不相同", () => {
