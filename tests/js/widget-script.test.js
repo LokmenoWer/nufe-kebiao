@@ -232,6 +232,22 @@ test("铺满（大号）：每天一列带日期，卡片写起止时间、课�
   assert.ok(medium.widget.texts().includes("金融学") && !medium.widget.texts().includes("10/26"));
 });
 
+test("上午到晚上排满的一周：两节小课在本周和铺满模式里都写教室", async () => {
+  const busy = { ...PAYLOAD, week: { ...PAYLOAD.week, days: [
+    day("2026-10-26", 1, [L("高等数学", "08:20", "09:45", "A101"), L("概率论", "10:00", "12:15"), L("大学英语", "14:15", "16:35"), L("微观经济学", "18:30", "20:50")]),
+    day("2026-10-27", 2, [L("宏观经济学", "10:00", "12:15"), L("统计学", "15:10", "16:35", "C303"), L("会计学", "18:30", "20:50")]),
+    day("2026-10-28", 3, [L("线性代数", "09:05", "12:15"), L("金融学", "14:15", "16:35")]),
+    day("2026-10-29", 4, [L("管理学", "13:30", "16:35")]),
+    day("2026-10-30", 5, [L("税法", "10:00", "11:25", "D404"), L("经济法", "13:30", "14:55"), L("体育", "18:30", "20:00")]),
+    day("2026-10-31", 6, [L("选修", "08:20", "09:45", "E505")]), day("2026-11-01", 7, []),
+  ] } };
+  for (const parameter of ["week", "full"]) {
+    const t = (await runWidgetScript({ payload: busy, family: "large", parameter, url: URL_OK, nowMs: NOW })).widget.texts();
+    assert.ok(!t.includes("周日"), `${parameter}: ${t.join("|")}`);
+    for (const room of ["A101", "C303", "D404", "E505"]) assert.ok(t.includes(room), `${parameter} ${room}: ${t.join("|")}`);
+  }
+});
+
 test("本周（大号）：每天一列，课程名和教室都在", async () => {
   const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "week", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
@@ -239,10 +255,14 @@ test("本周（大号）：每天一列，课程名和教室都在", async () =>
   assert.ok(t.includes("08:20") && t.includes("10:00") && t.includes("13:30"), t.join("|"));
   // 每张卡片顶上写自己的起止时间
   assert.ok(t.includes("08:20–09:45") && t.includes("13:30–14:55"), t.join("|"));
-  // 有周末课（7 列）时格子太窄：只写开始时间
-  const weekend = { ...PAYLOAD, week: { ...PAYLOAD.week, days: PAYLOAD.week.days.map((d) => (d.weekday === 6 ? { ...d, lessons: [L("选修", "08:20", "09:45")] } : d)) } };
-  const seven = (await runWidgetScript({ payload: weekend, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
-  assert.ok(seven.includes("周日") && !seven.includes("08:20–09:45") && seven.includes("13:30"), seven.join("|"));
+  // 有周末课时格子太窄：只写开始时间；只有周六有课时不画空的周日
+  const withWeekend = (...weekdays) => ({ ...PAYLOAD, week: { ...PAYLOAD.week, days: PAYLOAD.week.days.map((d) => (weekdays.includes(d.weekday) ? { ...d, lessons: [L("选修", "08:20", "09:45")] } : d)) } });
+  const six = (await runWidgetScript({ payload: withWeekend(6), family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
+  assert.ok(six.includes("周六") && !six.includes("周日") && !six.includes("08:20–09:45"), six.join("|"));
+  const seven = (await runWidgetScript({ payload: withWeekend(7), family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
+  assert.ok(seven.includes("周六") && seven.includes("周日") && seven.includes("13:30"), seven.join("|"));
+  // 两节小课（85 分钟）的格子也写教室
+  assert.ok(t.includes("A101"), t.join("|"));
   for (const label of ["周一", "周二", "周三", "周四", "周五"]) assert.ok(t.includes(label), label);
   assert.ok(!t.includes("周六"));
   assert.ok(t.includes("金融学") && t.includes("宏观经济学"));

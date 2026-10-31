@@ -270,10 +270,14 @@ function weekToShow(payload, now) {
   return { title: "本周", block: current || { days: [] }, isNext: false };
 }
 
+/** 周一到周五总是画；周末画到最后一个有课的日子：只有周六有课就是 6 列，空着的周日不占位置。 */
 function weekColumns(block, now) {
   const days = (block && block.days) || [];
-  const weekend = days.slice(5).some((d) => d.lessons && d.lessons.length);
-  return days.slice(0, weekend ? 7 : 5).map((d) => ({
+  let count = 5;
+  days.forEach((d, i) => {
+    if (i >= 5 && ((d.lessons && d.lessons.length) || (d.cancelled && d.cancelled.length))) count = i + 1;
+  });
+  return days.slice(0, count).map((d) => ({
     ...d,
     isToday: d.date === now.date,
     lessons: annotate(d.lessons, d.date === now.date ? now.minutes : d.date < now.date ? 24 * 60 : -1,
@@ -788,11 +792,13 @@ function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
       size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), scale: 0.7,
     });
   }
-  const lines = large ? (height >= 46 ? 2 : 1) : (!showTime && height >= 28 ? 2 : 1);
+  // 大号格子放得下三行（时间 + 课名 + 教室）就写教室：两节小课的格子也要能看到去哪上课
+  const showRoom = large && Boolean(lesson.room) && height >= 40;
+  const lines = large ? (height >= (showRoom ? 58 : 46) ? 2 : 1) : (!showTime && height >= 28 ? 2 : 1);
   // 撞课：同一格里还有别的课，名字后面注“+1”
   const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
   addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
-  if (large && lesson.room && height >= 56) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
+  if (showRoom) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
   chip.addSpacer();
 }
 
@@ -877,11 +883,13 @@ function fullChip(cell, C, lesson, { width, height, large, more }) {
     chip.borderColor = lesson.state === "live" ? tint : C.warn;
     chip.borderWidth = 1.5;
   }
-  // 按格子高度分配行：时间 → 课名 → 教室 → 课名第 2、3 行 → 教师
+  // 按格子高度分配行：课名 → 教室 → 时间 → 课名第 2、3 行 → 教师。
+  // 教室排在时间前面：左边时间轴已经有开始时间，两节小课的格子只够两行时留给教室
   const lineH = large ? 12 : 11;
   const n = Math.max(1, Math.floor((height - 5) / lineH));
-  const showTime = n >= 2;
-  const showRoom = n >= 3 && Boolean(roomText(lesson));
+  const hasRoom = Boolean(roomText(lesson));
+  const showRoom = n >= 2 && hasRoom;
+  const showTime = n >= (hasRoom ? 3 : 2);
   const showTeacher = large && n >= 6 && Boolean(lesson.teachers);
   const nameLines = Math.max(1, Math.min(3, n - showTime - showRoom - showTeacher));
   if (showTime) {
