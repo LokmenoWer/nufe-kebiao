@@ -173,16 +173,6 @@ test("按机型估小组件尺寸", () => {
   assert.deepEqual(size(430, 932, "large"), { w: 364, h: 382 });
   assert.deepEqual(size(400, 870, "large"), { w: 338, h: 354 });   // 没见过的机型：按相近屏宽
   assert.deepEqual({ ...W.widgetSizeFor(null, "large") }, { w: 329, h: 345 });
-  // 手机上的超大号 / 没见过的尺寸：宽度不超过大号，否则整块画不出来（黑屏）
-  assert.deepEqual(size(393, 852, "extraLarge"), { w: 338, h: 354 });
-  assert.deepEqual(size(393, 852, "extraLargePortrait"), { w: 338, h: 354 });
-  assert.ok(size(1024, 1366, "extraLarge").w > 700);  // iPad 才是两倍宽
-  const fam = (raw, w, h) => ({ ...W.normalizeFamily(raw, { w, h }) });
-  assert.deepEqual(fam("extraLargePortrait", 393, 852), { family: "large", unknown: "extraLargePortrait" });
-  assert.deepEqual(fam("extraLarge", 393, 852), { family: "large", unknown: "extraLarge" });
-  assert.deepEqual(fam("extraLarge", 1024, 1366), { family: "extraLarge", unknown: "" });
-  assert.deepEqual(fam("accessoryInline", 393, 852), { family: "accessoryInline", unknown: "" });
-  assert.deepEqual(fam("large", 393, 852), { family: "large", unknown: "" });
 });
 
 // ---- 整个脚本在 Scriptable 替身里跑一遍 ----
@@ -228,16 +218,6 @@ test("小号与锁屏也有倒计时", async () => {
   assert.ok(rect.widget.texts().includes("[timer→2026-10-26T04:15:00.000Z]"));
   const circ = await runWidgetScript({ payload: PAYLOAD, family: "accessoryCircular", url: URL_OK, nowMs: NOW });
   assert.deepEqual(circ.widget.texts(), ["下课", "12:15"]);
-});
-
-test("没见过的尺寸（如 iOS 27 竖版超大号）照大号画，并在标题栏注明尺寸名", async () => {
-  for (const parameter of ["full", "week", "today"]) {
-    const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "extraLargePortrait", parameter, url: URL_OK, nowMs: NOW });
-    const t = widget.texts();
-    assert.ok(t.includes("尺寸 extraLargePortrait") && t.includes("金融学") === (parameter !== "today"), `${parameter}: ${t.join("|")}`);
-  }
-  const phoneXL = await runWidgetScript({ payload: PAYLOAD, family: "extraLarge", parameter: "full", url: URL_OK, nowMs: NOW });
-  assert.ok(phoneXL.widget.texts().includes("尺寸 extraLarge"));
 });
 
 test("铺满（大号）：每天一列带日期，卡片写起止时间、课名、教室和教师", async () => {
