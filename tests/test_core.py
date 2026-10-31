@@ -446,16 +446,22 @@ def test_slider_sign_matches_page_plugin():
 
 
 def test_reauth_method_detection():
-    assert cas.reauth_method('<input id="dynamicCode">', "3") == "sms"
-    assert cas.reauth_method('<input id="otpCode" name="otpCode">', "5") == "otp"
-    # 学校模板里两套输入框都在：按 reAuthType / 短信算，不能当成动态口令
-    both = '<input id="dynamicCode" name="dynamicCode"><input id="otpCode" name="otpCode">'
-    assert cas.reauth_method(both, "3") == "sms"
-    assert cas.reauth_method(both, "") == "sms"
-    assert cas.reauth_method('<input id="otpCode">', "") == "otp"
-    assert cas.reauth_method('<input name="answer1"><input name="answer2">', "6") == "密保问题"
-    assert cas.reauth_method("请输入邮箱验证码", "4") == "邮箱验证码"
-    assert "reAuthType=9" in cas.reauth_method("<p>?</p>", "9")
+    # 只按 reAuthType 判断：学校模板里所有方式的输入框都在
+    assert cas.reauth_method("3") == "sms"
+    assert cas.reauth_method("10") == "otp"
+    assert cas.reauth_method("5") == "今日校园验证码"
+    assert cas.reauth_method("11") == "邮箱验证码"
+    assert cas.reauth_method("2") == "重新输入密码"
+    assert "reAuthType=99" in cas.reauth_method("99")
+    assert "reAuthType=?" in cas.reauth_method("")
+
+
+def test_reauth_alternatives():
+    html = """<ul class="changeReAuthTypes"><li id="3" onclick="changeReAuthType(this)">短信</li>
+    <li id="10" onclick="changeReAuthType(this)">动态口令</li></ul>"""
+    assert cas.reauth_alternatives(html) == {"3", "10"}
+    assert cas.reauth_alternatives("<a onclick=\"switchReAuthType('3', f)\">x</a>") == {"3"}
+    assert cas.reauth_alternatives('<input id="dynamicCode"><input id="otpCode">') == set()
 
 
 # ---------- 邮件 ----------
@@ -673,3 +679,90 @@ def test_scheduler_budget_aimd():
     for _ in range(50):
         b.adjust(5, 0)
     assert b.rate == scheduler.MIN_RATE
+
+
+class _FakeResp:
+    def __init__(self, url="", text="", payload=None, status=200):
+        self.url, self.text, self._payload, self.status_code = url, text, payload, status
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, replies):
+        self.replies, self.posts = replies, []
+
+    def post(self, url, data=None, headers=None):
+        self.posts.append((url, data))
+        return self.replies.pop(0)
+
+
+_REAUTH_URL = "https://authserver.nufe.edu.cn/authserver/reAuthCheck/reAuthLoginView.do?isMultifactor=true"
+_REAUTH_OTP_PAGE = """<script>var reAuthParams = {"reAuthType":"10", "isMultifactor":"true",
+  "service":"https:\\/\\/jwxt.nufe.edu.cn\\/sso", "reAuthUserId":"2023001"};</script>
+<input id="dynamicCode"><input name="otpCode">
+<ul class="changeReAuthTypes"><li id="3" onclick="changeReAuthType(this)">短信</li></ul>"""
+
+
+def test_reauth_switches_to_sms_when_offered():
+    s = _FakeSession([_FakeResp(payload={"code": 1, "data": {"reAuthType": "3"}})])
+    flow = cas.LoginFlow(s, "2023001", "pw")
+    assert flow._after_login_post(_FakeResp(_REAUTH_URL, _REAUTH_OTP_PAGE)) == "mfa"
+    url, data = s.posts[0]
+    assert url.endswith("/reAuthCheck/changeReAuthType.do") and data["reAuthType"] == "3"
+    assert flow.reauth["method"] == "sms" and flow.reauth["reAuthType"] == "3"
+
+
+def test_reauth_keeps_otp_and_never_sends_sms_when_switch_refused():
+    s = _FakeSession([_FakeResp(payload={"code": 0, "message": "no"})])
+    flow = cas.LoginFlow(s, "2023001", "pw")
+    assert flow._after_login_post(_FakeResp(_REAUTH_URL, _REAUTH_OTP_PAGE)) == "mfa"
+    assert flow.reauth["method"] == "otp"
+    try:
+        flow.send_sms()
+    except cas.CasError:
+        pass
+    else:
+        raise AssertionError("must not request an SMS for a non-SMS reauth session")
+    assert len(s.posts) == 1  # 只有切换请求，没有发短信请求
+
+
+def test_captcha_always_shown_when_bad_credentials_count_is_zero():
+    assert cas.captcha_always_shown('var _badCredentialsCount = "0";')
+    assert not cas.captcha_always_shown('var _badCredentialsCount = "3";')
+    assert not cas.captcha_always_shown("")
+
+
+def _sms_flow(sleep_account: str):
+    page = _REAUTH_OTP_PAGE.replace('"reAuthType":"10"', f'"reAuthType":"3", "isSleepAccount":"{sleep_account}"')
+    s = _FakeSession([])
+    flow = cas.LoginFlow(s, "2023001", "pw")
+    flow._after_login_post(_FakeResp(_REAUTH_URL, page))
+    return flow, s
+
+
+def test_skip_tmp_reauth_only_sent_when_page_offers_trust():
+    for sleep_account, expected in (("0", "true"), ("1", None)):
+        flow, s = _sms_flow(sleep_account)
+        s.replies.append(_FakeResp(payload={"code": "reAuth_failed", "msg": "x"}))
+        try:
+            flow.verify_sms("123456", trust_device=True)
+        except cas.CasError:
+            pass
+        data = s.posts[-1][1]
+        assert data.get("skipTmpReAuth") == expected
+        assert data["dynamicCode"] == "123456" and data["otpCode"] == "" and data["reAuthType"] == "3"
+
+
+def test_none_auth_type_is_unsupported():
+    page = _REAUTH_OTP_PAGE.replace('"reAuthType":"10"', '"reAuthType":"", "noneAuthType":"1"')
+    flow = cas.LoginFlow(_FakeSession([]), "2023001", "pw")
+    try:
+        flow._after_login_post(_FakeResp(_REAUTH_URL, page))  # 不会尝试切换：页面这时不提供切换
+    except cas.MfaUnsupported as e:
+        assert "无可用" in str(e)
+    else:
+        raise AssertionError("noneAuthType=1 must be reported as unsupported")

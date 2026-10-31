@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import secrets
 import time
@@ -23,6 +24,8 @@ from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+log = logging.getLogger("kebiao.cas")
+
 AUTH_HOST = "authserver.nufe.edu.cn"
 AUTH_BASE = f"https://{AUTH_HOST}/authserver"
 COURSE_TABLE_URL = "https://jwxt.nufe.edu.cn/student/for-std/course-table"
@@ -31,6 +34,9 @@ JW_SSO_URL = "https://jwxt.nufe.edu.cn/student/sso/login"  # 302 → authserver�
 # 金智二次认证的默认接口；进入二次认证页后会优先从页面脚本里解析实际路径
 REAUTH_SEND_SMS = f"{AUTH_BASE}/dynamicCode/getDynamicCodeByReauth.do"
 REAUTH_SUBMIT = f"{AUTH_BASE}/reAuthCheck/reAuthSubmit.do"
+REAUTH_CHANGE_TYPE = f"{AUTH_BASE}/reAuthCheck/changeReAuthType.do"
+REAUTH_SMS = "3"   # reAuth.js：3 = 手机短信验证码（authCodeTypeName=reAuthDynamicCodeType）
+REAUTH_OTP = "10"  # reAuth.js：10 = 动态口令 / 身份验证器 App（otpCode）
 FP_COOKIE = "MULTIFACTOR_BROWSER_FINGERPRINT"
 
 _AES_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
@@ -60,7 +66,10 @@ def new_device_id() -> str:
     return secrets.token_hex(16).upper()
 
 
+# jQuery $.ajax 按 dataType 发的请求头：json / text / 不指定
 _AJAX = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01"}
+_AJAX_TEXT = {"X-Requested-With": "XMLHttpRequest", "Accept": "text/plain, */*; q=0.01"}
+_AJAX_ANY = {"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"}
 
 
 def random_string(n: int) -> str:
@@ -119,6 +128,12 @@ def parse_login_form(html: str) -> dict[str, str]:
     return {"salt": salt, "execution": execution, "lt": val(name="lt") or ""}
 
 
+def captcha_always_shown(html: str) -> bool:
+    """login.js checkNeedCaptcha：_badCredentialsCount 为 0 时验证码一直显示，不再问 checkNeedCaptcha.htl。"""
+    m = re.search(r"""\b_badCredentialsCount\s*=\s*["']?(\d+)""", html or "")
+    return bool(m) and int(m.group(1)) == 0
+
+
 def parse_captcha_switch(html: str) -> str:
     """登录页里的 var captchaSwitch = "1"|"2"：1=图形验证码，2=滑块拼图。缺省按图形验证码处理。"""
     m = re.search(r"""\bcaptchaSwitch\s*=\s*["']?(\d)""", html or "")
@@ -175,26 +190,43 @@ def _has_input(soup: BeautifulSoup, name: str) -> bool:
     return soup.find("input", attrs={"id": name}) is not None or soup.find("input", attrs={"name": name}) is not None
 
 
-def reauth_method(html: str, reauth_type: str) -> str:
-    """二次认证页要求的方式。只认得出、且只需用户输入一段代码的才转发：
+# reAuth.js 里 reAuthType 与方式的对应关系；页面模板把所有方式的输入框都放进去、按 reAuthType 只显示一种，
+# 所以只能按 reAuthType 判断，不能看页面上有哪些输入框。
+_REAUTH_TYPE_NAMES = {
+    "2": "重新输入密码", "7": "重新输入密码", "4": "企业微信验证码", "5": "今日校园验证码",
+    "6": "人脸识别", "18": "人脸识别", "11": "邮箱验证码", "12": "钉钉验证码", "13": "WeLink 验证码",
+    "14": "App 扫码确认", "15": "微信服务号验证码", "CaUKey": "CA UKey",
+}
 
-    sms = 短信验证码（reAuthType=3 或有 dynamicCode 输入框）；otp = 动态口令 / 身份验证器 App（otpCode 输入框）。
-    其余（密保问题、邮箱、App 扫码确认等）返回描述文字，由调用方提示用户换一种方式。
-    学校的页面模板会把各种方式的输入框一起放进去、按 reAuthType 显示其一，所以先认 reAuthType，
-    两个输入框都在时按短信算（没绑身份验证器的人收不到动态口令）。
+
+def reauth_method(reauth_type: str) -> str:
+    """二次认证页要求的方式。只转发只需用户输入一段代码、且我们确知字段的两种：
+
+    sms = 短信验证码（reAuthType=3）；otp = 动态口令 / 身份验证器 App（reAuthType=10）。
+    其余返回描述文字，由调用方提示用户换一种方式。
     """
-    soup = BeautifulSoup(html or "", "html.parser")
-    if reauth_type == "3" or _has_input(soup, "dynamicCode"):
+    if reauth_type == REAUTH_SMS:
         return "sms"
-    if _has_input(soup, "otpCode"):
+    if reauth_type == REAUTH_OTP:
         return "otp"
-    if _has_input(soup, "answer1") or "密保" in (html or ""):
-        return "密保问题"
-    if "邮箱" in (html or ""):
-        return "邮箱验证码"
-    if "扫码" in (html or "") or _has_input(soup, "uuid"):
-        return "App 扫码确认"
+    if reauth_type in _REAUTH_TYPE_NAMES:
+        return _REAUTH_TYPE_NAMES[reauth_type]
+    if reauth_type.lower().startswith("real_person_plugin_"):
+        return "人脸识别"
     return f"未知方式（reAuthType={reauth_type or '?'}）"
+
+
+def reauth_alternatives(html: str) -> set[str]:
+    """页面"切换认证方式"里列出的 reAuthType。选项的 id 就是 reAuthType（reAuth.js: $("#"+reAuthType)）。"""
+    soup = BeautifulSoup(html or "", "html.parser")
+    found = set()
+    for el in soup.select(".changeReAuthTypes [id]"):
+        found.add(el["id"])
+    for el in soup.find_all(attrs={"onclick": re.compile(r"(change|switch)ReAuthType")}):
+        if el.get("id"):
+            found.add(el["id"])
+    found.update(re.findall(r"switchReAuthType\(\s*['\"]([^'\"]+)['\"]", html or ""))
+    return found
 
 
 def parse_qr_form(html: str) -> dict[str, str]:
@@ -264,19 +296,24 @@ def parse_reauth_page(url: str, html: str) -> dict:
     m = re.search(r"['\"]([^'\"]*reAuthSubmit\.do)['\"]", html)
     if m:
         info["submit_url"] = pin_auth_url(_resolve(url, m.group(1)))
+    info["change_url"] = REAUTH_CHANGE_TYPE
+    m = re.search(r"['\"]([^'\"]*changeReAuthType\.do)['\"]", html)
+    if m:
+        info["change_url"] = pin_auth_url(_resolve(url, m.group(1)))
     m = re.search(r"1\d{2}\*{4}\d{4}", html)
     if m:
         info["phone"] = m.group(0)
-    raw_type = _reauth_param(html, "reAuthType")
-    info["reAuthType"] = raw_type or "3"
+    info["reAuthType"] = _reauth_param(html, "reAuthType")
     info["isMultifactor"] = _reauth_param(html, "isMultifactor") or "true"
     info["userId"] = _reauth_param(html, "reAuthUserId")
     info["service"] = (_reauth_param(html, "service")
                        or (parse_qs(urlparse(url).query).get("service") or [""])[0])
-    # 用页面上真实的 reAuthType 判断；缺省值 3 只用于提交，不能让它把只有 otpCode 的页面认成短信
-    info["method"] = reauth_method(html, raw_type)
-    if info["method"].startswith("未知方式") and not raw_type:
-        info["method"] = "sms"  # 页面什么都没认出来时沿用以前的默认：短信
+    info["isSleepAccount"] = _reauth_param(html, "isSleepAccount")
+    info["method"] = reauth_method(info["reAuthType"])
+    info["noneAuthType"] = _reauth_param(html, "noneAuthType")
+    if info["noneAuthType"] == "1":
+        info["method"] = "无可用的认证方式"  # reAuth.js：noneAuthType=1 时页面不初始化任何方式
+    info["alternatives"] = sorted(reauth_alternatives(html))
     return info
 
 
@@ -291,6 +328,7 @@ class LoginFlow:
     reauth: dict = field(default_factory=dict)
     captcha_kind: str = "image"    # image | slider（来自登录页 captchaSwitch）
     slider_key: str = ""           # 当前滑块挑战的签名密钥；每张图只能用一次
+    slider_page_loaded: bool = False  # 页面每次点登录先取 toSliderCaptcha.htl，换图只调 openSliderCaptcha
     sms_ready_at: float = 0.0
     device_id: str = field(default_factory=new_device_id)
     qr_uuid: str = ""
@@ -349,12 +387,13 @@ class LoginFlow:
             return self.stage
         self.fields = parse_login_form(html)
         self.captcha_kind = "slider" if parse_captcha_switch(html) == "2" else "image"
-        if need_captcha(self.session, self.username):
+        if captcha_always_shown(html) or need_captcha(self.session, self.username):
             self.stage = self._captcha_stage()
             return self.stage
         return self.submit("")
 
     def _captcha_stage(self) -> str:
+        self.slider_page_loaded = False
         return "slider" if self.captcha_kind == "slider" else "captcha"
 
     # ---- 扫码登录（复刻 qrcode.js）：二维码交给用户用手机扫，程序只轮询状态 ----
@@ -368,10 +407,9 @@ class LoginFlow:
         return self.stage
 
     def _new_qr_token(self) -> None:
-        params = {"ts": int(time.time() * 1000)}
-        if self.qr_uuid:
-            params["uuid"] = self.qr_uuid
-        r = self.session.get(f"{AUTH_BASE}/qrCode/getToken", params=params, headers=_AJAX)
+        # qrcode.js：getToken?ts=...&uuid=（首次 uuid 为空，jQuery 照样带上空参数）
+        r = self.session.get(f"{AUTH_BASE}/qrCode/getToken",
+                             params={"ts": int(time.time() * 1000), "uuid": self.qr_uuid}, headers=_AJAX_TEXT)
         self._dump("qr-token", r)
         token = r.text.strip()
         if r.status_code != 200 or not token or len(token) > 128 or "<" in token:
@@ -399,7 +437,7 @@ class LoginFlow:
         if self.qr_status == "expired":
             return self.stage
         r = self.session.get(f"{AUTH_BASE}/qrCode/getStatus.htl",
-                             params={"ts": int(time.time() * 1000), "uuid": self.qr_uuid}, headers=_AJAX)
+                             params={"ts": int(time.time() * 1000), "uuid": self.qr_uuid}, headers=_AJAX_TEXT)
         if is_auth_login_url(r.url):
             self.qr_status = "expired"
             return self.stage
@@ -415,6 +453,7 @@ class LoginFlow:
 
     def _submit_qr(self) -> str:
         service = (parse_qs(urlparse(self.login_url).query).get("service") or [""])[0]
+        # 字段与学校 qrLoginForm 完全一致（该表单没有"记住我"，不要额外加 rememberMe）
         r = self.session.post(f"{AUTH_BASE}/login", params={"display": "qrLogin", "service": service}, data={
             "lt": self.qr_fields.get("lt", ""),
             "uuid": self.qr_uuid,
@@ -423,8 +462,6 @@ class LoginFlow:
             "execution": self.qr_fields["execution"],
             "_eventId": "submit",
             "rmShown": self.qr_fields.get("rmShown", "1"),
-            # 和账号密码登录一样勾上“记住我”：CASTGC 活得更久，教务会话过期后可以静默续期
-            "rememberMe": "true",
         })
         self._dump("after-qr-submit", r)
         if is_auth_login_url(r.url):
@@ -457,6 +494,11 @@ class LoginFlow:
         """取一张新的滑块拼图（同 ids-sliderCaptcha.js 的 openSliderCaptcha）。返回两张图，密钥留在服务端。"""
         if self.stage != "slider":
             raise CasError("当前不需要滑块验证")
+        if not self.slider_page_loaded:
+            # login.js createSliderCaptcha：先取滑块弹窗片段，片段里的 ids-sliderCaptcha.js 再取图
+            r = self.session.get(f"{AUTH_BASE}/common/toSliderCaptcha.htl", headers=_AJAX_ANY)
+            self._dump("slider-page", r)
+            self.slider_page_loaded = True
         r = self.session.get(f"{AUTH_BASE}/common/openSliderCaptcha.htl", params={"_": int(time.time() * 1000)},
                              headers=_AJAX)
         self._dump("slider", r)
@@ -513,6 +555,13 @@ class LoginFlow:
         """账号密码与扫码登录提交后的共同处理：可能进入短信二次认证，否则完成。"""
         if is_reauth_page(r.url, r.text):
             self.reauth = parse_reauth_page(r.url, r.text)
+            log.info("reauth page: reAuthType=%r alternatives=%s",
+                     self.reauth["reAuthType"], self.reauth["alternatives"])
+            # 学校默认给的不是短信、但页面允许切到短信时，像页面上点"切换认证方式"一样先切过去：
+            # 多数人没绑定身份验证器，短信人人能收
+            if (self.reauth["method"] != "sms" and REAUTH_SMS in self.reauth["alternatives"]
+                    and self.reauth["noneAuthType"] != "1"):
+                self._switch_reauth_type(REAUTH_SMS)
             method = self.reauth["method"]
             if method not in ("sms", "otp"):
                 self.stage = "failed"
@@ -524,10 +573,36 @@ class LoginFlow:
             return self.stage
         return self._finish()
 
+    @property
+    def can_trust_device(self) -> bool:
+        return self.reauth.get("isSleepAccount") == "0"
+
+    def _switch_reauth_type(self, reauth_type: str) -> None:
+        """与 reAuth.js 的 switchReAuthType 一致。失败就保持原方式，不重试。"""
+        r = self.session.post(self.reauth["change_url"], data={
+            "isMultifactor": self.reauth.get("isMultifactor", "true"),
+            "reAuthType": reauth_type,
+            "service": self.reauth.get("service", ""),
+        }, headers=_AJAX)
+        self._dump("change-reauth-type", r)
+        try:
+            j = r.json()
+        except ValueError:
+            log.warning("changeReAuthType: non-JSON response, HTTP %s", r.status_code)
+            return
+        data = j.get("data") if isinstance(j, dict) else None
+        new_type = str((data or {}).get("reAuthType") or "")
+        if str(j.get("code")) != "1" or not new_type:
+            log.warning("changeReAuthType to %s refused: code=%r", reauth_type, j.get("code"))
+            return
+        self.reauth["reAuthType"] = new_type
+        self.reauth["method"] = reauth_method(new_type)
+
     def send_sms(self) -> str:
         if self.stage != "mfa":
             raise CasError("当前不需要短信验证")
-        if self.reauth.get("method") != "sms":
+        # 只在学校确实要短信（reAuthType=3）时才请求发送：类型不符的发送请求会被学校判成会话异常、冻结账号
+        if self.reauth.get("method") != "sms" or self.reauth.get("reAuthType") != REAUTH_SMS:
             raise CasError("这次二次认证不需要短信，请直接输入身份验证器 App 上的动态口令")
         wait = int(self.sms_ready_at - time.time())
         if wait > 0:
@@ -545,17 +620,20 @@ class LoginFlow:
         if j.get("res") in ("success", "other_success"):
             self.sms_ready_at = time.time() + int(j.get("codeTime") or 60)
             return f"{msg or '验证码已发送'}{'' if j.get('mobile', '') in msg else j.get('mobile', '')}"
-        raise CasError(msg or f"发送短信失败：{j.get('res')}")
+        # 失败也等一个发送间隔再允许重发，免得连续请求触发学校的风控
+        self.sms_ready_at = time.time() + int(j.get("codeTime") or 60)
+        log.warning("send sms failed: res=%r", j.get("res"))
+        raise CasError(msg or (f"发送短信失败：{j['res']}" if j.get("res") else "学校没有发出短信，请改用扫码登录"))
 
     def verify_sms(self, code: str, trust_device: bool = True) -> str:
         """短信验证码或动态口令（otp）：两者都只是用户输入的一段代码，按页面要求放进对应字段。"""
         if self.stage != "mfa":
             raise CasError("当前不需要二次认证")
         otp = self.reauth.get("method") == "otp"
-        # 字段与 reAuth.js 的 loginParams 完全一致；skipTmpReAuth=true 即页面上的"信任此设备"
-        r = self.session.post(self.reauth["submit_url"], data={
+        # 字段与 reAuth.js 的 loginParams 完全一致
+        data = {
             "service": self.reauth.get("service", ""),
-            "reAuthType": self.reauth.get("reAuthType", "3"),
+            "reAuthType": self.reauth.get("reAuthType", REAUTH_SMS),
             "isMultifactor": self.reauth.get("isMultifactor", "true"),
             "password": "",
             "dynamicCode": "" if otp else code.strip(),
@@ -563,8 +641,11 @@ class LoginFlow:
             "answer1": "",
             "answer2": "",
             "otpCode": code.strip() if otp else "",
-            "skipTmpReAuth": "true" if trust_device else "false",
-        }, headers=_AJAX)
+        }
+        # 只有 isSleepAccount=0 时页面才弹"信任此设备"，并按选择带上 skipTmpReAuth；否则不带这个字段
+        if self.can_trust_device:
+            data["skipTmpReAuth"] = "true" if trust_device else "false"
+        r = self.session.post(self.reauth["submit_url"], data=data, headers=_AJAX)
         self._dump("verify-sms", r)
         try:
             j = r.json()
@@ -615,9 +696,11 @@ class LoginFlow:
 
 
 def need_captcha(session: requests.Session, username: str) -> bool:
+    # login.js：$.ajax(checkNeedCaptcha.htl, {data: {username: trim}, cache: false, dataType: "json"})
     r = session.get(
         f"{AUTH_BASE}/checkNeedCaptcha.htl",
-        params={"username": username, "_": int(time.time() * 1000)},
+        params={"username": username.strip(), "_": int(time.time() * 1000)},
+        headers=_AJAX,
     )
     try:
         return bool(r.json().get("isNeed"))

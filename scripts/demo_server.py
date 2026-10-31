@@ -80,6 +80,8 @@ def _demo_slider():
 class DemoFlow:
     """模拟 cas.LoginFlow：密码 demo 直接成功；扫码轮询几次后视为已确认；特殊密码演示各种人机验证。"""
 
+    can_trust_device = True
+
     def __init__(self, session, username, password, device_id=None, debug_dir=None):
         self.session, self.username, self.password = session, username, password
         self.device_id = device_id or cas.new_device_id()

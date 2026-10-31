@@ -308,6 +308,7 @@ def _need(p: PendingLogin, error: str | None = None) -> dict:
     if p.flow.stage == "mfa":
         out["phone"] = p.flow.reauth.get("phone", "")
         out["method"] = p.flow.reauth.get("method", "sms")
+        out["can_trust"] = p.flow.can_trust_device
     if p.flow.stage == "qr":
         out["qr_status"] = p.flow.qr_status
     return out

@@ -84,6 +84,7 @@ class FakeUpstream:
 class FakeFlow:
     """模拟 cas.LoginFlow 的状态机。"""
     up: "FakeUpstream"
+    can_trust_device = True
 
     def __init__(self, session, username, password, device_id="DEV", debug_dir=None):
         self.session, self.username, self.password = session, username, password

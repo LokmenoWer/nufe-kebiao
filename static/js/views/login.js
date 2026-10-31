@@ -349,7 +349,7 @@ export function mountLogin(root, { onSuccess } = {}) {
       flowId = result.flow_id;
       stopPolling();
       setStage("mfa");
-      applyMfaMethod(result.method);
+      applyMfaMethod(result.method, result.can_trust);
       smsPhone.textContent = result.phone || "绑定的手机";
       smsCodeInput.value = "";
       setStepError(smsError, result.error || "");
@@ -485,8 +485,10 @@ export function mountLogin(root, { onSuccess } = {}) {
   }
 
   // ---- 二次认证 ----
-  function applyMfaMethod(method) {
+  function applyMfaMethod(method, canTrust) {
     const otp = method === "otp";
+    // 学校页面只在部分情况下提供"信任此设备"，不提供时不显示这个选项
+    trustText.parentElement.hidden = canTrust === false;
     mfaTitle.textContent = otp ? "动态口令验证" : "短信二次认证";
     mfaDesc.replaceChildren(...(otp
       ? ["请打开已绑定的身份验证器 App，输入当前显示的动态口令。"]

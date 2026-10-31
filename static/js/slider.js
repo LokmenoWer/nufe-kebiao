@@ -64,7 +64,8 @@ export function createTrackRecorder({ width = SLIDER_WIDTH, minInterval = 20, mi
       const dx = x - originX;
       if (dx === 0 || dx < 0) return null;
       tracks.push({ a: dx, b: y - originY, c: now() - lastAt });
-      return { canvasLength: width, moveLength: Math.min(dx, width), tracks: tracks.slice() };
+      // 插件松手时直接上报 clientX 差值，不截断
+      return { canvasLength: width, moveLength: dx, tracks: tracks.slice() };
     },
 
     cancel() {
