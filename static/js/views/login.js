@@ -171,12 +171,13 @@ export function mountLogin(root, { onSuccess } = {}) {
   const smsTrust = h("input", { type: "checkbox", checked: "" });
   const smsInfo = h("p", { class: "form-hint", role: "status", "aria-live": "polite" });
   const smsError = h("p", { class: "form-error", role: "alert", "aria-live": "assertive" });
+  const trustText = h("span", {}, "信任这台设备，之后减少短信验证");
   const mfaTitle = h("h2", {}, "短信二次认证");
   const mfaDesc = h("p", { class: "muted" }, "验证码将发送到 ", smsPhone, "。");
   const smsPanel = h("form", { class: "auth-step", hidden: true, novalidate: "" },
     h("div", { class: "step-heading" }, mfaTitle, mfaDesc),
     h("div", { class: "code-row" }, smsCodeInput, smsSendBtn),
-    h("label", { class: "check" }, smsTrust, h("span", {}, "信任这台设备，之后减少短信验证")),
+    h("label", { class: "check" }, smsTrust, trustText),
     h("div", { class: "step-actions" },
       h("button", { type: "submit", class: "btn btn-primary" }, "验证并登录"),
       h("button", { type: "button", class: "btn btn-ghost", onClick: () => backToForm() }, "返回")),
@@ -491,6 +492,7 @@ export function mountLogin(root, { onSuccess } = {}) {
       ? ["请打开已绑定的身份验证器 App，输入当前显示的动态口令。"]
       : ["验证码将发送到 ", smsPhone, "。"]));
     smsSendBtn.hidden = otp;
+    trustText.textContent = otp ? "信任这台设备，之后减少二次认证" : "信任这台设备，之后减少短信验证";
     smsCodeInput.placeholder = otp ? "动态口令" : "短信验证码";
     smsCodeInput.setAttribute("aria-label", otp ? "动态口令" : "短信验证码");
   }
