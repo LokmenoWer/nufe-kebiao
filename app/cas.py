@@ -63,6 +63,8 @@ def random_string(n: int) -> str:
 def encrypt_password(password: str, salt: str) -> str:
     """复刻 encrypt.js：AES-CBC-Pkcs7(randomString(64)+pwd, key=salt, iv=randomString(16))。"""
     key = salt.strip().encode()
+    if len(key) not in (16, 24, 32):
+        raise CasError("登录页加密参数异常（pwdEncryptSalt 长度不正确）")
     iv = random_string(16).encode()
     padder = padding.PKCS7(128).padder()
     data = padder.update((random_string(64) + password).encode()) + padder.finalize()
@@ -143,11 +145,21 @@ def pin_auth_url(url: str) -> str:
 
 
 def safe_image_type(header: str) -> str | None:
-    """只接受位图。拒绝 SVG（可带脚本）和缺 Content-Type 的响应。"""
+    """只接受常见位图。拒绝 SVG（可带脚本）和缺 Content-Type 的响应。"""
     ctype = (header or "").split(";", 1)[0].strip().lower()
-    if ctype.startswith("image/") and ctype != "image/svg+xml":
-        return ctype
-    return None
+    return ctype if ctype in _RASTER_IMAGE_TYPES else None
+
+
+_RASTER_IMAGE_TYPES = {
+    "image/png", "image/jpeg", "image/jpg", "image/pjpeg", "image/gif",
+    "image/webp", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon",
+}
+
+
+def looks_like_course_page(html: str) -> bool:
+    """课表页至少要有 personId 和 currentSemester 两个变量；否则多半是故障页 / 中间页。"""
+    html = html or ""
+    return bool(re.search(r"\bpersonId\s*=", html) and re.search(r"\bcurrentSemester\s*=", html))
 
 
 def _reauth_param(html: str, key: str) -> str:
@@ -217,11 +229,18 @@ class LoginFlow:
         """打开 CAS 登录页并登记设备指纹；返回登录页 HTML。已登录（TGC 有效）则直接完成并返回 None。"""
         s = self.session
         r = s.get(COURSE_TABLE_URL)
+        if r.status_code >= 400:
+            raise CasError(f"教务系统暂时不可用（HTTP {r.status_code}），请稍后再试")
         if not is_logged_out_url(r.url):
+            if not looks_like_course_page(r.text):
+                raise CasError("教务系统返回了无法识别的页面，请稍后再试")
             self.stage = "done"  # 已有有效登录态
+            self.course_html = r.text  # 顺手留住，登录完成后不必再抓一次
             return None
         r = s.get(JW_SSO_URL)
         self._dump("login-page", r)
+        if r.status_code >= 500:
+            raise CasError("统一身份认证服务暂时不可用，请稍后再试")
         if not is_auth_login_url(r.url):
             self._finish()  # CAS 的 TGC 仍有效，直接签发了 ticket
             return None
@@ -282,6 +301,9 @@ class LoginFlow:
             return self.stage
         r = self.session.get(f"{AUTH_BASE}/qrCode/getStatus.htl",
                              params={"ts": int(time.time() * 1000), "uuid": self.qr_uuid}, headers=_AJAX)
+        if is_auth_login_url(r.url):
+            self.qr_status = "expired"
+            return self.stage
         code = r.text.strip()
         if code == "2":
             self.qr_status = "scanned"
@@ -379,9 +401,9 @@ class LoginFlow:
         except ValueError:
             raise CasError(f"发送短信失败（HTTP {r.status_code}）") from None
         # reAuth.js：res == success/other_success 为成功；code_time_fail 表示还没到重发时间
-        self.sms_ready_at = time.time() + int(j.get("codeTime") or 60)
         msg = j.get("returnMessage") or ""
         if j.get("res") in ("success", "other_success"):
+            self.sms_ready_at = time.time() + int(j.get("codeTime") or 60)
             return f"{msg or '验证码已发送'}{'' if j.get('mobile', '') in msg else j.get('mobile', '')}"
         raise CasError(msg or f"发送短信失败：{j.get('res')}")
 
@@ -419,14 +441,13 @@ class LoginFlow:
         # 回跳通常落在教务首页；也可能停在认证中心的完善信息/改密提示页。统一再访问一次课表页
         r = self.session.get(COURSE_TABLE_URL)
         self._dump("course-table", r)
-        jw_fault = False
+        jw_fault = r.status_code >= 500
+        # 已有 CASTGC 时，教务验 ticket 失败（学校某个节点解析不了 authserver 等）可以重走 SSO 换个节点
         for attempt in range(2):
-            if not is_logged_out_url(r.url):
+            if r.status_code < 400 and not is_logged_out_url(r.url) and looks_like_course_page(r.text):
                 break
             if not any(c.name == "CASTGC" for c in self.session.cookies):
                 break
-            # 已有 TGC，说明 CAS 侧已登录成功，失败出在教务验 ticket（实测某个教务节点 DNS 解析不了 authserver，
-            # 返回 500）。重新走一遍 SSO 让 CAS 签发新 ticket，并丢掉教务的负载均衡 route 以换个节点
             for c in list(self.session.cookies):
                 if c.name == "route" and "jwxt" in c.domain:
                     self.session.cookies.clear(c.domain, c.path, c.name)
@@ -436,10 +457,15 @@ class LoginFlow:
             jw_fault = jw_fault or sso.status_code >= 500
             r = self.session.get(COURSE_TABLE_URL)
             self._dump(f"course-table-retry{attempt + 1}", r)
+            jw_fault = jw_fault or r.status_code >= 500
         if is_logged_out_url(r.url):
             if jw_fault:
                 raise CasError("统一身份认证已通过，但教务系统验证登录票据时出错（学校服务器故障），请稍后再试")
             raise CasError("CAS 登录后未能建立教务登录态（可能遇到了未识别的中间页；可用 --dump 查看）")
+        if r.status_code >= 400:
+            raise CasError(f"统一身份认证已通过，但教务系统返回 HTTP {r.status_code}，请稍后再试")
+        if not looks_like_course_page(r.text):
+            raise CasError("统一身份认证已通过，但教务系统返回了无法识别的页面（可能正在维护），请稍后再试")
         self.course_html = r.text
         self.stage = "done"
         self.wipe_password()
@@ -462,7 +488,7 @@ def login(session: requests.Session, username: str, password: str, device_id: st
     flow = LoginFlow(session, username, password, device_id=device_id or new_device_id())
     stage = flow.start()
     if flow.course_html:
-        setattr(session, "kebiao_course_html", flow.course_html)
+        session.kebiao_course_html = flow.course_html
     flow.wipe_password()
     if stage == "captcha":
         raise CaptchaRequired("统一身份认证要求图形验证码，需要你本人在网页上重新登录一次")

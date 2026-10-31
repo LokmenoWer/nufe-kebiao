@@ -17,6 +17,8 @@ from .polite import UpstreamYield, background_upstream
 
 log = logging.getLogger("kebiao.scheduler")
 _stop = threading.Event()
+_threads: list[threading.Thread] = []
+_thread_lock = threading.Lock()
 
 
 def _allowed_now() -> bool:
@@ -39,8 +41,11 @@ def run_once(batch: int = 20) -> int:
         except UpstreamYield:
             log.info("scheduled refresh yielded user=%s", uid)
             break
-        except Exception:
-            log.exception("scheduled refresh crashed user=%s", uid)
+        except KeyError:
+            continue  # 用户已删除
+        except Exception as e:
+            # 只记录类型：异常原文可能包含带 ticket 的 URL
+            log.error("scheduled refresh crashed user=%s: %s", uid, type(e).__name__)
         done += 1
         if _stop.wait(random.uniform(5, 20)):  # 用户之间的抖动间隔
             break
@@ -51,13 +56,13 @@ def _loop() -> None:
     while not _stop.wait(SCHEDULER_TICK * random.uniform(0.8, 1.2)):
         try:
             service.housekeeping()
-        except Exception:
-            log.exception("housekeeping failed")
+        except Exception as e:
+            log.error("housekeeping failed: %s", type(e).__name__)
         if _allowed_now():
             try:
                 run_once()
-            except Exception:
-                log.exception("scheduler tick failed")
+            except Exception as e:
+                log.error("scheduler tick failed: %s", type(e).__name__)
 
 
 def _qr_loop() -> None:
@@ -66,17 +71,28 @@ def _qr_loop() -> None:
         try:
             if service.qr_waiting():
                 service.pump_qr_once()
-        except Exception:
-            log.exception("qr pump failed")
+        except Exception as e:
+            log.error("qr pump failed: %s", type(e).__name__)
 
 
 def start(refresh: bool = True) -> None:
     """扫码轮询总是启动（否则扫码登录无法完成）；refresh=False 时不跑后台定时刷新。"""
-    _stop.clear()
-    threading.Thread(target=_qr_loop, name="qr-pump", daemon=True).start()
-    if refresh:
-        threading.Thread(target=_loop, name="refresh-scheduler", daemon=True).start()
+    with _thread_lock:
+        _stop.clear()
+        _threads[:] = [t for t in _threads if t.is_alive()]
+        if _threads:
+            return  # 已经启动过（重复调用不应制造第二条轮询线程）
+        _threads.append(threading.Thread(target=_qr_loop, name="qr-pump", daemon=True))
+        if refresh:
+            _threads.append(threading.Thread(target=_loop, name="refresh-scheduler", daemon=True))
+        for t in _threads:
+            t.start()
 
 
 def stop() -> None:
     _stop.set()
+    with _thread_lock:
+        threads = list(_threads)
+        _threads.clear()
+    for t in threads:
+        t.join(timeout=5)

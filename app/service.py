@@ -9,18 +9,27 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
+import math
 import random
 import secrets
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 from . import cas, crypto, db, ics, jwxt
-from .config import (MAX_USER_REFRESH_TIMES, REFRESH_ALLOWED_HOURS,
-                     REFRESH_INTERVAL_HOURS, REFRESH_MAX_FAILS, TIMEZONE, semester_overrides)
+from .config import (
+    MAX_USER_REFRESH_TIMES,
+    REFRESH_ALLOWED_HOURS,
+    REFRESH_INTERVAL_HOURS,
+    REFRESH_MAX_FAILS,
+    TIMEZONE,
+    semester_overrides,
+)
 from .polite import PoliteSession, UpstreamYield, dump_cookies, load_cookies
 
 log = logging.getLogger("kebiao.service")
@@ -34,6 +43,10 @@ class NeedsRebind(Exception):
 
 class Busy(Exception):
     pass
+
+
+class UserGone(Exception):
+    """刷新过程中账号被删除（或数据已不存在）。"""
 
 
 class LoginRejected(Exception):
@@ -74,7 +87,7 @@ _pending: dict[str, PendingLogin] = {}
 _pending_lock = threading.RLock()
 # 后台轮询完成登录后，下一次 HTTP poll 从这里取结果（flow_id → (到期时间, 返回值)）
 _completed: dict[str, tuple[float, dict]] = {}
-_ics_cache: dict[int, tuple[tuple, str]] = {}
+_ics_cache: dict[int, tuple[tuple, str, str]] = {}
 
 
 def _purge_pending() -> None:
@@ -210,7 +223,17 @@ def login_captcha_image(flow_id: str) -> tuple[bytes, str]:
         return p.flow.captcha_image()
 
 
-def login_send_sms(flow_id: str) -> str:
+def login_cancel(flow_id: str) -> None:
+    """用户主动取消：立刻释放流程（含内存中的密码），并丢弃已完成但未被取走的结果。"""
+    with _pending_lock:
+        p = _pending.pop(flow_id or "", None)
+        _completed.pop(flow_id or "", None)
+    if p:
+        p.flow.wipe_password()
+        p.password_to_store = None
+
+
+def login_send_sms(flow_id: str) -> dict:
     p = _get_pending(flow_id)
     with p.lock:
         if p.sms_sends >= MAX_SMS_SENDS:
@@ -220,7 +243,8 @@ def login_send_sms(flow_id: str) -> str:
         except cas.CasError as e:
             raise LoginRejected(str(e)) from None
         p.sms_sends += 1
-        return msg
+        retry_after = max(0, math.ceil(getattr(p.flow, "sms_ready_at", 0) - time.time()))
+        return {"message": msg, "retry_after": retry_after}
 
 
 def login_verify_sms(flow_id: str, code: str, trust_device: bool) -> dict:
@@ -322,7 +346,11 @@ def _device_id_for_uid(uid: int | None) -> str:
 
 def _stored_device_id(row) -> str:
     if row and row["enc_device_id"]:
-        return crypto.decrypt(row["enc_device_id"], "device", row["id"]).decode()
+        try:
+            return crypto.decrypt(row["enc_device_id"], "device", row["id"]).decode()
+        except crypto.CryptoError:
+            # 换过 APP_SECRET_KEY 或数据损坏：当作新设备，用户重新走一次二次认证即可
+            log.warning("user %s: stored device id cannot be decrypted", row["id"])
     return cas.new_device_id()
 
 
@@ -333,6 +361,14 @@ def _complete_login(p: PendingLogin) -> int:
         data = jwxt.fetch_timetable(s, page_html=getattr(p.flow, "course_html", None))
     except jwxt.SessionExpired:
         raise LoginRejected("登录后访问教务系统失败，请稍后再试") from None
+    except cas.CasError as e:
+        raise LoginRejected(str(e)) from None
+    except (ValueError, KeyError) as e:
+        log.warning("login completed but timetable parse failed: %s", type(e).__name__)
+        raise LoginRejected("登录成功，但教务系统返回的课表页面无法解析，请稍后再试") from None
+    except Exception as e:  # 网络 / 学校服务异常：不把异常原文暴露给浏览器
+        log.warning("login completed but timetable fetch failed: %s", type(e).__name__)
+        raise LoginRejected("登录成功，但读取课表失败，请稍后再试") from None
 
     code = str(data["student"].get("code") or "")
     if not student_id:  # 扫码登录：以教务系统返回的学号为准
@@ -381,7 +417,10 @@ def delete_user(uid: int) -> None:
     student_id = row["student_id"] if row else None
     device_id = None
     if row and row["enc_device_id"]:
-        device_id = crypto.decrypt(row["enc_device_id"], "device", uid).decode()
+        try:
+            device_id = crypto.decrypt(row["enc_device_id"], "device", uid).decode()
+        except crypto.CryptoError:
+            device_id = None
     with _pending_lock:
         with db.tx() as c:
             c.execute("DELETE FROM users WHERE id=?", (uid,))  # 级联删除会话/课表/日志
@@ -389,12 +428,16 @@ def delete_user(uid: int) -> None:
                 c.execute("DELETE FROM users WHERE student_id=?", (student_id,))
         _ics_cache.pop(uid, None)
         for p in list(_pending.values()):
-            same_user = student_id and p.flow.username == student_id
-            same_device = device_id and p.flow.device_id == device_id
+            same_user = bool(student_id) and p.flow.username == student_id
+            same_device = bool(device_id) and p.flow.device_id == device_id
             if same_user or same_device:
                 p.flow.wipe_password()
                 p.password_to_store = None
                 _pending.pop(p.flow_id, None)
+        # 已完成、但浏览器还没来取结果的扫码登录：不能让它给已删除的账号建会话
+        for fid, (_exp, result) in list(_completed.items()):
+            if result.get("uid") == uid:
+                _completed.pop(fid, None)
 
 
 # ---------- 刷新 ----------
@@ -418,7 +461,13 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
 
     s = PoliteSession()
     if user["enc_cookies"]:
-        load_cookies(s, crypto.decrypt_json(user["enc_cookies"], "cookies", uid))
+        try:
+            cookies = crypto.decrypt_json(user["enc_cookies"], "cookies", uid)
+            load_cookies(s, cookies)
+        except (crypto.CryptoError, TypeError, KeyError) as e:
+            log.warning("user %s: stored cookies unusable (%s)", uid, type(e).__name__)
+            return _save_failure(uid, trigger, "needs_rebind",
+                                 "保存的登录状态已无法读取（可能更换过服务器密钥），请重新登录本站")
     try:
         try:
             data = jwxt.fetch_timetable(s, semester_id)
@@ -426,8 +475,15 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
             if user["cred_mode"] != "password" or not user["enc_password"]:
                 raise NeedsRebind("登录态已过期，请重新登录本站以续期") from None
             log.info("user %s: session expired, re-login with stored credential", uid)
-            device = crypto.decrypt(user["enc_device_id"], "device", uid).decode() if user["enc_device_id"] else None
-            cas.login(s, user["student_id"], crypto.decrypt(user["enc_password"], "password", uid).decode(), device)
+            try:
+                device = (crypto.decrypt(user["enc_device_id"], "device", uid).decode()
+                          if user["enc_device_id"] else None)
+                password = crypto.decrypt(user["enc_password"], "password", uid).decode()
+            except crypto.CryptoError:
+                log.warning("user %s: stored credential unusable", uid)
+                return _save_failure(uid, trigger, "needs_rebind",
+                                     "保存的密码已无法解密（可能更换过服务器密钥），请重新登录本站")
+            cas.login(s, user["student_id"], password, device)
             data = jwxt.fetch_timetable(s, semester_id)
     except cas.CaptchaRequired:
         return _save_failure(uid, trigger, "captcha",
@@ -446,8 +502,11 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         log.warning("user %s refresh failed: %s", uid, type(e).__name__)
         return _save_failure(uid, trigger, "error", "刷新失败，请稍后再试")
 
-    with db.tx() as c:
-        _save_success(c, uid, s, data, trigger)
+    try:
+        with db.tx() as c:
+            _save_success(c, uid, s, data, trigger)
+    except UserGone:
+        return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
     return {"ok": True}
 
 
@@ -486,6 +545,8 @@ def set_refresh_hours(uid: int, hours: list[int]) -> float | None:
     with db.tx() as c:
         c.execute("UPDATE users SET refresh_hours=? WHERE id=?", (json.dumps(hours) if hours else None, uid))
         row = c.execute("SELECT status, next_refresh_at FROM users WHERE id=?", (uid,)).fetchone()
+        if row is None:
+            raise KeyError(uid)
         if row["status"] != "ok" or row["next_refresh_at"] is None:
             return row["next_refresh_at"]
         nxt = next_scheduled(hours)
@@ -495,11 +556,19 @@ def set_refresh_hours(uid: int, hours: list[int]) -> float | None:
 
 def _user_hours(c, uid: int) -> list[int] | None:
     row = c.execute("SELECT refresh_hours FROM users WHERE id=?", (uid,)).fetchone()
-    return json.loads(row["refresh_hours"]) if row and row["refresh_hours"] else None
+    if not row or not row["refresh_hours"]:
+        return None
+    try:
+        hours = json.loads(row["refresh_hours"])
+    except (TypeError, ValueError):
+        return None
+    return [h for h in hours if isinstance(h, int)] if isinstance(hours, list) else None
 
 
 def _save_success(c, uid: int, s, data: dict, trigger: str) -> None:
     now = db.now()
+    if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+        raise UserGone(uid)
     _save_semester(c, data)
     c.execute(
         """INSERT INTO timetables(user_id, semester_id, semester_name, data_json, fetched_at) VALUES(?,?,?,?,?)
@@ -512,7 +581,8 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> None:
            last_refresh_at=?, last_success_at=?, next_refresh_at=?, current_semester_id=?, semesters_json=?
            WHERE id=?""",
         (data["student"].get("name"), crypto.encrypt_json(dump_cookies(s), "cookies", uid), now, now,
-         next_scheduled(_user_hours(c, uid)), data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False), uid))
+         next_scheduled(_user_hours(c, uid)), data["current_semester_id"],
+         json.dumps(data["semesters"], ensure_ascii=False), uid))
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
@@ -521,7 +591,10 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> None:
 def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
     now = db.now()
     with db.tx() as c:
-        fails = c.execute("SELECT fail_count FROM users WHERE id=?", (uid,)).fetchone()["fail_count"] + 1
+        row = c.execute("SELECT fail_count FROM users WHERE id=?", (uid,)).fetchone()
+        if row is None:
+            return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
+        fails = (row["fail_count"] or 0) + 1
         if status == "error":
             # 指数退避：30min, 1h, 2h ... 上限 24h；连续失败达到阈值后在界面提示用户
             nxt = now + min(1800 * 2 ** (fails - 1), 86400) * random.uniform(0.9, 1.2)
@@ -572,21 +645,38 @@ def week1_monday(semester_id: int, name: str | None) -> str | None:
     return row["week1_monday"] if row else None
 
 
+def _json_list(raw: str | None) -> list:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def timetable_view(uid: int, semester_id: int | None) -> dict | None:
     conn = db.connect()
     user = conn.execute("SELECT current_semester_id FROM users WHERE id=?", (uid,)).fetchone()
     sid = semester_id or (user and user["current_semester_id"])
+    if sid is None:
+        return None
     row = conn.execute(
         "SELECT semester_id, semester_name, data_json, fetched_at FROM timetables WHERE user_id=? AND semester_id=?",
         (uid, sid)).fetchone()
     if not row:
+        return None
+    try:
+        payload = json.loads(row["data_json"])
+    except (TypeError, ValueError):
+        log.warning("user %s semester %s: stored timetable is corrupt", uid, sid)
+        return None
+    if not isinstance(payload, dict):
         return None
     return {
         "semester_id": row["semester_id"],
         "semester_name": row["semester_name"],
         "week1_monday": week1_monday(row["semester_id"], row["semester_name"]),
         "fetched_at": row["fetched_at"],
-        **json.loads(row["data_json"]),
+        **payload,
     }
 
 
@@ -609,8 +699,8 @@ def account_snapshot(uid: int) -> dict | None:
         "last_success_at": row["last_success_at"],
         "next_refresh_at": row["next_refresh_at"],
         "current_semester_id": row["current_semester_id"],
-        "semesters": json.loads(row["semesters_json"] or "[]"),
-        "refresh_hours": json.loads(row["refresh_hours"] or "[]"),
+        "semesters": _json_list(row["semesters_json"]),
+        "refresh_hours": _json_list(row["refresh_hours"]),
     }
 
 
@@ -629,7 +719,8 @@ def still_due(uid: int) -> bool:
 
 
 def housekeeping() -> None:
-    """清过期会话，并把每个用户的刷新日志收到最近 LOG_KEEP 条。"""
+    """清过期会话 / 日志 / 登录流程，并回收已删除用户的刷新锁。"""
+    _purge_pending()
     with db.tx() as c:
         c.execute("DELETE FROM sessions WHERE expires_at < ?", (db.now(),))
         c.execute(
@@ -639,19 +730,29 @@ def housekeeping() -> None:
                        FROM refresh_log
                    ) WHERE rn > ?
                )""", (LOG_KEEP,))
+        live = {r["id"] for r in c.execute("SELECT id FROM users").fetchall()}
+    for uid in list(_locks):
+        if uid not in live:
+            _locks.pop(uid, None)
 
 
-def ics_body(uid: int, student_id: str) -> tuple[float, str]:
-    """一次查出全部学期。按 (最大抓取时间, 行数) 缓存正文。"""
+def ics_body(uid: int, student_id: str) -> tuple[str, str]:
+    """一次查出全部学期。按影响正文的全部输入缓存，返回 (正文哈希/ETag, 正文)。"""
     rows = db.connect().execute(
         """SELECT t.semester_id, t.semester_name, t.data_json, t.fetched_at, s.week1_monday AS db_week1
            FROM timetables t LEFT JOIN semesters s ON s.semester_id = t.semester_id
            WHERE t.user_id=?""", (uid,)).fetchall()
-    key = (max((r["fetched_at"] for r in rows), default=0.0), len(rows))
+    # 校历可能被 semesters.json 或别的用户刷新改掉；把影响正文的输入都放进缓存键
+    ov = semester_overrides()
+    key = (
+        max((r["fetched_at"] for r in rows), default=0.0),
+        len(rows),
+        tuple((r["semester_id"], r["semester_name"], r["db_week1"]) for r in rows),
+        tuple(sorted(ov.items())),
+    )
     cached = _ics_cache.get(uid)
     if cached and cached[0] == key:
-        return key[0], cached[1]
-    ov = semester_overrides()
+        return cached[1], cached[2]
     sems = []
     for r in rows:
         name = r["semester_name"]
@@ -663,12 +764,22 @@ def ics_body(uid: int, student_id: str) -> tuple[float, str]:
             week1 = r["db_week1"]
         if not week1:
             continue
+        try:
+            payload = json.loads(r["data_json"])
+            if not isinstance(payload, dict):
+                raise ValueError("not an object")
+            dt.date.fromisoformat(week1)  # 坏日期跳过，不影响其他学期
+        except (TypeError, ValueError):
+            log.warning("user %s semester %s: skip invalid stored timetable/week1", uid, r["semester_id"])
+            continue
         view = {
             "semester_id": r["semester_id"],
             "semester_name": name,
-            **json.loads(r["data_json"]),
+            **payload,
         }
         sems.append((view, week1))
     body = ics.build(student_id, sems)
-    _ics_cache[uid] = (key, body)
-    return key[0], body
+    # ETag 必须跟随正文（校历/学期数据变化时正文会变），不能只看 fetched_at
+    version = hashlib.sha256(body.encode()).hexdigest()[:24]
+    _ics_cache[uid] = (key, version, body)
+    return version, body

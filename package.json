@@ -1,0 +1,13 @@
+{
+  "name": "nufe-kebiao-web",
+  "private": true,
+  "type": "module",
+  "description": "南财课表前端（无构建步骤，ES modules，由 FastAPI 直接托管）",
+  "scripts": {
+    "test": "node --test tests/js/*.test.js",
+    "test:js": "node --test tests/js/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

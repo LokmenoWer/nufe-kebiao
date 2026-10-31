@@ -114,6 +114,8 @@ class FakeFlow:
 
     def send_sms(self):
         self.up.sms_sent += 1
+        import time
+        self.sms_ready_at = time.time() + 60
         return "验证码已发送"
 
     def verify_sms(self, code, trust_device=True):
@@ -182,6 +184,7 @@ def test_wrong_password_and_terms(up):
 
 def test_loopback_preview_origin(monkeypatch):
     from urllib.parse import urlparse
+
     from app import security
     monkeypatch.setattr(security, "_ALLOWED_ORIGIN", urlparse("http://localhost:8000"))
     assert security.origin_matches("http://127.0.0.1:8765")
@@ -204,10 +207,10 @@ def test_csrf_and_origin(up):
 def test_no_plaintext_password_in_db(up):
     c = TestClient(app)
     _login(c, "2023001", remember=True)
-    raw = open(db.DB_PATH, "rb").read()
-    import glob
-    for f in glob.glob(db.DB_PATH + "*"):
-        raw += open(f, "rb").read()
+    from pathlib import Path
+    raw = Path(db.DB_PATH).read_bytes()
+    for path in Path(db.DB_PATH).parent.glob(Path(db.DB_PATH).name + "*"):
+        raw += path.read_bytes()
     assert b"pw-a" not in raw and b"tgc-2023001" not in raw
 
 
@@ -397,7 +400,8 @@ def test_qr_login(up):
     r = _qr_start(c)
     assert r["need"] == "qr" and r["qr_status"] == "waiting" and r["qr_image"].startswith("data:image/png;base64,")
     fid = r["flow_id"]
-    poll = lambda: _qr_poll(c, fid).json()
+    def poll():
+        return _qr_poll(c, fid).json()
     assert poll()["qr_status"] == "waiting"
     up.qr = "scanned"
     assert poll()["qr_status"] == "scanned"
@@ -628,3 +632,219 @@ def test_concurrent_refresh_same_user_is_busy(up):
         assert c.post("/api/refresh", headers=_csrf(c), json={}).status_code == 409
     finally:
         lock.release()
+
+
+# ---------- 回归：坏数据 / 并发删除 / 前端资源 ----------
+
+def test_timetable_parse_error_is_user_facing(up, monkeypatch):
+    """教务页面结构变了：登录接口应返回 400 中文提示，而不是 500。"""
+    def boom(*_a, **_k):
+        raise ValueError("personId / currentSemester missing")
+
+    monkeypatch.setattr(jwxt, "fetch_timetable", boom)
+    c = TestClient(app)
+    r = _login(c, "2023001")
+    assert r.status_code == 400 and "无法解析" in r.json()["detail"]
+    assert c.get("/api/me").status_code == 401
+
+
+def test_corrupt_stored_cookies_need_rebind(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET enc_cookies=? WHERE student_id=?", (b"\x01garbage", "2023001"))
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is False and r["status"] == "needs_rebind"
+    assert "无法读取" in r["message"]
+
+
+def test_corrupt_stored_password_need_rebind(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    up.expired.add("2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET enc_password=? WHERE student_id=?", (b"\x01garbage", "2023001"))
+    r = c.post("/api/refresh", headers=_csrf(c), json={}).json()
+    assert r["ok"] is False and r["status"] == "needs_rebind"
+
+
+def test_missing_user_is_graceful(up):
+    assert service._save_failure(999999, "manual", "error", "x")["status"] == "deleted"
+    with pytest.raises(service.UserGone), db.tx() as c:
+        service._save_success(c, 999999, object(), {
+            "semester_id": 1, "semester_name": "x", "student": {}, "activities": [],
+            "current_semester_id": 1, "semesters": [],
+        }, "manual")
+
+
+def test_login_cancel_releases_pending_flow(up):
+    up.flow_captcha.add("2023001")
+    c = TestClient(app)
+    fid = _login(c, "2023001").json()["flow_id"]
+    assert fid in service._pending
+    assert c.post("/api/login/cancel", headers=ORIGIN, json={"flow_id": fid}).json()["ok"]
+    assert fid not in service._pending
+    r = c.post("/api/login/captcha", headers=ORIGIN, json={"flow_id": fid, "captcha": "abcd"})
+    assert r.status_code == 400 and "过期" in r.json()["detail"]
+
+
+def test_sms_send_returns_cooldown(up):
+    up.flow_mfa.add("2023001")
+    c = TestClient(app)
+    fid = _login(c, "2023001").json()["flow_id"]
+    body = c.post("/api/login/sms/send", headers=ORIGIN, json={"flow_id": fid}).json()
+    assert body["message"] == "验证码已发送" and 0 <= body["retry_after"] <= 300
+
+
+def test_validation_errors_have_string_detail(up):
+    c = TestClient(app)
+    r = c.post("/api/login", headers=ORIGIN, json={})
+    assert r.status_code == 422 and isinstance(r.json()["detail"], str)
+    _login(c, "2023001")
+    r = c.get("/api/timetable?semester_id=0")
+    assert r.status_code == 422 and isinstance(r.json()["detail"], str)
+
+
+def test_corrupt_timetable_is_hidden_not_500(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE timetables SET data_json=? WHERE semester_id=161", ("{not json",))
+    assert c.get("/api/timetable").status_code == 404
+    url = c.post("/api/ics/rotate", headers=_csrf(c)).json()["ics_url"]
+    feed = TestClient(app).get(url.removeprefix("http://testserver"))
+    assert feed.status_code == 200 and "BEGIN:VCALENDAR" in feed.text and "BEGIN:VEVENT" not in feed.text
+
+
+def test_corrupt_semester_json_does_not_break_me(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET semesters_json=?, refresh_hours=?, enc_ics_token=? WHERE student_id=?",
+                     ("not json", "[[", b"\x01bad", "2023001"))
+    me = c.get("/api/me").json()
+    assert me["semesters"] == [] and me["refresh_hours"] == [] and me["ics_url"] is None
+
+
+def test_frontend_index_references_existing_assets(up):
+    from bs4 import BeautifulSoup
+    c = TestClient(app)
+    r = c.get("/")
+    assert r.status_code == 200 and "?v=" in r.text
+    soup = BeautifulSoup(r.text, "html.parser")
+    refs = [t["src"] for t in soup.find_all(src=True)] + [t["href"] for t in soup.find_all(href=True)]
+    local = [ref for ref in refs if ref.startswith("static/")]
+    assert local, "index.html 应该引用 static/ 下的前端资源"
+    for ref in local:
+        path, _, query = ref.partition("?")
+        assert query.startswith("v="), ref
+        assert c.get("/" + path).status_code == 200, path
+    # CSP 不允许内联脚本/样式，页面里也不该有
+    assert not soup.find_all("script", src=False)
+    assert not soup.find_all("style")
+
+
+def test_healthz_and_unknown_api(up):
+    c = TestClient(app)
+    assert c.get("/healthz").json()["ok"] is True
+    r = c.get("/api/does-not-exist")
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
+
+
+def test_housekeeping_reclaims_locks_and_pending(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    up.flow_captcha.add("2023002")
+    fid = _login(TestClient(app), "2023002").json()["flow_id"]
+    service._pending[fid].expires_at = 0  # 人为过期
+    service.housekeeping()
+    assert fid not in service._pending
+    # 已删除用户不应继续占着刷新锁
+    uid = 1
+    service._locks[uid]
+    with db.tx() as conn:
+        conn.execute("DELETE FROM users WHERE id=?", (uid,))
+    service.housekeeping()
+    assert uid not in service._locks
+
+
+def test_frontend_module_graph_and_security_hygiene(up):
+    """前端模块 import 必须全部存在；不出现 HTML 字符串拼接/eval 之类的危险写法。"""
+    import re
+    from pathlib import Path
+    static = Path(__file__).resolve().parent.parent / "static"
+    todo, seen = [static / "js" / "main.js"], set()
+    while todo:
+        path = todo.pop().resolve()
+        if path in seen:
+            continue
+        assert path.exists(), f"missing module: {path}"
+        seen.add(path)
+        text = path.read_text("utf-8")
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+            assert sink not in text, f"{path.name} uses {sink}"
+        for spec in re.findall(r"""from\s+["'](\.[^"']+)["']""", text):
+            target = (path.parent / spec).resolve()
+            assert target.exists(), f"{path.name} imports missing {spec}"
+            todo.append(target)
+    assert len(seen) >= 10
+
+    c = TestClient(app)
+    css = c.get("/static/css/tokens.css")
+    assert css.status_code == 200 and "must-revalidate" in css.headers["cache-control"]
+    js = c.get("/static/js/main.js")
+    assert js.status_code == 200 and "must-revalidate" in js.headers["cache-control"]
+    html = c.get("/").text
+    assert "theme-init.js" in html and "static/js/main.js" in html
+    assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html)
+
+
+def test_ics_access_log_and_error_paths_are_redacted():
+    import logging
+
+    from app.main import _RedactIcsPath, _safe_log_path
+
+    record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, "", 0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("1.2.3.4", "GET", "/ics/secret-token.ics", "1.1", 200), None)
+    assert _RedactIcsPath().filter(record) is True
+    assert "secret-token" not in record.getMessage() and "<redacted>" in record.getMessage()
+    assert _safe_log_path("/ics/secret-token.ics") == "/ics/<redacted>"
+    assert _safe_log_path("/api/me") == "/api/me"
+
+
+def test_static_index_template_is_not_served_and_csp_is_strict(up):
+    c = TestClient(app)
+    assert c.get("/static/index.html").status_code == 404
+    csp = c.get("/").headers["content-security-policy"]
+    assert "require-trusted-types-for 'script'" in csp
+    assert "default-src 'self'" in csp
+
+
+def test_sec_fetch_site_fallback(up):
+    """Referrer 被隐私设置去掉时，浏览器给的同源标记仍应通过。"""
+    c = TestClient(app)
+    r = c.post("/api/login", headers={"Sec-Fetch-Site": "same-origin"},
+               json={"student_id": "2023001", "password": "pw-a", "agree_terms": True})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    r = c.post("/api/login", headers={"Sec-Fetch-Site": "cross-site"},
+               json={"student_id": "2023001", "password": "pw-a", "agree_terms": True})
+    assert r.status_code == 403
+
+
+def test_ics_cache_invalidated_when_calendar_changes(up, monkeypatch):
+    c = TestClient(app)
+    _login(c, "2023001")
+    url = c.post("/api/ics/rotate", headers=_csrf(c)).json()["ics_url"]
+    path = url.removeprefix("http://testserver")
+    first_resp = TestClient(app).get(path)
+    first = first_resp.text
+    assert "20260907T082000" in first  # 2026-09-07 第 1 周周一
+
+    monkeypatch.setattr(service, "semester_overrides", lambda: {"2026-2027-1": "2026-09-14"})
+    second_resp = TestClient(app).get(path, headers={"If-None-Match": first_resp.headers["etag"]})
+    assert second_resp.status_code == 200  # 正文变了，ETag 也必须变
+    second = second_resp.text
+    assert "20260907T082000" not in second
+    assert "20260914T082000" in second

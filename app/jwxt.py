@@ -1,6 +1,8 @@
 """教务系统（for-std）课表抓取与规范化。"""
 from __future__ import annotations
 
+import contextlib
+import html as html_lib
 import json
 import re
 from dataclasses import dataclass, field
@@ -27,7 +29,7 @@ class CoursePage:
 
 def _top_level_id(html: str, var: str) -> int | None:
     """取 `var xxx = {...}` 这个对象字面量的顶层 'id'（对象里还嵌套着 calendarAssoc:{'id':1} 等）。"""
-    m = re.search(rf"{var}\s*=\s*\{{", html)
+    m = re.search(rf"\b{re.escape(var)}\s*=\s*\{{", html)
     if not m:
         return None
     depth, quote, i = 0, None, m.end() - 1
@@ -55,7 +57,7 @@ def _top_level_id(html: str, var: str) -> int | None:
 
 
 def parse_course_page(html: str) -> CoursePage:
-    m_person = re.search(r"personId\s*=\s*(\d+)", html)
+    m_person = re.search(r"\bpersonId\s*=\s*(\d+)", html)
     sem_id = _top_level_id(html, "currentSemester")
     if not m_person or sem_id is None:
         raise ValueError("课表页结构异常：未找到 personId / currentSemester")
@@ -63,7 +65,7 @@ def parse_course_page(html: str) -> CoursePage:
     m_sel = re.search(r"<select[^>]*id=[\"']allSemesters[\"'][^>]*>(.*?)</select>", html, re.S)
     if m_sel:
         for v, text in re.findall(r"<option[^>]*value=[\"'](\d+)[\"'][^>]*>([^<]+)</option>", m_sel.group(1)):
-            semesters.append({"id": int(v), "name": text.strip()})
+            semesters.append({"id": int(v), "name": html_lib.unescape(text).strip()})
     return CoursePage(int(m_person.group(1)), sem_id, semesters)
 
 
@@ -98,7 +100,10 @@ def get_print_data(session: requests.Session, semester_id: int) -> dict:
         headers={"Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest"},
         stream=True,
     ))
-    return json.loads(_read_capped(r, PRINT_DATA_MAX_BYTES))
+    data = json.loads(_read_capped(r, PRINT_DATA_MAX_BYTES))
+    if not isinstance(data, dict):
+        raise ValueError("课表数据格式异常")
+    return data
 
 
 def get_semester_detail(session: requests.Session, semester_id: int) -> dict | None:
@@ -114,35 +119,55 @@ _PAREN = re.compile(r"\s*[(（].*$")  # "张三(工号)"、"张三(学院(兼职
 
 
 def _teacher_name(t) -> str:
+    if t is None:
+        return ""
     if isinstance(t, dict):
         t = t.get("name") or t.get("teacherName") or ""
     return _PAREN.sub("", str(t)).strip()
 
 
+def _as_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize(print_data: dict) -> dict:
-    """把 print-data 精简为前端/ICS 需要的结构。"""
+    """把 print-data 精简为前端/ICS 需要的结构。字段脏了就跳过，不让一条坏数据拖垮整份课表。"""
     vms = print_data.get("studentTableVms") or []
-    if not vms:
+    if not isinstance(vms, list) or not vms:
         return {"student": {}, "activities": []}
-    vm = vms[0]
+    vm = vms[0] if isinstance(vms[0], dict) else {}
     student = {k: vm.get(k) for k in ("name", "code", "department", "major", "adminclass", "grade", "credits")}
     acts = []
     for a in vm.get("activities") or []:
-        if not a.get("weekday") or not a.get("startUnit"):
+        if not isinstance(a, dict):
+            continue
+        weekday, start = _as_int(a.get("weekday")), _as_int(a.get("startUnit"))
+        if not weekday or not start or not (1 <= weekday <= 7) or start < 1:
             continue  # 无固定时间的课程（如实践周）不进周视图
+        end = _as_int(a.get("endUnit")) or start
+        if end < start:
+            end = start
+        weeks = []
+        for w in a.get("weekIndexes") or []:
+            wi = _as_int(w)
+            if wi and 1 <= wi <= 60:
+                weeks.append(wi)
         acts.append({
-            "courseName": a.get("courseName") or "",
+            "courseName": str(a.get("courseName") or ""),
             "teachers": [n for n in (_teacher_name(t) for t in a.get("teachers") or []) if n],
-            "weekday": int(a["weekday"]),
-            "startUnit": int(a["startUnit"]),
-            "endUnit": int(a.get("endUnit") or a["startUnit"]),
-            "weeksStr": a.get("weeksStr") or "",
-            "weekIndexes": [int(w) for w in a.get("weekIndexes") or []],
-            "room": a.get("room") or "",
-            "building": a.get("building") or "",
-            "campus": a.get("campus") or "",
-            "startTime": a.get("startTime") or "",
-            "endTime": a.get("endTime") or "",
+            "weekday": weekday,
+            "startUnit": start,
+            "endUnit": end,
+            "weeksStr": str(a.get("weeksStr") or ""),
+            "weekIndexes": sorted(set(weeks)),
+            "room": str(a.get("room") or ""),
+            "building": str(a.get("building") or ""),
+            "campus": str(a.get("campus") or ""),
+            "startTime": str(a.get("startTime") or ""),
+            "endTime": str(a.get("endTime") or ""),
             "credits": a.get("credits"),
         })
     return {"student": student, "activities": acts}
@@ -164,12 +189,13 @@ def fetch_timetable(session: requests.Session, semester_id: int | None = None,
     if page_html is None:
         page_html = getattr(session, "kebiao_course_html", None)
         if page_html is not None:
-            try:
+            with contextlib.suppress(AttributeError):
                 del session.kebiao_course_html
-            except AttributeError:
-                pass
     page = parse_course_page(page_html) if page_html else get_course_page(session)
-    sid = semester_id or page.current_semester_id
+    requested = _as_int(semester_id)
+    if requested is not None and requested < 1:
+        raise ValueError("学期 id 不正确")
+    sid = requested or page.current_semester_id
     data = normalize(get_print_data(session, sid))
     name = next((s["name"] for s in page.semesters if s["id"] == sid), str(sid))
     detail = None if _week1_known(sid, name) else get_semester_detail(session, sid)

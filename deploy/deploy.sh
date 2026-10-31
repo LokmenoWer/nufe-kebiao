@@ -20,6 +20,7 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .venv --exclude data --exclude .env --exclude debug --exclude my.json \
   --exclude .nufe_device_id --exclude __pycache__ --exclude .pytest_cache --exclude .git \
   --exclude deploy/deploy.env --exclude .DS_Store \
+  --exclude node_modules --exclude test-results --exclude playwright-report \
   ./ "$HOST:$APP_DIR/"
 
 "${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' bash -s" <<'REMOTE'

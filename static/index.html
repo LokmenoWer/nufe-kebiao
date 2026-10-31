@@ -4,262 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0f1217" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f6fa">
+  <meta name="description" content="南财课表：用南京财经大学统一身份认证登录，自动同步课表，支持周/日视图、当前时间进度、日历订阅和后台刷新。非官方第三方工具。">
   <title>南财课表</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bdb'/%3E%3Crect x='7' y='9' width='18' height='16' rx='3' fill='none' stroke='white' stroke-width='2.4'/%3E%3Cpath d='M7 14h18M12 6v5M20 6v5' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="static/app.css?v={{v}}">
-  <script src="static/app.js?v={{v}}" defer></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%234b63e0'/%3E%3Crect x='7' y='9' width='18' height='16' rx='3' fill='none' stroke='white' stroke-width='2.4'/%3E%3Cpath d='M7 14h18M12 6v5M20 6v5' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <script src="static/js/theme-init.js?v={{v}}"></script>
+  <link rel="stylesheet" href="static/css/tokens.css?v={{v}}">
+  <link rel="stylesheet" href="static/css/base.css?v={{v}}">
+  <link rel="stylesheet" href="static/css/layout.css?v={{v}}">
+  <link rel="stylesheet" href="static/css/timetable.css?v={{v}}">
+  <link rel="stylesheet" href="static/css/dialogs.css?v={{v}}">
+  <script type="module" src="static/js/main.js?v={{v}}"></script>
 </head>
 <body>
-  <div class="notice" role="note">
-    非官方第三方工具，与南京财经大学无隶属关系。代登录可能受学校信息系统使用条款约束，请自行评估并对授权负责。
+  <div id="app">
+    <div class="boot-screen" role="status" aria-live="polite">
+      <span class="brand-mark boot-mark" aria-hidden="true"></span>
+      <p>南财课表</p>
+      <div class="boot-bar" aria-hidden="true"><span></span></div>
+      <span class="sr-only">正在加载…</span>
+    </div>
   </div>
-
-  <header class="appbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">南财课表</span>
+  <noscript>
+    <div class="noscript">
+      南财课表需要 JavaScript 才能运行。请在浏览器设置中开启 JavaScript 后刷新页面。
     </div>
-    <button type="button" class="user-chip" id="btnSettings" hidden aria-label="账号与设置">
-      <span class="avatar" id="avatar" aria-hidden="true"></span>
-      <span class="user-text">
-        <span class="user-name" id="whoName"></span>
-        <span class="user-id" id="whoId"></span>
-      </span>
-    </button>
-  </header>
-
-  <!-- ============ 登录 ============ -->
-  <main id="viewLogin" class="auth" hidden>
-    <section class="auth-card">
-      <div class="auth-head">
-        <h1>登录</h1>
-        <p class="muted">用南京财经大学统一身份认证账号登录，自动获取你的课表。</p>
-      </div>
-
-      <div class="seg" role="tablist" id="loginTabs" aria-label="登录方式">
-        <button type="button" role="tab" data-mode="pwd" aria-selected="true">账号密码</button>
-        <button type="button" role="tab" data-mode="qr" aria-selected="false">扫码登录</button>
-      </div>
-      <p class="hint" id="loginIntro"></p>
-
-      <form id="loginForm" class="stack" autocomplete="on" novalidate>
-        <label class="field">
-          <span class="field-label">学号</span>
-          <input name="student_id" inputmode="numeric" autocomplete="username" required maxlength="20" placeholder="例如 2020000000">
-        </label>
-        <label class="field">
-          <span class="field-label">统一身份认证密码</span>
-          <input name="password" type="password" autocomplete="current-password" required maxlength="128">
-        </label>
-        <label class="check">
-          <input type="checkbox" name="remember_password">
-          <span>保存加密的密码，登录态过期后自动续期 <span class="muted">（可选）</span></span>
-        </label>
-        <div class="callout warn" id="riskNote" hidden>
-          密码会用 AES-256-GCM 加密后保存在服务器上，只在登录态过期、后台刷新需要重新登录时解密使用，不写入日志。服务器一旦被攻破仍有泄露风险。不勾选时只保存登录态，过期后需要你回来重新登录。可随时在设置里删除。
-        </div>
-      </form>
-
-      <!-- 扫码：二维码由学校统一身份认证生成，本站只查询扫码状态 -->
-      <section id="qrPanel" class="qr-panel" hidden>
-        <div class="qr-frame" id="qrBox" hidden>
-          <img id="qrImg" alt="统一身份认证登录二维码">
-          <div class="qr-overlay" id="qrOverlay" hidden></div>
-        </div>
-        <p class="qr-status" id="qrStatus" role="status"></p>
-        <button type="button" class="btn primary full" id="btnQrStart">显示二维码</button>
-        <button type="button" class="btn ghost full" id="btnQrRefresh" hidden>刷新二维码</button>
-        <p class="error" id="qrError" role="alert"></p>
-      </section>
-
-      <div class="stack options" id="loginOptions">
-        <label class="check">
-          <input type="checkbox" id="keepLogin" checked>
-          <span>保持登录 180 天 <span class="muted">（公共电脑请取消）</span></span>
-        </label>
-        <label class="check">
-          <input type="checkbox" id="agreeTerms">
-          <span>我已了解本站为非官方工具，自愿授权本站代我登录并读取课表，并可随时删除账号与全部数据。</span>
-        </label>
-      </div>
-      <div class="stack" id="pwdActions">
-        <button type="submit" form="loginForm" class="btn primary full" id="btnLogin">登录并获取课表</button>
-        <p class="error" id="loginError" role="alert"></p>
-      </div>
-
-      <form id="captchaForm" class="stack step" hidden>
-        <div class="step-head">
-          <h2>图形验证码</h2>
-          <p class="muted">统一身份认证要求输入验证码。</p>
-        </div>
-        <div class="captcha-row">
-          <img id="captchaImg" alt="验证码图片">
-          <button type="button" class="btn ghost sm" id="btnCaptchaRefresh">换一张</button>
-        </div>
-        <label class="field">
-          <span class="field-label">验证码</span>
-          <input name="captcha" autocomplete="off" autocapitalize="off" spellcheck="false" required maxlength="16">
-        </label>
-        <button type="submit" class="btn primary full">继续</button>
-        <button type="button" class="btn ghost full" data-cancel>取消</button>
-        <p class="error" data-error role="alert"></p>
-      </form>
-
-      <form id="smsForm" class="stack step" hidden>
-        <div class="step-head">
-          <h2>短信验证</h2>
-          <p class="muted">统一身份认证要求二次验证，验证码将发送到 <strong id="smsPhone">绑定的手机</strong>。</p>
-        </div>
-        <div class="code-row">
-          <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="短信验证码" required maxlength="10" aria-label="短信验证码">
-          <button type="button" class="btn ghost" id="btnSmsSend">发送验证码</button>
-        </div>
-        <label class="check">
-          <input type="checkbox" name="trust_device" checked>
-          <span>信任这台设备，之后减少短信验证</span>
-        </label>
-        <button type="submit" class="btn primary full">验证并登录</button>
-        <button type="button" class="btn ghost full" data-cancel>取消</button>
-        <p class="hint" id="smsInfo"></p>
-        <p class="error" data-error role="alert"></p>
-      </form>
-    </section>
-    <p class="foot">
-      开源项目：<a href="https://github.com/LokmenoWer/nufe-kebiao" target="_blank" rel="noopener noreferrer">github.com/LokmenoWer/nufe-kebiao</a> · GPL-3.0
-    </p>
-  </main>
-
-  <!-- ============ 课表 ============ -->
-  <main id="viewTable" class="app" hidden>
-    <div class="banner" id="statusBanner" role="status" hidden>
-      <span id="bannerText"></span>
-      <button type="button" class="btn sm" id="bannerAction" hidden></button>
-    </div>
-
-    <section class="toolbar">
-      <div class="weeknav">
-        <button type="button" class="btn icon ghost" id="prevWeek" aria-label="上一周" data-icon="chevron-left"></button>
-        <button type="button" class="week-label" id="weekLabel" title="回到本周">
-          <strong id="weekTitle">第 1 周</strong>
-          <span id="weekRange"></span>
-        </button>
-        <button type="button" class="btn icon ghost" id="nextWeek" aria-label="下一周" data-icon="chevron-right"></button>
-      </div>
-      <div class="toolbar-end">
-        <div class="seg sm" id="viewMode" role="tablist" aria-label="视图">
-          <button type="button" role="tab" data-view="day" aria-selected="false">日</button>
-          <button type="button" role="tab" data-view="week" aria-selected="true">周</button>
-        </div>
-        <select id="semSelect" class="select" aria-label="学期"></select>
-        <button type="button" class="btn icon" id="btnRefresh" aria-label="立即刷新" title="立即刷新" data-icon="refresh"></button>
-      </div>
-    </section>
-    <p class="meta" id="metaLine"></p>
-
-    <section class="card week-card" id="weekView">
-      <div class="grid" id="grid"></div>
-    </section>
-
-    <section id="dayView" hidden>
-      <div class="daystrip" id="dayStrip" role="tablist" aria-label="选择日期"></div>
-      <ol class="daylist" id="dayList"></ol>
-    </section>
-
-    <div class="empty" id="emptyNote" hidden></div>
-
-    <footer class="foot">
-      <p>本站为非官方第三方工具 · 数据来自南京财经大学教务系统 · 可在设置中随时删除你的全部数据</p>
-      <p>开源项目：<a href="https://github.com/LokmenoWer/nufe-kebiao" target="_blank" rel="noopener noreferrer">github.com/LokmenoWer/nufe-kebiao</a> · GPL-3.0</p>
-    </footer>
-  </main>
-
-  <!-- 课程详情 -->
-  <dialog id="detail" class="sheet" aria-labelledby="dTitle">
-    <form method="dialog">
-      <div class="sheet-head">
-        <span class="swatch" id="dSwatch"></span>
-        <h3 id="dTitle"></h3>
-        <button class="btn icon ghost" value="close" aria-label="关闭" data-icon="x"></button>
-      </div>
-      <dl class="kv" id="dBody"></dl>
-    </form>
-  </dialog>
-
-  <!-- 设置 -->
-  <dialog id="settings" class="drawer" aria-labelledby="settingsTitle">
-    <form method="dialog" class="drawer-body">
-      <div class="drawer-head">
-        <h3 id="settingsTitle">账号与设置</h3>
-        <button class="btn icon ghost" value="close" aria-label="关闭" data-icon="x"></button>
-      </div>
-
-      <section class="panel">
-        <div class="account">
-          <span class="avatar lg" id="sAvatar" aria-hidden="true"></span>
-          <div>
-            <div class="account-name" id="sName"></div>
-            <div class="muted" id="sId"></div>
-          </div>
-        </div>
-        <div class="row-actions">
-          <button type="button" class="btn ghost sm" id="btnLogout" data-icon="logout">退出登录</button>
-          <button type="button" class="btn ghost sm" id="btnLogoutAll">退出所有设备</button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h4>自动刷新</h4>
-        <dl class="kv compact" id="refreshInfo"></dl>
-        <p class="hint" id="refreshHint"></p>
-        <div class="chips" id="refreshHours" role="group" aria-label="每天自动刷新时间"></div>
-        <button type="button" class="btn sm" id="btnSaveHours">保存刷新时间</button>
-        <details class="history">
-          <summary>最近记录</summary>
-          <ul class="log" id="refreshLog"></ul>
-        </details>
-      </section>
-
-      <section class="panel">
-        <h4>日历订阅</h4>
-        <p class="hint">在 iOS / macOS 日历、Google 日历、Outlook 中“添加订阅”填入链接。链接即凭证，请勿分享；泄露后可重新生成。</p>
-        <div class="copy-row">
-          <input id="icsUrl" readonly placeholder="尚未生成" aria-label="订阅链接">
-          <button type="button" class="btn icon ghost" id="btnCopyIcs" aria-label="复制链接" data-icon="copy"></button>
-        </div>
-        <div class="row-actions">
-          <button type="button" class="btn sm" id="btnIcs">生成链接</button>
-          <button type="button" class="btn ghost sm" id="btnIcsOff" hidden>停用订阅</button>
-        </div>
-        <p class="hint" id="icsInfo"></p>
-      </section>
-
-      <section class="panel">
-        <h4>登录凭据</h4>
-        <p id="credMode"></p>
-        <button type="button" class="btn ghost sm" id="btnForget" hidden>删除已保存的密码</button>
-      </section>
-
-      <section class="panel danger-zone">
-        <h4>删除账号</h4>
-        <p class="hint">立即删除本站保存的你的全部数据：登录态、加密密码、课表、刷新记录与订阅链接。不可恢复。</p>
-        <button type="button" class="btn danger sm" id="btnDelete">删除我的账号与所有数据</button>
-      </section>
-    </form>
-  </dialog>
-
-  <!-- 站内确认框：不用浏览器原生 confirm()，部分内置浏览器 / 微信里它会被直接屏蔽 -->
-  <dialog id="confirmDlg" class="modal">
-    <form method="dialog" class="stack">
-      <p id="confirmMsg"></p>
-      <div class="row-actions end">
-        <button value="cancel" class="btn ghost">取消</button>
-        <button value="ok" class="btn primary" id="confirmOk">确定</button>
-      </div>
-    </form>
-  </dialog>
-
-  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </noscript>
 </body>
 </html>

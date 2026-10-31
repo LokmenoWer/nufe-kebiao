@@ -12,3 +12,6 @@ deploy/deploy.env
 *.db
 *.db-wal
 *.db-shm
+node_modules/
+test-results/
+playwright-report/

@@ -26,12 +26,16 @@ def create_session(response: Response, uid: int, keep_login: bool = False) -> st
     now = db.now()
     days = SESSION_DAYS_LONG if keep_login else SESSION_DAYS_SHORT
     with db.tx() as c:
+        # 用户可能在登录流程结束前删除了账号：不要给不存在的外键建会话
+        if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+            raise HTTPException(401, "账号已删除，请重新登录")
         c.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
         c.execute("INSERT INTO sessions(token_hash, user_id, csrf, created_at, expires_at) VALUES(?,?,?,?,?)",
                   (crypto.token_hash(token), uid, csrf, now, now + days * 86400))
         # 允许手机、电脑同时在线，但每人最多保留最近 MAX_SESSIONS_PER_USER 个会话
         c.execute("""DELETE FROM sessions WHERE user_id=? AND token_hash NOT IN (
-                         SELECT token_hash FROM sessions WHERE user_id=? ORDER BY created_at DESC LIMIT ?)""",
+                         SELECT token_hash FROM sessions WHERE user_id=?
+                         ORDER BY created_at DESC, rowid DESC LIMIT ?)""",
                   (uid, uid, MAX_SESSIONS_PER_USER))
     # 不保持登录时不设 max_age：浏览器会话 cookie，关闭浏览器即失效
     response.set_cookie(SESSION_COOKIE, token, max_age=days * 86400 if keep_login else None, httponly=True,
@@ -135,11 +139,15 @@ def origin_matches(src: str) -> bool:
 
 
 def origin_ok(request: Request) -> bool:
-    """对所有写请求校验 Origin/Referer（同时挡住登录 CSRF）。"""
+    """对所有写请求校验来源（同时挡住登录 CSRF）。
+
+    优先 Origin/Referer；页面设置了 Referrer-Policy: no-referrer，部分浏览器/隐私插件会
+    同时去掉 Referer，此时用浏览器自己写入、脚本无法伪造的 Sec-Fetch-Site 兜底。
+    """
     src = request.headers.get("origin") or request.headers.get("referer")
-    if not src:
-        return False
-    return origin_matches(src)
+    if src:
+        return origin_matches(src)
+    return request.headers.get("sec-fetch-site") == "same-origin"
 
 
 class RateLimiter:

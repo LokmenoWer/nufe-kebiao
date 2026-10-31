@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv", "data", "debug", "static"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "SIM", "UP"]
+# B008 是 FastAPI 依赖注入的惯用写法；E501 由上面的 line-length 交给格式化器处理
+ignore = ["B008", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

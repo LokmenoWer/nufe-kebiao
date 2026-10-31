@@ -20,7 +20,18 @@ USER_AGENT = os.getenv(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 nufe-kebiao/1.0",
 )
-MAX_CONCURRENCY = int(os.getenv("UPSTREAM_MAX_CONCURRENCY", "2"))
+
+
+def _env_number(name: str, default: float, *, integer: bool = False) -> float:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw) if integer else float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MAX_CONCURRENCY = int(_env_number("UPSTREAM_MAX_CONCURRENCY", 2, integer=True))
 HARD_MIN_INTERVAL = 1.0  # 秒：任意两次请求的发起间隔下限，即全站每秒最多 1 次
 
 
@@ -34,7 +45,7 @@ def _min_interval(raw: str | None) -> float:
 
 MIN_INTERVAL = _min_interval(os.getenv("UPSTREAM_MIN_INTERVAL"))
 JITTER = 0.2  # 在最小间隔之上再随机多等 0~0.2 秒
-TIMEOUT = float(os.getenv("UPSTREAM_TIMEOUT", "20"))
+TIMEOUT = _env_number("UPSTREAM_TIMEOUT", 20.0)
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 _pace_lock = threading.Lock()
@@ -114,8 +125,17 @@ def dump_cookies(session: requests.Session) -> list[dict]:
 
 
 def load_cookies(session: requests.Session, cookies: list[dict]) -> None:
+    if not isinstance(cookies, list):
+        raise TypeError("cookie jar must be a list")
     for c in cookies:
-        session.cookies.set(
-            c["name"], c["value"], domain=c["domain"], path=c["path"],
-            secure=c["secure"], expires=c["expires"],
-        )
+        if (not isinstance(c, dict) or not isinstance(c.get("name"), str) or not isinstance(c.get("value"), str)
+                or not isinstance(c.get("domain"), str) or not isinstance(c.get("path"), str)):
+            continue
+        try:
+            session.cookies.set(
+                c["name"], c["value"], domain=c["domain"], path=c["path"],
+                secure=bool(c.get("secure")),
+                expires=c.get("expires") if isinstance(c.get("expires"), int | float) else None,
+            )
+        except (AttributeError, TypeError, ValueError):
+            continue

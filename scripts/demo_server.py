@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,7 +20,11 @@ os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["PUBLIC_BASE_URL"] = "http://localhost:8765"
 sys.path.insert(0, str(ROOT))
 
-from app import cas, jwxt  # noqa: E402
+from app import cas, jwxt, security  # noqa: E402
+
+# 演示模式不限制登录次数（否则反复试前端很容易撞到真实部署的防撞库限制）
+security.login_by_ip = security.RateLimiter(10_000, 900)
+security.login_by_student = security.RateLimiter(10_000, 900)
 
 SAMPLE = json.loads((ROOT / "examples" / "sample_timetable.json").read_text("utf-8"))
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
@@ -44,11 +49,19 @@ class DemoFlow:
     def start(self):
         if self.password != "demo":
             raise cas.CasError("演示模式：密码请填 demo")
+        self.session.kb_demo_user = self.username  # 演示：把输入的学号当作当前用户
         return self._done()
 
     def start_qr(self):
         self.stage, self.qr_status = "qr", "waiting"
         return self.stage
+
+    def send_sms(self):
+        self.sms_ready_at = time.time() + 60
+        return "演示模式：验证码已发送（随便填 6 位数字）"
+
+    def verify_sms(self, code, trust_device=True):
+        return self._done()
 
     def qr_image(self):
         return PNG, "image/png"
@@ -66,7 +79,18 @@ class DemoFlow:
 
 
 def demo_fetch(session, semester_id=None, page_html=None):
-    return dict(SAMPLE)
+    data = dict(SAMPLE)
+    student = dict(SAMPLE.get("student") or {})
+    # 演示模式：任意学号都能登录，学号以用户输入为准（扫码时退回示例学号）
+    student["code"] = getattr(session, "kb_demo_user", None) or student.get("code") or "2020000000"
+    data["student"] = student
+    # 让切换学期在演示模式下也有数据可看（真实环境由教务系统按 id 返回）
+    if semester_id:
+        sid = int(semester_id)
+        data["semester_id"] = sid
+        name = next((s["name"] for s in SAMPLE.get("semesters", []) if s["id"] == sid), None)
+        data["semester_name"] = name or str(sid)
+    return data
 
 
 cas.LoginFlow = DemoFlow

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
 import threading
 import time
@@ -7,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import DB_PATH
+
+log = logging.getLogger("kebiao.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -62,6 +66,7 @@ CREATE TABLE IF NOT EXISTS refresh_log (
 CREATE INDEX IF NOT EXISTS idx_users_next ON users(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_log_user ON refresh_log(user_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
 _local = threading.local()
@@ -85,7 +90,8 @@ def connect() -> sqlite3.Connection:
             conn.execute("SELECT 1")
             return conn
         except sqlite3.Error:
-            pass
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
     conn = _open()
     _local.conn = conn
     return conn
@@ -93,13 +99,25 @@ def connect() -> sqlite3.Connection:
 
 @contextmanager
 def tx():
+    """BEGIN IMMEDIATE 事务。
+
+    - 开启失败时不再执行 ROLLBACK（否则会用 "no transaction is active" 掩盖真实错误）。
+    - COMMIT 失败时尝试回滚，回滚失败只记日志。
+    """
     conn = connect()
+    started = False
     try:
         conn.execute("BEGIN IMMEDIATE")
+        started = True
         yield conn
         conn.execute("COMMIT")
+        started = False
     except BaseException:
-        conn.execute("ROLLBACK")
+        if started:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.exception("rollback failed")
         raise
 
 

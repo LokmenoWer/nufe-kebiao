@@ -77,7 +77,7 @@ def test_ics_build():
     assert "DTSTART;TZID=Asia/Shanghai:20260916T082000" in out  # 第2周周三
     assert "DTSTART;TZID=Asia/Shanghai:20260907T082000" in out  # 缺时间的课用节次兜底
     assert "SUMMARY:高数\\,一" in out
-    assert all(len(l.encode()) <= 75 for l in out.split("\r\n"))
+    assert all(len(line.encode()) <= 75 for line in out.split("\r\n"))
 
 
 def test_reauth_page_parsing():
@@ -186,6 +186,7 @@ def test_print_data_rejects_oversized_body():
 
 def test_rate_limiter_drops_expired_keys():
     import time
+
     from app.security import RateLimiter
     lim = RateLimiter(2, 0.05)
     assert lim.hit("gone")
@@ -196,6 +197,7 @@ def test_rate_limiter_drops_expired_keys():
 
 def test_background_yields_when_interactive_waiting():
     import requests
+
     from app import polite
     polite._interactive_waiters = 1
     try:
@@ -212,7 +214,9 @@ def test_background_yields_when_interactive_waiting():
 
 def test_pace_spacing_across_threads():
     """多个线程同时发请求：发起时刻两两间隔都 ≥ 1 秒（全站每秒最多 1 次）。"""
-    import threading, time
+    import threading
+    import time
+
     from app import polite
     polite._last_request_at = 0.0
     stamps, lock = [], threading.Lock()
@@ -228,5 +232,113 @@ def test_pace_spacing_across_threads():
     for th in threads:
         th.join()
     stamps.sort()
-    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    gaps = [b - a for a, b in zip(stamps, stamps[1:], strict=False)]
     assert len(gaps) == 2 and all(g >= 1.0 for g in gaps), gaps
+
+
+# ---------- 回归：解析边界 ----------
+
+def test_course_page_word_boundaries():
+    html = """<script>var mypersonId = 999; var personId = 123;
+    var mycurrentSemester = {'id': 999}; var currentSemester = {'id': 161};</script>"""
+    p = jwxt.parse_course_page(html)
+    assert p.person_id == 123 and p.current_semester_id == 161
+    try:
+        jwxt.parse_course_page("<script>var mypersonId=1; var mycurrentSemester={'id':2};</script>")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("前缀变量不应被当成 personId/currentSemester")
+
+
+def test_normalize_ignores_dirty_activities():
+    d = jwxt.normalize({"studentTableVms": [{"activities": [
+        {"courseName": "坏 weekday", "weekday": "abc", "startUnit": 1},
+        {"courseName": "越界 weekday", "weekday": 9, "startUnit": 1},
+        {"courseName": "坏 startUnit", "weekday": 1, "startUnit": 0},
+        {"courseName": "正常", "weekday": "3", "startUnit": "1", "endUnit": 0,
+         "weekIndexes": ["2", None, 99, -1, 3], "teachers": [None, {"name": None}, "A(1)"],
+         "room": None, "startTime": None},
+    ]}]})
+    acts = d["activities"]
+    assert len(acts) == 1
+    a = acts[0]
+    assert a["weekday"] == 3 and a["startUnit"] == 1 and a["endUnit"] == 1
+    assert a["weekIndexes"] == [2, 3] and a["teachers"] == ["A"]
+    assert a["room"] == "" and a["startTime"] == ""
+
+
+def test_cas_rejects_error_page_as_logged_in():
+    class Resp:
+        def __init__(self, url, text="", status=200):
+            self.url, self.text, self.status_code = url, text, status
+            self.content = text.encode()
+            self.history = []
+            self.request = None
+            self.raw = type("Raw", (), {"headers": type("H", (), {"getlist": lambda *a: []})()})()
+
+    class Session:
+        headers = {}
+        cookies = []
+
+        def get(self, url, **kw):
+            return Resp(cas.COURSE_TABLE_URL, "<html>500</html>", 500)
+
+    flow = cas.LoginFlow(Session(), "2023001", "pw")
+    try:
+        flow._open_login_page()
+    except cas.CasError as e:
+        assert "教务系统" in str(e) and flow.stage != "done"
+    else:
+        raise AssertionError("500 页面不能当作已登录")
+
+    # 课程表页结构正常时，直接复用页面，不再多发一次请求
+    class OkSession(Session):
+        def get(self, url, **kw):
+            return Resp(cas.COURSE_TABLE_URL, "<script>var personId = 1; var currentSemester = {'id': 161};</script>")
+
+    flow = cas.LoginFlow(OkSession(), "2023001", "pw")
+    assert flow._open_login_page() is None and flow.stage == "done"
+    assert "personId" in (flow.course_html or "")
+
+
+def test_ics_skips_invalid_time_ranges():
+    tt = {"semester_id": 1, "activities": [
+        {"courseName": "倒序", "teachers": [], "weekday": 1, "startUnit": 1, "endUnit": 2,
+         "weeksStr": "1", "weekIndexes": [1], "room": "", "building": "", "campus": "",
+         "startTime": "10:00", "endTime": "09:00"},
+        {"courseName": "正常", "teachers": [], "weekday": 1, "startUnit": 1, "endUnit": 2,
+         "weeksStr": "1", "weekIndexes": [1], "room": "", "building": "", "campus": "",
+         "startTime": "08:00", "endTime": "09:00"},
+    ]}
+    out = ics.build("2023001", [(tt, "2026-09-07")])
+    assert out.count("BEGIN:VEVENT") == 1 and "正常" in out and "倒序" not in out
+
+
+def test_load_cookies_skips_corrupt_entries():
+    import requests
+
+    from app.polite import load_cookies
+    session = requests.Session()
+    load_cookies(session, [
+        {"name": "A", "value": "1", "domain": "example.com", "path": "/"},
+        {"name": None},
+        "not-a-dict",
+    ])
+    assert session.cookies.get("A") == "1"
+
+
+def test_db_tx_rolls_back_on_exception():
+    from app import db
+    db.init()
+    with db.tx() as conn:
+        conn.execute("INSERT INTO semesters(semester_id, name) VALUES(?,?)", (987654, "rollback"))
+    try:
+        with db.tx() as conn:
+            conn.execute("INSERT INTO semesters(semester_id, name) VALUES(?,?)", (987655, "rollback"))
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    count = db.connect().execute("SELECT COUNT(*) FROM semesters WHERE semester_id IN (987654,987655)").fetchone()[0]
+    assert count == 1
+    db.connect().execute("DELETE FROM semesters WHERE semester_id=?", (987654,))
