@@ -15,7 +15,7 @@
 
 ## 快速开始
 
-要求 Python 3.11+。
+要求 Python 3.10+。
 
 ```bash
 uv venv .venv && uv pip install -p .venv -r requirements.txt

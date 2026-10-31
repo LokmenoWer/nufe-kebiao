@@ -66,7 +66,7 @@ def _refresh_interval() -> str:
 
 def build(student_id: str, semesters: list[tuple[dict, str]]) -> str:
     """semesters: [(timetable_view, week1_monday_iso)]"""
-    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//nufe-kebiao//CN", "CALSCALE:GREGORIAN",
              "METHOD:PUBLISH", "X-WR-CALNAME:南财课表", "X-WR-CALDESC:南京财经大学课表（非官方）",
              f"X-WR-TIMEZONE:{TIMEZONE}",
