@@ -232,6 +232,31 @@ test("铺满（大号）：每天一列带日期，卡片写起止时间、课�
   assert.ok(medium.widget.texts().includes("金融学") && !medium.widget.texts().includes("10/26"));
 });
 
+test("窄格子里的教室去掉楼名只留编号；放得下或编号没有字母时保持原样", () => {
+  assert.equal(W.fitRoom("德业楼Z4-106", 31, 8.5), "Z4-106");
+  assert.equal(W.fitRoom("博文楼JA108", 31, 8.5), "JA108");
+  assert.equal(W.fitRoom("德业楼Z4-106", 60, 8.5), "德业楼Z4-106");
+  assert.equal(W.fitRoom("食工楼203", 10, 8.5), "食工楼203");
+  assert.equal(W.fitRoom("", 31, 8.5), "");
+});
+
+test("只有下午、晚上有课的一周（大号）：教室写全编号，行高铺满", async () => {
+  const D = (date, weekday, lessons) => day(date, weekday, lessons, 9);
+  const week = { week: 9, monday: "2026-11-02", days: [
+    D("2026-11-02", 1, [L("中外古典园林史", "18:30", "20:00", "德正楼Z3-117")]),
+    D("2026-11-03", 2, [L("创新创业实践：财会", "13:30", "14:55", "德业楼Z4-106"), L("财务审计", "15:10", "16:35", "德业楼Z4-108")]),
+    D("2026-11-04", 3, []),
+    D("2026-11-05", 4, [L("经济学前沿", "13:30", "14:55", "德经楼Z1-101"), L("信用管理学", "15:10", "16:35", "博文楼JA108")]),
+    D("2026-11-06", 5, [L("成本管理会计", "14:15", "15:40", "德济楼Z2S206")]),
+    D("2026-11-07", 6, [L("财务审计", "14:15", "15:40", "博文楼JA108")]),
+    D("2026-11-08", 7, []),
+  ] };
+  const { widget } = await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW });
+  const t = widget.texts();
+  assert.ok(t.includes("周六") && !t.includes("周日"), t.join("|"));
+  for (const room of ["Z3-117", "Z4-106", "Z4-108", "Z1-101", "JA108", "Z2S206"]) assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
+});
+
 test("上午到晚上排满的一周：两节小课在本周和铺满模式里都写教室", async () => {
   const busy = { ...PAYLOAD, week: { ...PAYLOAD.week, days: [
     day("2026-10-26", 1, [L("高等数学", "08:20", "09:45", "A101"), L("概率论", "10:00", "12:15"), L("大学英语", "14:15", "16:35"), L("微观经济学", "18:30", "20:50")]),

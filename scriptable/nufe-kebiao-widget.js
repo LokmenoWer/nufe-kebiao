@@ -628,10 +628,27 @@ function weekSubtitle(block) {
   return days.length ? `${shortDate(days[0].date)}–${shortDate(days[days.length - 1].date)}` : "";
 }
 
-/** 教室；调过课的附上原来的安排：“B202（原 A101）”。 */
-function roomText(lesson) {
-  if (!lesson.was) return lesson.room || "";
-  return lesson.room ? `${lesson.room}（${lesson.was}）` : lesson.was;
+/** 教室；调过课的附上原来的安排：“B202（原 A101）”。room 可传入缩短后的写法。 */
+function roomText(lesson, room = lesson.room) {
+  if (!lesson.was) return room || "";
+  return room ? `${room}（${lesson.was}）` : lesson.was;
+}
+
+/** 粗估一行字的宽度（pt）：汉字约一个字号宽，字母数字约 0.6 个。 */
+function textWidth(text, size) {
+  let w = 0;
+  for (const ch of String(text || "")) w += /[\u2e80-\uffff]/.test(ch) ? size : size * 0.6;
+  return w;
+}
+
+/**
+ * 窄格子里的教室：缩小一点仍放不下时去掉楼名，只留编号（“德业楼Z4-106” → “Z4-106”），
+ * 免得被截成“德业楼Z…”而看不到房间号。宽度是估的，按 0.85 倍留余量，不指望缩到最小字号。
+ * 编号里没有字母的（“食工楼203”）去掉楼名就认不出了，保持原样。
+ */
+function fitRoom(room, width, size, scale = 0.85) {
+  if (!room || textWidth(room, size) * scale <= width) return room || "";
+  return room.replace(/^[\u4e00-\u9fff]+(?=[A-Za-z])/, "") || room;
 }
 
 function lessonMeta(lesson, showTeacher) {
@@ -794,11 +811,12 @@ function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
   }
   // 大号格子放得下三行（时间 + 课名 + 教室）就写教室：两节小课的格子也要能看到去哪上课
   const showRoom = large && Boolean(lesson.room) && height >= 40;
-  const lines = large ? (height >= (showRoom ? 58 : 46) ? 2 : 1) : (!showTime && height >= 28 ? 2 : 1);
+  const lines = large ? (height >= (showRoom ? 72 : 60) ? 3 : height >= (showRoom ? 58 : 46) ? 2 : 1)
+    : (!showTime && height >= 28 ? 2 : 1);
   // 撞课：同一格里还有别的课，名字后面注“+1”
   const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
   addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
-  if (showRoom) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
+  if (showRoom) addText(chip, fitRoom(lesson.room, width - 6, 8.5), { size: 8.5, color: C.sub, scale: 0.7 });
   chip.addSpacer();
 }
 
@@ -823,7 +841,8 @@ function renderWeek(widget, C, columns, family, payload, size) {
   const colW = Math.floor((width - axisW - columns.length * gap) / Math.max(columns.length, 1));
   // 去掉内边距、标题栏、星期行，再留 4pt 余量，剩下的给课程格
   const avail = size.h - 26 - 18 - 6 - 14 - 4 - 4;
-  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 64 : 32,
+  // 大号行数少时（只有下午、晚上的课）行高放宽到 96，格子铺满整块，课名和教室不用挤在一起
+  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 96 : 32,
     Math.floor((avail - Math.max(rows.length - 1, 0) * gap) / Math.max(rows.length, 1))));
   const base = siteUrl();
 
@@ -902,7 +921,10 @@ function fullChip(cell, C, lesson, { width, height, large, more }) {
   addText(chip, name, {
     size: large ? 10 : 9, weight: "semibold", color: lesson.changed ? C.warn : C.text, lines: nameLines, scale: 0.6,
   });
-  if (showRoom) addText(chip, roomText(lesson), { size: large ? 8.5 : 8, color: C.sub, lines: n >= 7 ? 2 : 1, scale: 0.7 });
+  if (showRoom) {
+    const room = fitRoom(lesson.room, width - 6, large ? 8.5 : 8);
+    addText(chip, roomText(lesson, room), { size: large ? 8.5 : 8, color: C.sub, lines: n >= 7 ? 2 : 1, scale: 0.7 });
+  }
   if (showTeacher) addText(chip, lesson.teachers, { size: 8.5, color: C.faint, scale: 0.7 });
   chip.addSpacer();
 }
@@ -1282,7 +1304,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {
