@@ -324,6 +324,10 @@ function weekGrid(columns, maxRows) {
 }
 
 /** 本机的小组件尺寸（pt）。认不出的机型按相近屏宽估；iPad 的超大号按两倍中号宽估。 */
+function isPhone(screen) {
+  return !screen || Math.min(screen.w, screen.h) < 600;
+}
+
 function widgetSizeFor(screen, family) {
   const w = screen ? Math.min(screen.w, screen.h) : 0;
   const h = screen ? Math.max(screen.w, screen.h) : 0;
@@ -332,8 +336,23 @@ function widgetSizeFor(screen, family) {
   const [, , small, wide, tall] = row;
   if (family === "small") return { w: small, h: small };
   if (family === "medium") return { w: wide, h: small };
-  if (family === "extraLarge") return { w: wide * 2 + 16, h: tall };
+  // 超大号只在 iPad 上是两倍中号宽；手机上不知道确切尺寸，宽度绝不能超过大号，否则整块画不出来
+  if (family === "extraLarge" && !isPhone(screen)) return { w: wide * 2 + 16, h: tall };
   return { w: wide, h: tall };
+}
+
+const KNOWN_FAMILIES = ["small", "medium", "large", "extraLarge"];
+
+/**
+ * 脚本认识的尺寸。新系统可能报一个脚本没见过的尺寸（如 iOS 27 的竖版超大号 extraLargePortrait），
+ * 或在手机上报 extraLarge：都按大号排，并在标题栏注明系统报的尺寸名，方便排查。
+ */
+function normalizeFamily(raw, screen) {
+  const name = String(raw || "medium");
+  if (name.startsWith("accessory")) return { family: name, unknown: "" };
+  if (!KNOWN_FAMILIES.includes(name)) return { family: "large", unknown: name };
+  if (name === "extraLarge" && isPhone(screen)) return { family: "large", unknown: name };
+  return { family: name, unknown: "" };
 }
 
 /**
@@ -430,6 +449,7 @@ function headerNote(payload, offline, day, family, extra = {}) {
   const recent = payload && payload.changed_at && nowSec - payload.changed_at < CHANGE_NOTE_SECONDS;
   if (extra.changed || recent) return { text: "有调课", tone: "warn" };
   if (payload && isOutdated(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
+  if (extra.unknownFamily) return { text: `尺寸 ${extra.unknownFamily}`, tone: "faint" };
   if (day && day.week && family !== "small") return { text: `第 ${day.week} 周`, tone: "faint" };
   return null;
 }
@@ -969,13 +989,17 @@ function renderFull(widget, C, columns, family, payload, size) {
   });
 }
 
-function widgetSize(family) {
+function screenSize() {
   try {
     const s = typeof Device !== "undefined" && typeof Device.screenSize === "function" ? Device.screenSize() : null;
-    return widgetSizeFor(s ? { w: s.width, h: s.height } : null, family);
+    return s ? { w: s.width, h: s.height } : null;
   } catch (_) {
-    return widgetSizeFor(null, family);
+    return null;
   }
+}
+
+function widgetSize(family) {
+  return widgetSizeFor(screenSize(), family);
 }
 
 function renderAccessory(widget, plan, family) {
@@ -1029,7 +1053,7 @@ function runScriptUrl() {
 }
 
 /** opts.resync：课表变了而本机提醒还是旧的——提示，并让点按直接回到 Scriptable 重排。 */
-function buildWidget(payload, { family, mode, offline, resync = false, nowMs = Date.now() }) {
+function buildWidget(payload, { family, mode, offline, resync = false, unknownFamily = "", nowMs = Date.now() }) {
   const C = palette();
   const now = shanghaiNow(nowMs);
   const widget = new ListWidget();
@@ -1048,7 +1072,7 @@ function buildWidget(payload, { family, mode, offline, resync = false, nowMs = D
     const changed = columns.some((col) => showsChanges(col.lessons, col.cancelled));
     widget.url = rerun || siteLink(base, payload, block.days && block.days[0], "week");
     header(widget, C, title, weekSubtitle(block),
-      headerNote(payload, offline, block.days && block.days[0], family, { changed, resync: Boolean(rerun), nowMs }), family);
+      headerNote(payload, offline, block.days && block.days[0], family, { changed, resync: Boolean(rerun), unknownFamily, nowMs }), family);
     if (mode === "full") renderFull(widget, C, columns, family, payload, widgetSize(family));
     else renderWeek(widget, C, columns, family, payload, widgetSize(family));
     return widget;
@@ -1061,7 +1085,7 @@ function buildWidget(payload, { family, mode, offline, resync = false, nowMs = D
     return widget;
   }
   header(widget, C, plan.title, daySubtitle(plan.day),
-    headerNote(payload, offline, plan.day, family, { changed: planHasChanges(plan), resync: Boolean(rerun), nowMs }), family);
+    headerNote(payload, offline, plan.day, family, { changed: planHasChanges(plan), resync: Boolean(rerun), unknownFamily, nowMs }), family);
   if (family === "small") renderSmall(widget, C, plan);
   else renderList(widget, C, plan, family, payload);
   return widget;
@@ -1237,7 +1261,7 @@ async function inAppMenu(result, mode, remindNote) {
 }
 
 async function main() {
-  const family = config.widgetFamily || "medium";
+  const { family, unknown: unknownFamily } = normalizeFamily(config.widgetFamily || "medium", screenSize());
   const param = parseParam(args.widgetParameter, family);
   if (!/^https?:\/\//.test(WIDGET_URL)) {
     const widget = errorWidget("请从网站「设置 → 桌面小组件」复制脚本，里面会带上你的专属链接");
@@ -1251,7 +1275,7 @@ async function main() {
   if (inWidget()) {
     const resync = needsReminderResync(result.data, readJsonFile(STATE_FILE()), param.remindMinutes);
     Script.setWidget(result.error ? errorWidget(result.error)
-      : buildWidget(result.data, { family, mode: param.mode, offline: result.offline, resync }));
+      : buildWidget(result.data, { family, mode: param.mode, offline: result.offline, resync, unknownFamily }));
     return;
   }
   let remindNote = "";
@@ -1274,7 +1298,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, normalizeFamily, fullLayout, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {
