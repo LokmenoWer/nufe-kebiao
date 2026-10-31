@@ -92,7 +92,9 @@ class WidgetStack extends Node {
     super("stack");
   }
 
-  layoutVertically() {}
+  layoutVertically() {
+    this.vertical = true;
+  }
 
   layoutHorizontally() {}
 
@@ -145,6 +147,7 @@ class Size {
 export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
   inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [], version = "sha-000000000001",
+  screen = { width: 393, height: 852 },
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -278,6 +281,7 @@ export async function runWidgetScript({
     ListWidget, Color, Font, Size, Request, Notification,
     FileManager: { local: () => fm, iCloud: () => { throw new Error("iCloud disabled"); } },
     Alert,
+    Device: { screenSize: () => ({ ...screen }) },
     Safari: { open: (u) => presented.push(`safari:${u}`) },
     module: { filename: "/Documents/南财课表.js" },
     Script: {

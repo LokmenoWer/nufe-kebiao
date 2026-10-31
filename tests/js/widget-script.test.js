@@ -146,6 +146,35 @@ test("本周：按上课时间分行，一天只有一节下午课也画在下�
   assert.equal(W.weekGrid([], 5).rows.length, 0);
 });
 
+test("铺满模式：高度按时长，午休 / 傍晚压成小间隔，跨大节的课不被截断", () => {
+  const cols = [
+    { lessons: [{ name: "无人机", start: "08:00", end: "11:25" }], cancelled: [] },        // 1–4 节
+    { lessons: [{ name: "神经网络", start: "09:50", end: "12:15" }, { name: "撞课", start: "10:00", end: "11:00" }], cancelled: [] },
+    { lessons: [{ name: "组会", start: "14:00", end: "15:35" }], cancelled: [{ name: "讲座", start: "18:30", end: "20:05" }] },
+  ];
+  const { labels, cols: out } = W.fullLayout(cols, 300);
+  // 三段：08:00–12:15（255 分钟）、14:00–15:35、18:30–20:05（各 95 分钟），中间两道 6pt 间隔
+  const scale = (300 - 2 * 6) / (255 + 95 + 95);
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  assert.ok(near(out[0][0].top, 0) && near(out[0][0].height, 205 * scale));  // 3 小时 25 分钟的课整块画出
+  assert.ok(near(out[1][0].top, 110 * scale) && out[1][0].more === 1 && out[1].length === 1);
+  assert.ok(near(out[2][0].top, 255 * scale + 6));                            // 午休只占 6pt
+  assert.equal(out[2][1].kind, "cancelled");
+  assert.ok(near(out[2][1].top + out[2][1].height, 300));                    // 铺到底
+  // 时间轴：挨得太近的标签省掉（09:50 和 10:00 只留一个）
+  assert.deepEqual([...labels.map((l) => l.text)], ["08:00", "09:50", "14:00", "18:30"]);
+  assert.equal(W.fullLayout([{ lessons: [], cancelled: [] }], 300).labels.length, 0);
+});
+
+test("按机型估小组件尺寸", () => {
+  const size = (w, h, f) => ({ ...W.widgetSizeFor({ w, h }, f) });
+  assert.deepEqual(size(393, 852, "large"), { w: 338, h: 354 });
+  assert.deepEqual(size(852, 393, "medium"), { w: 338, h: 158 });  // 横屏也认
+  assert.deepEqual(size(430, 932, "large"), { w: 364, h: 382 });
+  assert.deepEqual(size(400, 870, "large"), { w: 338, h: 354 });   // 没见过的机型：按相近屏宽
+  assert.deepEqual({ ...W.widgetSizeFor(null, "large") }, { w: 329, h: 345 });
+});
+
 // ---- 整个脚本在 Scriptable 替身里跑一遍 ----
 
 const URL_OK = "https://kb.example.com/widget/tok.json";
@@ -189,6 +218,18 @@ test("小号与锁屏也有倒计时", async () => {
   assert.ok(rect.widget.texts().includes("[timer→2026-10-26T04:15:00.000Z]"));
   const circ = await runWidgetScript({ payload: PAYLOAD, family: "accessoryCircular", url: URL_OK, nowMs: NOW });
   assert.deepEqual(circ.widget.texts(), ["下课", "12:15"]);
+});
+
+test("铺满（大号）：每天一列带日期，卡片写起止时间、课名、教室和教师", async () => {
+  assert.equal(W.parseMode("铺满", "large"), "full");
+  assert.equal(W.parseMode("full", "small"), "today");
+  const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "full", url: URL_OK, nowMs: NOW });
+  const t = widget.texts();
+  assert.equal(t[0], "本周");
+  for (const x of ["周一", "10/26", "08:20", "08:20–09:45", "高等数学", "A101", "教师A", "金融学"]) assert.ok(t.includes(x), `${x}: ${t.join("|")}`);
+  assert.ok(widget.urls().includes("https://kb.example.com/#sem=161&w=8&view=day&d=4"));
+  const medium = await runWidgetScript({ payload: PAYLOAD, family: "medium", parameter: "full", url: URL_OK, nowMs: NOW });
+  assert.ok(medium.widget.texts().includes("金融学") && !medium.widget.texts().includes("10/26"));
 });
 
 test("本周（大号）：每天一列，课程名和教室都在", async () => {
