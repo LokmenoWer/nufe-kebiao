@@ -2,7 +2,7 @@
 # 在本机执行：把代码同步到服务器并重启服务。
 #   cp deploy/deploy.env.example deploy/deploy.env   # 填好服务器信息（该文件不进 git）
 #   deploy/deploy.sh
-# 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://example.com/kebiao deploy/deploy.sh
+# 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
 # 首次部署后服务器上的 .env / data/ 不会被覆盖。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 [ -f deploy/deploy.env ] && . deploy/deploy.env
 : "${HOST:?请设置 HOST，例如 HOST=root@your-server}"
-: "${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://example.com/kebiao}"
+: "${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://kebiao.example.com}"
 APP_DIR=/opt/nufe-kebiao
 SSH_OPTS=(-o IdentitiesOnly=yes)
 [ -n "${SSH_KEY:-}" ] && SSH_OPTS+=(-i "$SSH_KEY")

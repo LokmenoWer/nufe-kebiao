@@ -107,7 +107,7 @@ deploy/deploy.sh
 
 - 代码同步到 `/opt/nufe-kebiao`，systemd 服务 `kebiao`（用户 `kebiao`，只监听 `127.0.0.1:8010`，1 个 worker）。
 - 服务器上的 `.env`（含独立生成的 `APP_SECRET_KEY`）和 `data/` 只在首次部署时创建，之后不会被覆盖。
-- 反向代理示例（Apache）：在站点的 `*:443` vhost 里加一行 `Include /etc/apache2/kebiao-proxy.conf`（内容见 `deploy/apache-kebiao.conf`），把 `/kebiao/` 反代到 8010 并去掉前缀。前端全部使用相对路径，会话 cookie 的 path 是 `/kebiao/`。
+- 反向代理示例（Apache）：推荐独立主机名，`deploy/apache-kebiao.conf` 是完整的 vhost（80 跳 443，整站反代到 8010，访问日志不记带 token 的路径）。也能挂在子路径下（`PUBLIC_BASE_URL=https://example.com/kebiao`，cookie path 随之变成 `/kebiao/`），前端全部使用相对路径；从子路径迁到独立主机名时，旧 vhost 改为 Include `deploy/apache-kebiao-legacy.conf`：页面 301 到新地址，已发出的日历订阅和小组件链接原地继续可用。
 - 查看日志：`journalctl -u kebiao -f`
 - 看后台刷新在干什么：`journalctl -u kebiao | grep "tick:"`——有人到期、刷了人或预算变化时每个 tick 一行，如 `tick: due=12 refreshed=8 budget=0.65/s (max 0.65)`；学校报错导致预算减半时会写明。
 - 健康检查：`GET /healthz` 返回 `{"ok": true}`。
