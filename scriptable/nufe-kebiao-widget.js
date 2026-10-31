@@ -651,6 +651,18 @@ function fitRoom(room, width, size, scale = 0.85) {
   return room.replace(/^[\u4e00-\u9fff]+(?=[A-Za-z])/, "") || room;
 }
 
+/** \u683c\u5b50\u9ad8\u5ea6\u8fd8\u6709\u5bcc\u4f59\u65f6\u6559\u5ba4\u5206\u4e24\u884c\u5199\u5168\uff1a\u201c\u5fb7\u4e1a\u697c\nZ4-106\u201d\u3002\u4e00\u884c\u653e\u5f97\u4e0b\u3001\u6216\u62c6\u4e0d\u5f00\u65f6\u8fd4\u56de null\u3002 */
+function splitRoom(room, width, size) {
+  const short = fitRoom(room, width, size);
+  if (!room || short === room) return null;
+  return `${room.slice(0, room.length - short.length)}\n${short}`;
+}
+
+/** \u8bfe\u540d\u5728\u8fd9\u4e48\u5bbd\u7684\u683c\u5b50\u91cc\u5927\u7ea6\u8981\u51e0\u884c\uff081\u20133\uff09\uff1a\u7a84\u5217\u4e00\u884c\u53ea\u653e\u5f97\u4e0b\u4e09\u4e2a\u5b57\uff0c\u6309\u9700\u8981\u5206\u884c\u800c\u4e0d\u662f\u4e00\u5f8b\u538b\u6210\u4e00\u884c\u3002 */
+function linesNeeded(text, width, size, scale = 0.85) {
+  return Math.min(3, Math.max(1, Math.ceil((textWidth(text, size) * scale) / Math.max(width, 1))));
+}
+
 function lessonMeta(lesson, showTeacher) {
   return [`${lesson.start}–${lesson.end}`, roomText(lesson), showTeacher ? lesson.teachers : ""].filter(Boolean).join(" · ");
 }
@@ -811,12 +823,23 @@ function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
   }
   // 大号格子放得下三行（时间 + 课名 + 教室）就写教室：两节小课的格子也要能看到去哪上课
   const showRoom = large && Boolean(lesson.room) && height >= 40;
-  const lines = large ? (height >= (showRoom ? 72 : 60) ? 3 : height >= (showRoom ? 58 : 46) ? 2 : 1)
-    : (!showTime && height >= 28 ? 2 : 1);
   // 撞课：同一格里还有别的课，名字后面注“+1”
   const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
+  // 大号按高度分行（时间约 11pt、课名每行 12pt、教室每行 10.5pt）：先保证课名写全，还有富余再把教室分两行写全
+  const inner = width - 6;
+  let lines = !showTime && height >= 28 ? 2 : 1;
+  let roomTwo = null;
+  if (large) {
+    const left = height - 4 - 11 - (showRoom ? 10.5 : 0);
+    const nameMax = Math.max(1, Math.min(3, Math.floor(left / 12)));
+    const need = Math.min(nameMax, linesNeeded(name, inner, 10));
+    if (showRoom && left - need * 12 >= 10.5) roomTwo = splitRoom(lesson.room, inner, 8.5);
+    lines = roomTwo ? need : nameMax;
+  }
   addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
-  if (showRoom) addText(chip, fitRoom(lesson.room, width - 6, 8.5), { size: 8.5, color: C.sub, scale: 0.7 });
+  if (showRoom) {
+    addText(chip, roomTwo || fitRoom(lesson.room, inner, 8.5), { size: 8.5, color: C.sub, lines: roomTwo ? 2 : 1, scale: 0.7 });
+  }
   chip.addSpacer();
 }
 
@@ -910,20 +933,24 @@ function fullChip(cell, C, lesson, { width, height, large, more }) {
   const showRoom = n >= 2 && hasRoom;
   const showTime = n >= (hasRoom ? 3 : 2);
   const showTeacher = large && n >= 6 && Boolean(lesson.teachers);
-  const nameLines = Math.max(1, Math.min(3, n - showTime - showRoom - showTeacher));
+  const nameMax = Math.max(1, Math.min(3, n - showTime - showRoom - showTeacher));
+  const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
+  // 课名写全之后还剩一行：教室分两行写全（楼名 / 编号），不再缩成编号
+  const need = Math.min(nameMax, linesNeeded(name, width - 6, large ? 10 : 9));
+  const roomTwo = showRoom && n - showTime - showRoom - showTeacher - need >= 1 ? splitRoom(lesson.room, width - 6, large ? 8.5 : 8) : null;
+  const nameLines = roomTwo ? need : nameMax;
   if (showTime) {
     const when = width >= 46 ? `${lesson.start}–${lesson.end}` : lesson.start;
     addText(chip, lesson.changed ? `${when} 调` : when, {
       size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), scale: 0.7,
     });
   }
-  const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
   addText(chip, name, {
     size: large ? 10 : 9, weight: "semibold", color: lesson.changed ? C.warn : C.text, lines: nameLines, scale: 0.6,
   });
   if (showRoom) {
-    const room = fitRoom(lesson.room, width - 6, large ? 8.5 : 8);
-    addText(chip, roomText(lesson, room), { size: large ? 8.5 : 8, color: C.sub, lines: n >= 7 ? 2 : 1, scale: 0.7 });
+    const room = roomTwo || fitRoom(lesson.room, width - 6, large ? 8.5 : 8);
+    addText(chip, roomText(lesson, room), { size: large ? 8.5 : 8, color: C.sub, lines: (roomTwo ? 2 : 1) + (n >= 7 ? 1 : 0), scale: 0.7 });
   }
   if (showTeacher) addText(chip, lesson.teachers, { size: 8.5, color: C.faint, scale: 0.7 });
   chip.addSpacer();
@@ -1304,7 +1331,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, widgetSizeFor, fullLayout, fitRoom, splitRoom, linesNeeded, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {

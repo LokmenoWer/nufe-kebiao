@@ -240,6 +240,15 @@ test("窄格子里的教室去掉楼名只留编号；放得下或编号没有�
   assert.equal(W.fitRoom("", 31, 8.5), "");
 });
 
+test("教室拆成楼名 / 编号两行；课名按列宽估行数", () => {
+  assert.equal(W.splitRoom("德业楼Z4-106", 31, 8.5), "德业楼\nZ4-106");
+  assert.equal(W.splitRoom("德业楼Z4-106", 60, 8.5), null); // 一行放得下
+  assert.equal(W.splitRoom("食工楼203", 10, 8.5), null);    // 拆不开
+  assert.equal(W.linesNeeded("财务审计", 31, 10), 2);
+  assert.equal(W.linesNeeded("创新创业实践：财会", 31, 10), 3);
+  assert.equal(W.linesNeeded("体育", 31, 10), 1);
+});
+
 test("只有下午、晚上有课的一周（大号）：教室写全编号，行高铺满", async () => {
   const D = (date, weekday, lessons) => day(date, weekday, lessons, 9);
   const week = { week: 9, monday: "2026-11-02", days: [
@@ -254,7 +263,14 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   const { widget } = await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
   assert.ok(t.includes("周六") && !t.includes("周日"), t.join("|"));
-  for (const room of ["Z3-117", "Z4-106", "Z4-108", "Z1-101", "JA108", "Z2S206"]) assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
+  // 只有三行，格子够高：教室分两行写全
+  for (const room of ["德正楼\nZ3-117", "德业楼\nZ4-106", "德经楼\nZ1-101", "博文楼\nJA108", "德济楼\nZ2S206"]) {
+    assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
+  }
+  // 周日也有课（7 列）：仍然写全
+  const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
+  const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
+  for (const room of ["德业楼\nZ4-106", "博远楼\nJC105"]) assert.ok(seven.includes(room), `${room}: ${seven.join("|")}`);
 });
 
 test("上午到晚上排满的一周：两节小课在本周和铺满模式里都写教室", async () => {
