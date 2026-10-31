@@ -383,9 +383,15 @@
 }
 
 @media (max-width: 420px) {
-  .week-grid { grid-template-columns: 28px repeat(var(--days, 7), minmax(0, 1fr)); }
+  .week-grid {
+    --lesson-inset: 1px;
+    grid-template-columns: 28px repeat(var(--days, 7), minmax(0, 1fr));
+  }
   .week-day-name { font-size: 10px; }
+  .lesson-block { padding: 3px 1px 3px 3px; }
   .lesson-name { font-size: 10px; }
+  /* 周末也有课时一列只有 ~38px：楼名、房间号各占一行，别把房间号截掉 */
+  .lesson-room { font-size: 8.5px; letter-spacing: -0.02em; -webkit-line-clamp: 3; }
   .day-tab { padding: 6px 0 9px; }
   .day-tab-date { font-size: 13px; }
 }
