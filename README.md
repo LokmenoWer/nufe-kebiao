@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **两种登录方式**：账号密码 / 学校统一身份认证扫码。图形验证码与短信二次认证只转交给真人填写，程序不识别、不绕过。
+- **两种登录方式**：账号密码 / 学校统一身份认证扫码。学校的人机验证（图形验证码、滑块拼图）和二次认证（短信、动态口令）只转交给真人完成，程序不识别、不代拖、不绕过。
 - **周视图 + 日视图**：当前时间线、正在上课进度、下一节提示、今天跳转、按周/日深链接；手机上周视图可横向滚动，时间轴固定在左侧。
 - **现代前端**：无构建步骤的 ES modules，原生 `dialog` / `popover` / `color-mix`，浅色/深色/跟随系统，移动端底部抽屉设置页。
 - **后台刷新**：按用户自选时段串行刷新，失败指数退避；登录态过期、验证码、二次认证会在界面顶部提示并暂停自动重试。
@@ -48,7 +48,7 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY
 .venv/bin/python scripts/demo_server.py   # http://localhost:8765
 ```
 
-用 `examples/sample_timetable.json`（脱敏示例数据）跑完整前端：账号密码登录填**任意学号 + 密码 `demo`**；扫码登录点“显示二维码”，几秒后自动“确认”。适合改前端时使用。演示模式的登录限速已放宽，不会误挡反复调试。
+用 `examples/sample_timetable.json`（脱敏示例数据）跑完整前端：账号密码登录填**任意学号 + 密码 `demo`**；扫码登录点“显示二维码”，几秒后自动“确认”。密码填 `captcha` / `slider` / `sms` / `otp` 可分别演示图形验证码（填 abcd）、滑块拼图、短信和动态口令二次认证。适合改前端时使用。演示模式的登录限速已放宽，不会误挡反复调试。
 
 ### 3. 测试
 
@@ -116,9 +116,15 @@ deploy/deploy.sh
 1. `GET /student/for-std/course-table`：未登录时**先落到教务自己的 `/student/login`**，不会直接跳 CAS。
 2. `GET /student/sso/login` → 302 到 `authserver/login?service=https://jwxt.nufe.edu.cn/student/sso/login`。这个 URL 就是 POST 的 action。
 3. 从 `#pwdFromId` 表单取 `pwdEncryptSalt` / `execution` / `lt`（页面上有 5 个表单，`execution` 一般是 `e1s1`）。
-4. `checkNeedCaptcha.htl`：需要验证码就直接进入 `captcha` 阶段，停止自动重试，不尝试绕过。
+4. `checkNeedCaptcha.htl`：需要验证码就停下来交给用户，不尝试绕过。用哪种验证看登录页的 `captchaSwitch`：
+   - `1` 图形验证码 → `captcha` 阶段：`getCaptcha.htl` 的图片原样给用户，用户填写后随表单提交；
+   - `2` 滑块拼图 → `slider` 阶段（复刻 `ids-sliderCaptcha.js` / `longbow.slidercaptcha.js`）：`common/openSliderCaptcha.htl` 返回背景图和拼图条，网页按学校插件同样的 280×155 尺寸显示，**由用户本人拖动**；记录的位移与轨迹（采样规则与插件一致，坐标换算回 280 宽）用小图末尾附带的 16 位密钥加密成 `sign`，POST `common/verifySliderCaptcha.htl`，`errorCode=1` 后再提交账号密码。每张图只校验一次，失败自动换图。签名密钥只留在服务端。
 5. POST 加密后的密码（`randomString(64)+pwd`，AES-CBC，key=salt，随机 IV 不回传）。
-6. 若落到二次认证页（`reAuthCheck` / `isMultifactor=true`）：`dynamicCode/getDynamicCodeByReauth.do` 发短信 → `reAuthCheck/reAuthSubmit.do`（`reAuthType=3`）提交验证码 → 再访问登录地址拿 ticket。接口路径优先从页面脚本里解析，且必须仍在 `authserver.nufe.edu.cn` 上。
+6. 若落到二次认证页（`reAuthCheck` / `isMultifactor=true`）：按页面判断方式——
+   - 短信（`reAuthType=3` 或有 `dynamicCode` 输入框）：`dynamicCode/getDynamicCodeByReauth.do` 发短信 → `reAuthCheck/reAuthSubmit.do` 提交 `dynamicCode`；
+   - 动态口令（有 `otpCode` 输入框，身份验证器 App）：直接把用户输入的口令放进 `otpCode` 提交；
+   - 其他方式（密保问题、邮箱、App 扫码确认等）本站暂不能转发：立即结束流程并告诉用户是哪种方式、可以改用扫码登录。
+   通过后再访问登录地址拿 ticket。接口路径优先从页面脚本里解析，且必须仍在 `authserver.nufe.edu.cn` 上。
 7. 拿到 `CASTGC` 后再访问一次课表页，解析 `personId` / `currentSemester`，最后调 `print-data`。
 
 **扫码登录**（复刻 `qrcode.js`）：`qrCode/getToken` 拿 uuid → `qrCode/getCode?uuid=` 取二维码图片 → 调度线程在上游节流下轮询 `qrCode/getStatus.htl`（1=已确认，2=已扫描，3=失效），前端每 2 秒只读本站内存 → 确认后按 `#qrLoginForm` 的字段 POST `login?display=qrLogin&service=…`，之后与账号密码登录一样（可能进入短信二次认证）。扫码登录不涉及密码，也不会改动用户已保存的凭据设置；学号从教务数据里取。单个流程前端最多询问 120 次，刷新二维码最多 10 次，且不会把 5 分钟的登录流程无限续期。
@@ -127,7 +133,7 @@ deploy/deploy.sh
 
 **学校登录态续期**：教务会话过期后，先用认证中心的 CASTGC（登录时勾了“记住我”）静默走一次 SSO 续期；只有 CASTGC 也失效、或认证中心要求短信二次认证时，才需要用户回来重新登录（存了密码的用户此时再用密码自动登录）。
 
-图形验证码和短信验证码都只**转发给真人填写**（CLI 里提示输入，网页上显示图片 / 短信输入框），程序不做识别或绕过。未完成的登录流程只放在内存里，5 分钟过期；每个流程最多发 3 次短信、尝试 5 次。后台刷新没有真人在场，遇到这两步会停止自动重试，并提示用户回来重新登录。
+所有人机验证和二次认证都只**转发给真人完成**（网页上显示图片 / 拼图 / 输入框；CLI 支持图形验证码、短信和动态口令，滑块请用网页），程序不做识别或绕过。未完成的登录流程只放在内存里，5 分钟过期；每个流程最多发 3 次短信、尝试 5 次。后台刷新没有真人在场，遇到这两步会停止自动重试，并提示用户回来重新登录。
 
 ## 凭据与安全设计
 
@@ -158,7 +164,7 @@ deploy/deploy.sh
 - 用户可在“设置”里自选每天最多 `MAX_USER_REFRESH_TIMES`（默认 3）个刷新整点，但只能从 `REFRESH_ALLOWED_HOURS` 里选；实际开始时间在该小时内随机偏移 0–45 分钟。不选则按默认间隔。
 - 网络/学校侧错误：指数退避（30min → 24h 封顶），连续 `REFRESH_MAX_FAILS` 次后在界面上提示。
 - 密码错误/登录态过期且未存密码：`needs_rebind`，停止自动重试，避免把账号刷到锁定。
-- 验证码：`captcha`，停止自动重试，提示用户去浏览器手动登录一次。
+- 验证码（图形或滑块）：`captcha`，停止自动重试，提示用户去浏览器手动登录一次。
 - **按学校的反应自适应放慢**：收到 429/503 时按 `Retry-After` 全站暂停（最长 10 分钟，未给则 30 秒）；5xx、超时、连接失败时在最小间隔上再加惩罚间隔，连续出错翻倍（最长 60 秒），恢复正常后逐步减半。暂停期间后台刷新直接让路，交互请求最多等 10 秒，再久就提示“学校服务器繁忙”。
 - 站点登录（每次都会打到 CAS）按 IP 10 次/15min、按学号 5 次/15min 限速。
 - 手动刷新：同一用户同时只能有一个在跑；两次之间至少隔 `MANUAL_REFRESH_MIN_GAP`（默认 20）秒；该学期课表 `MANUAL_REFRESH_FRESH_SECONDS`（默认 120）秒内刚同步过且状态正常时直接返回已存的课表，不再请求学校。后台刷新若发现有人正在登录或手动刷新，会让出这一轮。

@@ -40,6 +40,19 @@ def _login(flow: cas.LoginFlow) -> None:
                 if flow.stage != "captcha":
                     raise
                 print(f"[验证码] {e}，请重试", file=sys.stderr)
+        elif stage == "slider":
+            # 终端里没法拖动拼图；也不代替用户去拖
+            raise cas.CasError("统一身份认证要求滑块拼图验证，命令行无法完成，请改用网页登录")
+        elif stage == "mfa" and flow.reauth.get("method") == "otp":
+            while True:
+                code = input("请输入身份验证器 App 上的动态口令: ").strip()
+                if not code:
+                    continue
+                try:
+                    stage = flow.verify_sms(code)
+                    break
+                except cas.CasError as e:
+                    print(f"[动态口令] {e}", file=sys.stderr)
         elif stage == "mfa":
             phone = flow.reauth.get("phone") or "绑定的手机"
             input(f"需要短信二次认证，按回车向 {phone} 发送验证码…")
@@ -60,6 +73,8 @@ def _login(flow: cas.LoginFlow) -> None:
                     break
                 except cas.CasError as e:
                     print(f"[短信验证] {e}", file=sys.stderr)
+        else:
+            raise cas.CasError(f"登录停在了未知步骤：{stage}")
 
 
 def main() -> int:

@@ -234,7 +234,34 @@ def login_captcha_image(flow_id: str) -> tuple[bytes, str]:
         if p.captcha_fetches >= MAX_CAPTCHA_IMAGES:
             raise LoginRejected("验证码刷新次数过多，请重新登录")
         p.captcha_fetches += 1
-        return p.flow.captcha_image()
+        try:
+            return p.flow.captcha_image()
+        except cas.CasError as e:
+            raise LoginRejected(str(e)) from None
+
+
+def login_slider_challenge(flow_id: str) -> dict:
+    """换一张滑块拼图（失败后、或用户点“换一张”）。与图形验证码共用刷新次数上限。"""
+    p = _get_pending(flow_id)
+    with p.lock:
+        if p.flow.stage != "slider":
+            raise LoginRejected("当前不需要滑块验证")
+        if p.captcha_fetches >= MAX_CAPTCHA_IMAGES:
+            raise LoginRejected("验证码刷新次数过多，请重新登录")
+        p.captcha_fetches += 1
+        try:
+            return p.flow.slider_challenge()
+        except cas.CasError as e:
+            raise LoginRejected(str(e)) from None
+
+
+def login_submit_slider(flow_id: str, canvas_length: int, move_length, tracks: list[dict]) -> dict:
+    p = _get_pending(flow_id)
+    with p.lock:
+        if p.flow.stage != "slider":
+            raise LoginRejected("当前不需要滑块验证")
+        _count_attempt(p)
+        return _advance(p, lambda: p.flow.submit_slider(canvas_length, move_length, tracks))
 
 
 def login_cancel(flow_id: str) -> None:
@@ -265,7 +292,7 @@ def login_verify_sms(flow_id: str, code: str, trust_device: bool) -> dict:
     p = _get_pending(flow_id)
     with p.lock:
         if p.flow.stage != "mfa":
-            raise LoginRejected("当前不需要短信验证")
+            raise LoginRejected("当前不需要二次认证")
         _count_attempt(p)
         return _advance(p, lambda: p.flow.verify_sms(code, trust_device))
 
@@ -283,23 +310,31 @@ def _need(p: PendingLogin, error: str | None = None) -> dict:
     out = {"need": p.flow.stage, "flow_id": p.flow_id, "error": error}
     if p.flow.stage == "mfa":
         out["phone"] = p.flow.reauth.get("phone", "")
+        out["method"] = p.flow.reauth.get("method", "sms")
     if p.flow.stage == "qr":
         out["qr_status"] = p.flow.qr_status
     return out
 
 
+# 需要真人参与的步骤：出错时保留流程，让用户在原地重试
+_USER_STEPS = ("captcha", "slider", "mfa", "qr")
+
+
 def _advance(p: PendingLogin, step, stash: bool = False) -> dict:
     try:
         stage = step()
+    except cas.MfaUnsupported as e:
+        _drop(p)
+        raise LoginRejected(str(e)) from None
     except cas.CasError as e:
-        if p.flow.stage in ("captcha", "mfa", "qr"):
+        if p.flow.stage in _USER_STEPS:
             return _need(p, str(e))  # 验证码错了之类：留在当前步骤让用户重试
         _drop(p)
         raise LoginRejected(f"统一身份认证登录失败：{e}") from None
     except UpstreamCooldown as e:
         # 全站暂停访问学校期间：已经走到扫码 / 验证码 / 短信这一步的，保留流程让用户稍后继续
         msg = f"学校服务器繁忙，请约 {e.retry_after} 秒后再试"
-        if p.flow.stage in ("captcha", "mfa", "qr"):
+        if p.flow.stage in _USER_STEPS:
             return _need(p, msg)
         _drop(p)
         raise LoginRejected(msg) from None

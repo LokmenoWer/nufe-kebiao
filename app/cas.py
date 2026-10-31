@@ -1,13 +1,16 @@
 """南京财经大学统一身份认证（新版金智 CAS）登录。
 
 登录是一个可能需要用户参与的多步流程（LoginFlow）：
-    start → [captcha：把图片转给用户，用户填写] → submit → [mfa：发短信，用户填写验证码] → done
-图形验证码和短信验证码都只"转发"给真人填写，程序不做任何识别或绕过。
-后台刷新没有真人在场，遇到这两步分别抛 CaptchaRequired / MfaRequired。
+    start → [captcha：图形验证码 | slider：滑块拼图] → submit → [mfa：短信 / 动态口令二次认证] → done
+学校用哪种人机验证由登录页的 captchaSwitch 决定（1=图形验证码，2=滑块）。
+所有人机验证都只"转发"给真人完成：图片原样交给用户，滑块的拖动轨迹也来自用户本人的拖动，
+程序不做任何识别、不生成轨迹、不绕过。
+后台刷新没有真人在场，遇到这些步骤分别抛 CaptchaRequired / MfaRequired。
 """
 from __future__ import annotations
 
 import base64
+import json
 import re
 import secrets
 import time
@@ -45,6 +48,10 @@ class MfaRequired(CasError):
     """需要手机短信二次认证，而当前没有真人可以填写（后台刷新）。"""
 
 
+class MfaUnsupported(CasError):
+    """学校要求的二次认证方式本站无法转发（密保问题、邮箱、App 扫码确认等）。"""
+
+
 def new_device_id() -> str:
     """本服务作为一台"设备"的标识，格式同页面 generateFingerPrint()（32 位大写 MD5 十六进制）。
 
@@ -61,10 +68,13 @@ def random_string(n: int) -> str:
 
 
 def encrypt_password(password: str, salt: str) -> str:
-    """复刻 encrypt.js：AES-CBC-Pkcs7(randomString(64)+pwd, key=salt, iv=randomString(16))。"""
+    """复刻 encrypt.js：AES-CBC-Pkcs7(randomString(64)+pwd, key=salt, iv=randomString(16))。
+
+    滑块验证的 sign 也用同一个函数加密（key 换成小图末尾的 16 个字符）。
+    """
     key = salt.strip().encode()
     if len(key) not in (16, 24, 32):
-        raise CasError("登录页加密参数异常（pwdEncryptSalt 长度不正确）")
+        raise CasError("登录页加密参数异常（密钥长度不正确）")
     iv = random_string(16).encode()
     padder = padding.PKCS7(128).padder()
     data = padder.update((random_string(64) + password).encode()) + padder.finalize()
@@ -107,6 +117,82 @@ def parse_login_form(html: str) -> dict[str, str]:
     if not salt or not execution:
         raise CasError("登录页结构异常：未找到 pwdEncryptSalt / execution")
     return {"salt": salt, "execution": execution, "lt": val(name="lt") or ""}
+
+
+def parse_captcha_switch(html: str) -> str:
+    """登录页里的 var captchaSwitch = "1"|"2"：1=图形验证码，2=滑块拼图。缺省按图形验证码处理。"""
+    m = re.search(r"""\bcaptchaSwitch\s*=\s*["']?(\d)""", html or "")
+    return m.group(1) if m else "1"
+
+
+# 学校滑块：背景 590×360 JPEG + 93×360 的拼图竖条 PNG；页面插件把两者拉伸到 280×155 画布上，
+# moveLength / canvasLength 都按这个 280 宽的坐标系上报。前端照同样的尺寸画，让用户本人拖。
+SLIDER_CANVAS_WIDTH = 280
+SLIDER_CANVAS_HEIGHT = 155
+_SLIDER_MAX_IMAGE = 512 * 1024
+_SLIDER_KEY = re.compile(rb"[0-9A-Za-z]{16}")
+
+
+def _sniff_image(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
+def parse_slider_challenge(payload) -> dict:
+    """openSliderCaptcha.htl 的 JSON → 两张图 + 签名密钥（小图末尾追加的 16 个字符，同 ids-sliderCaptcha.js）。"""
+    if not isinstance(payload, dict):
+        raise CasError("滑块验证码加载失败，请稍后再试")
+    images = {}
+    for key in ("bigImage", "smallImage"):
+        raw = payload.get(key)
+        if not isinstance(raw, str) or not raw or len(raw) > _SLIDER_MAX_IMAGE * 4 // 3 + 4:
+            raise CasError("滑块验证码加载失败，请稍后再试")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (ValueError, TypeError):
+            raise CasError("滑块验证码图片格式异常") from None
+        ctype = _sniff_image(data)
+        if not ctype:
+            raise CasError("滑块验证码图片格式异常")
+        images[key] = (data, ctype)
+    tail = images["smallImage"][0][-16:]
+    if not _SLIDER_KEY.fullmatch(tail):
+        raise CasError("滑块验证码格式与预期不符，请改用扫码登录")
+    return {"big": images["bigImage"], "small": images["smallImage"], "key": tail.decode("ascii")}
+
+
+def slider_sign(canvas_length: int, move_length, tracks: list[dict], key: str) -> str:
+    """与 longbow.slidercaptcha.js 的 verify 一致：encryptPassword(JSON.stringify({...}), key)。"""
+    body = {"canvasLength": canvas_length, "moveLength": move_length,
+            "tracks": [{"a": t["a"], "b": t["b"], "c": t["c"]} for t in tracks]}
+    return encrypt_password(json.dumps(body, separators=(",", ":")), key)
+
+
+def _has_input(soup: BeautifulSoup, name: str) -> bool:
+    return soup.find("input", attrs={"id": name}) is not None or soup.find("input", attrs={"name": name}) is not None
+
+
+def reauth_method(html: str, reauth_type: str) -> str:
+    """二次认证页要求的方式。只认得出、且只需用户输入一段代码的才转发：
+
+    sms = 短信验证码（reAuthType=3 或有 dynamicCode 输入框）；otp = 动态口令 / 身份验证器 App（otpCode 输入框）。
+    其余（密保问题、邮箱、App 扫码确认等）返回描述文字，由调用方提示用户换一种方式。
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    if _has_input(soup, "otpCode"):
+        return "otp"
+    if reauth_type == "3" or _has_input(soup, "dynamicCode"):
+        return "sms"
+    if _has_input(soup, "answer1") or "密保" in (html or ""):
+        return "密保问题"
+    if "邮箱" in (html or ""):
+        return "邮箱验证码"
+    if "扫码" in (html or "") or _has_input(soup, "uuid"):
+        return "App 扫码确认"
+    return f"未知方式（reAuthType={reauth_type or '?'}）"
 
 
 def parse_qr_form(html: str) -> dict[str, str]:
@@ -184,6 +270,7 @@ def parse_reauth_page(url: str, html: str) -> dict:
     info["userId"] = _reauth_param(html, "reAuthUserId")
     info["service"] = (_reauth_param(html, "service")
                        or (parse_qs(urlparse(url).query).get("service") or [""])[0])
+    info["method"] = reauth_method(html, info["reAuthType"])
     return info
 
 
@@ -192,10 +279,12 @@ class LoginFlow:
     session: requests.Session
     username: str
     password: str
-    stage: str = "init"            # init | captcha | qr | mfa | done
+    stage: str = "init"            # init | captcha | slider | qr | mfa | done | failed
     login_url: str = ""
     fields: dict = field(default_factory=dict)
     reauth: dict = field(default_factory=dict)
+    captcha_kind: str = "image"    # image | slider（来自登录页 captchaSwitch）
+    slider_key: str = ""           # 当前滑块挑战的签名密钥；每张图只能用一次
     sms_ready_at: float = 0.0
     device_id: str = field(default_factory=new_device_id)
     qr_uuid: str = ""
@@ -253,10 +342,14 @@ class LoginFlow:
         if html is None:
             return self.stage
         self.fields = parse_login_form(html)
+        self.captcha_kind = "slider" if parse_captcha_switch(html) == "2" else "image"
         if need_captcha(self.session, self.username):
-            self.stage = "captcha"
+            self.stage = self._captcha_stage()
             return self.stage
         return self.submit("")
+
+    def _captcha_stage(self) -> str:
+        return "slider" if self.captcha_kind == "slider" else "captcha"
 
     # ---- 扫码登录（复刻 qrcode.js）：二维码交给用户用手机扫，程序只轮询状态 ----
     def start_qr(self) -> str:
@@ -354,6 +447,37 @@ class LoginFlow:
             raise CasError("获取验证码图片失败")
         return r.content, ctype
 
+    def slider_challenge(self) -> dict:
+        """取一张新的滑块拼图（同 ids-sliderCaptcha.js 的 openSliderCaptcha）。返回两张图，密钥留在服务端。"""
+        if self.stage != "slider":
+            raise CasError("当前不需要滑块验证")
+        r = self.session.get(f"{AUTH_BASE}/common/openSliderCaptcha.htl", params={"_": int(time.time() * 1000)},
+                             headers=_AJAX)
+        self._dump("slider", r)
+        try:
+            payload = r.json()
+        except ValueError:
+            raise CasError(f"滑块验证码加载失败（HTTP {r.status_code}）") from None
+        challenge = parse_slider_challenge(payload)
+        self.slider_key = challenge.pop("key")
+        return challenge
+
+    def submit_slider(self, canvas_length: int, move_length, tracks: list[dict]) -> str:
+        """把用户本人拖动的结果交给学校校验；通过后照常提交账号密码。"""
+        if self.stage != "slider" or not self.slider_key:
+            raise CasError("滑块验证已失效，请重新拖动")
+        key, self.slider_key = self.slider_key, ""  # 一张图只校验一次，失败就换图
+        r = self.session.post(f"{AUTH_BASE}/common/verifySliderCaptcha.htl",
+                              data={"sign": slider_sign(canvas_length, move_length, tracks, key)}, headers=_AJAX)
+        self._dump("slider-verify", r)
+        try:
+            ok = r.json().get("errorCode") == 1
+        except (ValueError, AttributeError):
+            ok = False
+        if not ok:
+            raise CasError("拼图没有对齐，请再试一次")
+        return self.submit("")
+
     def submit(self, captcha: str) -> str:
         r = self.session.post(self.login_url, data={
             "username": self.username,
@@ -370,10 +494,11 @@ class LoginFlow:
 
         if is_auth_login_url(r.url):
             tip = parse_error_tip(r.text)
-            if "验证码" in tip:
-                # 验证码错误或新触发：页面已刷新 execution/salt，回到 captcha 阶段让用户重填
+            if "验证码" in tip or "安全验证" in tip:
+                # 验证码错误或新触发：页面已刷新 execution/salt，回到验证码阶段让用户重做
                 self.fields = parse_login_form(r.text)
-                self.stage = "captcha"
+                self.captcha_kind = "slider" if parse_captcha_switch(r.text) == "2" else self.captcha_kind
+                self.stage = self._captcha_stage()
                 raise CasError(tip)
             raise CasError(tip)
         return self._after_login_post(r)
@@ -382,6 +507,13 @@ class LoginFlow:
         """账号密码与扫码登录提交后的共同处理：可能进入短信二次认证，否则完成。"""
         if is_reauth_page(r.url, r.text):
             self.reauth = parse_reauth_page(r.url, r.text)
+            method = self.reauth["method"]
+            if method not in ("sms", "otp"):
+                self.stage = "failed"
+                self.wipe_password()
+                raise MfaUnsupported(
+                    f"学校要求用「{method}」完成二次认证，本站暂不能转发。可以改用扫码登录，"
+                    "或先在学校官网用这台设备完成一次认证并选择信任设备后再试")
             self.stage = "mfa"
             return self.stage
         return self._finish()
@@ -389,8 +521,8 @@ class LoginFlow:
     def send_sms(self) -> str:
         if self.stage != "mfa":
             raise CasError("当前不需要短信验证")
-        if self.reauth.get("reAuthType") != "3":
-            raise CasError(f"学校要求的二次认证方式不是短信（reAuthType={self.reauth.get('reAuthType')}），暂不支持")
+        if self.reauth.get("method") != "sms":
+            raise CasError("这次二次认证不需要短信，请直接输入身份验证器 App 上的动态口令")
         wait = int(self.sms_ready_at - time.time())
         if wait > 0:
             raise CasError(f"请 {wait} 秒后再重新发送")
@@ -410,19 +542,21 @@ class LoginFlow:
         raise CasError(msg or f"发送短信失败：{j.get('res')}")
 
     def verify_sms(self, code: str, trust_device: bool = True) -> str:
+        """短信验证码或动态口令（otp）：两者都只是用户输入的一段代码，按页面要求放进对应字段。"""
         if self.stage != "mfa":
-            raise CasError("当前不需要短信验证")
+            raise CasError("当前不需要二次认证")
+        otp = self.reauth.get("method") == "otp"
         # 字段与 reAuth.js 的 loginParams 完全一致；skipTmpReAuth=true 即页面上的"信任此设备"
         r = self.session.post(self.reauth["submit_url"], data={
             "service": self.reauth.get("service", ""),
             "reAuthType": self.reauth.get("reAuthType", "3"),
             "isMultifactor": self.reauth.get("isMultifactor", "true"),
             "password": "",
-            "dynamicCode": code.strip(),
+            "dynamicCode": "" if otp else code.strip(),
             "uuid": "",
             "answer1": "",
             "answer2": "",
-            "otpCode": "",
+            "otpCode": code.strip() if otp else "",
             "skipTmpReAuth": "true" if trust_device else "false",
         }, headers=_AJAX)
         self._dump("verify-sms", r)
@@ -431,12 +565,12 @@ class LoginFlow:
         except ValueError:
             raise CasError(f"短信验证失败（HTTP {r.status_code}）") from None
         if j.get("code") in ("reAuth_failed", "reAuth_unauthorized"):
-            raise CasError(j.get("msg") or "短信验证码错误")
+            raise CasError(j.get("msg") or ("动态口令错误" if otp else "短信验证码错误"))
         # 与页面行为一致：通过后访问 /login?service=...，CAS 直接签发 ticket 回跳教务
         r = self.session.get(f"{AUTH_BASE}/login", params={"service": self.reauth.get("service", "")})
         self._dump("after-mfa", r)
         if is_reauth_page(r.url, r.text):
-            raise CasError("短信验证未通过，请重新获取验证码")
+            raise CasError("动态口令验证未通过，请重试" if otp else "短信验证未通过，请重新获取验证码")
         return self._finish()
 
     def _finish(self) -> str:
@@ -512,7 +646,7 @@ def login(session: requests.Session, username: str, password: str, device_id: st
     if flow.course_html:
         session.kebiao_course_html = flow.course_html
     flow.wipe_password()
-    if stage == "captcha":
-        raise CaptchaRequired("统一身份认证要求图形验证码，需要你本人在网页上重新登录一次")
+    if stage in ("captcha", "slider"):
+        raise CaptchaRequired("统一身份认证要求人机验证，需要你本人在网页上重新登录一次")
     if stage == "mfa":
         raise MfaRequired("统一身份认证要求手机短信二次认证，需要你本人在网页上重新登录一次")

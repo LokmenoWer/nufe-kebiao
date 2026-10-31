@@ -398,3 +398,56 @@ def test_renew_with_tgc_needs_castgc():
     import requests
     # 没有 CASTGC 时直接返回 False，不发任何请求
     assert cas.renew_with_tgc(requests.Session()) is False
+
+
+# ---------- 人机验证解析 ----------
+
+def _png(extra=b""):
+    return b"\x89PNG\r\n\x1a\n" + b"\x00" * 20 + b"IEND\xaeB`\x82" + extra
+
+
+def test_captcha_switch_parsing():
+    assert cas.parse_captcha_switch('var captchaSwitch = "2";') == "2"
+    assert cas.parse_captcha_switch("var captchaSwitch = '1';") == "1"
+    assert cas.parse_captcha_switch("no switch here") == "1"
+
+
+def test_slider_challenge_parsing():
+    key = b"ZQ11W42KhOPNAkYE"
+    payload = {"bigImage": base64.b64encode(b"\xff\xd8\xff\xe0 jpeg").decode(),
+               "smallImage": base64.b64encode(_png(key)).decode(), "tagWidth": 93, "yHeight": 0}
+    c = cas.parse_slider_challenge(payload)
+    assert c["key"] == key.decode() and c["big"][1] == "image/jpeg" and c["small"][1] == "image/png"
+    # 没有追加密钥 / 不是位图 / 不是 base64：都拒绝
+    for bad in ({**payload, "smallImage": base64.b64encode(_png()).decode()},
+                {**payload, "bigImage": base64.b64encode(b"<svg onload=alert(1)>").decode()},
+                {**payload, "bigImage": "%%%"}, "not a dict"):
+        try:
+            cas.parse_slider_challenge(bad)
+        except cas.CasError:
+            pass
+        else:
+            raise AssertionError(f"should reject {str(bad)[:40]}")
+
+
+def test_slider_sign_matches_page_plugin():
+    """sign = AES-CBC(randomString(64) + JSON.stringify({...}), key)；服务端丢掉前 64 字符即可，IV 不影响。"""
+    import json as _json
+    key = "ZQ11W42KhOPNAkYE"
+    tracks = [{"a": 0, "b": 0, "c": 0}, {"a": 12.5, "b": -1, "c": 40}, {"a": 120, "b": 3, "c": 260}]
+    sign = cas.slider_sign(280, 120, tracks, key)
+    raw = base64.b64decode(sign)
+    dec = Cipher(algorithms.AES(key.encode()), modes.CBC(b"\0" * 16)).decryptor()
+    unpad = padding.PKCS7(128).unpadder()
+    text = (unpad.update(dec.update(raw) + dec.finalize()) + unpad.finalize()).decode("utf-8", "replace")
+    body = text[64:]
+    assert body == '{"canvasLength":280,"moveLength":120,"tracks":[{"a":0,"b":0,"c":0},{"a":12.5,"b":-1,"c":40},{"a":120,"b":3,"c":260}]}'
+    assert _json.loads(body)["moveLength"] == 120
+
+
+def test_reauth_method_detection():
+    assert cas.reauth_method('<input id="dynamicCode">', "3") == "sms"
+    assert cas.reauth_method('<input id="otpCode" name="otpCode">', "5") == "otp"
+    assert cas.reauth_method('<input name="answer1"><input name="answer2">', "6") == "密保问题"
+    assert cas.reauth_method("请输入邮箱验证码", "4") == "邮箱验证码"
+    assert "reAuthType=9" in cas.reauth_method("<p>?</p>", "9")

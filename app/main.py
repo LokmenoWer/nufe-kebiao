@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import crypto, db, scheduler, service
+from . import cas, crypto, db, scheduler, service
 from .config import (
     FORCE_HTTPS,
     MAX_USER_REFRESH_TIMES,
@@ -193,9 +193,26 @@ def _login_result(step, response: Response) -> dict:
         csrf = create_session(response, r["uid"], r.get("keep_login", False))
         set_device_hint(response, r["uid"])
         return {"ok": True, "csrf": csrf}
-    if r["need"] == "captcha":
-        r["captcha_image"] = _captcha_data_url(r["flow_id"])
+    try:
+        if r["need"] == "captcha":
+            r["captcha_image"] = _captcha_data_url(r["flow_id"])
+        elif r["need"] == "slider":
+            # 学校校验一次就作废这张图：每次需要滑块都换新的
+            r["slider"] = _slider_payload(r["flow_id"])
+    except service.LoginRejected as e:
+        raise HTTPException(400, str(e)) from None
     return {"ok": False, **r}
+
+
+def _slider_payload(flow_id: str) -> dict:
+    c = service.login_slider_challenge(flow_id)
+    (big, big_type), (small, small_type) = c["big"], c["small"]
+    return {
+        "background": f"data:{big_type};base64,{base64.b64encode(big).decode()}",
+        "piece": f"data:{small_type};base64,{base64.b64encode(small).decode()}",
+        "width": cas.SLIDER_CANVAS_WIDTH,
+        "height": cas.SLIDER_CANVAS_HEIGHT,
+    }
 
 
 def _qr_data_url(flow_id: str) -> str:
@@ -259,6 +276,23 @@ class CaptchaIn(FlowIn):
     captcha: str = Field(min_length=1, max_length=16)
 
 
+class SliderTrackPoint(BaseModel):
+    a: float = Field(ge=-2000, le=2000)   # 相对按下点的横向位移
+    b: float = Field(ge=-2000, le=2000)   # 纵向位移
+    c: int = Field(ge=0, le=120_000)      # 距上一个采样点的毫秒数
+
+
+class SliderIn(FlowIn):
+    canvas_length: int = Field(ge=200, le=400)
+    move_length: float = Field(ge=0, le=400)
+    tracks: list[SliderTrackPoint] = Field(min_length=2, max_length=600)
+
+
+def _num(v: float):
+    # 浏览器的 JSON.stringify 不会写 “12.0”：整数按整数上报，和学校页面插件一致
+    return int(v) if float(v).is_integer() else v
+
+
 class SmsVerifyIn(FlowIn):
     code: str = Field(min_length=4, max_length=10)
     trust_device: bool = True
@@ -275,6 +309,26 @@ async def login_captcha_image(body: FlowIn):
     def run():
         try:
             return {"captcha_image": _captcha_data_url(body.flow_id)}
+        except service.LoginRejected as e:
+            raise HTTPException(400, str(e)) from None
+
+    return await _upstream_call(run)
+
+
+@app.post("/api/login/slider")
+async def login_slider(body: SliderIn, response: Response):
+    """用户本人在页面上拖动拼图的结果（位移 + 轨迹），原样签名后交给学校校验。"""
+    tracks = [{"a": _num(t.a), "b": _num(t.b), "c": t.c} for t in body.tracks]
+    return await _upstream_call(lambda: _login_result(
+        lambda: service.login_submit_slider(body.flow_id, body.canvas_length, _num(body.move_length), tracks),
+        response))
+
+
+@app.post("/api/login/slider/refresh")
+async def login_slider_refresh(body: FlowIn):
+    def run():
+        try:
+            return {"slider": _slider_payload(body.flow_id)}
         except service.LoginRejected as e:
             raise HTTPException(400, str(e)) from None
 

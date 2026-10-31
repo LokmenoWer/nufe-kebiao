@@ -1,8 +1,9 @@
-/** 登录视图：账号密码 / 扫码 / 图形验证码 / 短信二次认证。 */
+/** 登录视图：账号密码 / 扫码 / 图形验证码 / 滑块拼图 / 短信或动态口令二次认证。 */
 
 import { post } from "../api.js";
 import { h, on, replace } from "../dom.js";
 import { icon, REPO_URL } from "../icons.js";
+import { createSliderCaptcha } from "../components/slider-captcha.js";
 
 const INTRO = {
   pwd: "服务器代你登录统一身份认证，只读取课表。密码不会明文落库。",
@@ -143,7 +144,22 @@ export function mountLogin(root, { onSuccess } = {}) {
       h("button", { type: "button", class: "btn btn-ghost", onClick: () => backToForm() }, "返回")),
     captchaError);
 
-  // ---- 短信步骤 ----
+  // ---- 滑块步骤 ----
+  const sliderError = h("p", { class: "form-error", role: "alert", "aria-live": "assertive" });
+  const slider = createSliderCaptcha({
+    onRelease: (result) => submitSlider(result),
+    onRefresh: () => refreshSlider(),
+  });
+  const sliderPanel = h("div", { class: "auth-step", hidden: true },
+    h("div", { class: "step-heading" },
+      h("h2", {}, "安全验证"),
+      h("p", { class: "muted" }, "统一身份认证要求完成滑块拼图。拼图由你本人拖动，程序只转交结果，不会识别或代拖。")),
+    slider.el,
+    h("div", { class: "step-actions" },
+      h("button", { type: "button", class: "btn btn-ghost", onClick: () => backToForm() }, "返回")),
+    sliderError);
+
+  // ---- 二次认证步骤（短信 / 动态口令） ----
   const smsPhone = h("strong", {}, "绑定的手机");
   const smsCodeInput = h("input", {
     id: "sms-code", name: "code", type: "text", inputmode: "numeric", autocomplete: "one-time-code",
@@ -155,10 +171,10 @@ export function mountLogin(root, { onSuccess } = {}) {
   const smsTrust = h("input", { type: "checkbox", checked: "" });
   const smsInfo = h("p", { class: "form-hint", role: "status", "aria-live": "polite" });
   const smsError = h("p", { class: "form-error", role: "alert", "aria-live": "assertive" });
+  const mfaTitle = h("h2", {}, "短信二次认证");
+  const mfaDesc = h("p", { class: "muted" }, "验证码将发送到 ", smsPhone, "。");
   const smsPanel = h("form", { class: "auth-step", hidden: true, novalidate: "" },
-    h("div", { class: "step-heading" },
-      h("h2", {}, "短信二次认证"),
-      h("p", { class: "muted" }, "验证码将发送到 ", smsPhone, "。")),
+    h("div", { class: "step-heading" }, mfaTitle, mfaDesc),
     h("div", { class: "code-row" }, smsCodeInput, smsSendBtn),
     h("label", { class: "check" }, smsTrust, h("span", {}, "信任这台设备，之后减少短信验证")),
     h("div", { class: "step-actions" },
@@ -184,6 +200,7 @@ export function mountLogin(root, { onSuccess } = {}) {
     options,
     actions,
     captchaPanel,
+    sliderPanel,
     smsPanel,
     h("details", { class: "auth-note" },
       h("summary", {}, "安全与隐私"),
@@ -238,6 +255,7 @@ export function mountLogin(root, { onSuccess } = {}) {
     loginBtn.hidden = mode !== "pwd";
     qrStartBtn.hidden = !(formStage && mode === "qr" && qrFrame.hidden);
     captchaPanel.hidden = stage !== "captcha";
+    sliderPanel.hidden = stage !== "slider";
     smsPanel.hidden = stage !== "mfa";
     if (!formStage) setError("");
   }
@@ -276,6 +294,8 @@ export function mountLogin(root, { onSuccess } = {}) {
     setButtonLabel(smsSendBtn, "发送验证码");
     smsSendBtn.disabled = false;
     setStepError(captchaError, "");
+    setStepError(sliderError, "");
+    slider.reset();
     setStepError(smsError, "");
     smsInfo.textContent = "";
     setStage("form");
@@ -316,10 +336,19 @@ export function mountLogin(root, { onSuccess } = {}) {
       captchaInput.focus();
       return;
     }
+    if (result.need === "slider") {
+      flowId = result.flow_id;
+      setStage("slider");
+      if (result.slider) slider.load(result.slider);
+      else slider.reset();
+      setStepError(sliderError, result.error || "");
+      return;
+    }
     if (result.need === "mfa") {
       flowId = result.flow_id;
       stopPolling();
       setStage("mfa");
+      applyMfaMethod(result.method);
       smsPhone.textContent = result.phone || "绑定的手机";
       smsCodeInput.value = "";
       setStepError(smsError, result.error || "");
@@ -417,6 +446,53 @@ export function mountLogin(root, { onSuccess } = {}) {
     } finally {
       captchaRefreshBtn.disabled = false;
     }
+  }
+
+  // ---- 滑块 ----
+  async function submitSlider(result) {
+    if (!flowId) {
+      setStepError(sliderError, "登录流程已过期，请返回重新登录");
+      slider.fail();
+      return;
+    }
+    setStepError(sliderError, "");
+    try {
+      await handleResult(await post("api/login/slider", {
+        flow_id: flowId,
+        canvas_length: result.canvasLength,
+        move_length: result.moveLength,
+        tracks: result.tracks,
+      }));
+    } catch (error) {
+      slider.fail();
+      setStepError(sliderError, error.message);
+      if (/过期|过多/.test(error.message)) {
+        window.setTimeout(() => backToForm(), 1600);
+      }
+    }
+  }
+
+  async function refreshSlider() {
+    if (!flowId) return;
+    setStepError(sliderError, "");
+    try {
+      const result = await post("api/login/slider/refresh", { flow_id: flowId });
+      slider.load(result.slider);
+    } catch (error) {
+      setStepError(sliderError, error.message);
+    }
+  }
+
+  // ---- 二次认证 ----
+  function applyMfaMethod(method) {
+    const otp = method === "otp";
+    mfaTitle.textContent = otp ? "动态口令验证" : "短信二次认证";
+    mfaDesc.replaceChildren(...(otp
+      ? ["请打开已绑定的身份验证器 App，输入当前显示的动态口令。"]
+      : ["验证码将发送到 ", smsPhone, "。"]));
+    smsSendBtn.hidden = otp;
+    smsCodeInput.placeholder = otp ? "动态口令" : "短信验证码";
+    smsCodeInput.setAttribute("aria-label", otp ? "动态口令" : "短信验证码");
   }
 
   // ---- 短信 ----

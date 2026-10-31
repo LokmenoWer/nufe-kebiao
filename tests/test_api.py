@@ -29,6 +29,10 @@ class FakeUpstream:
         self.mfa = set()          # 后台登录时要求短信
         self.flow_captcha = set() # 交互登录时要求验证码
         self.flow_mfa = set()     # 交互登录时要求短信
+        self.flow_slider = set()  # 交互登录时要求滑块拼图
+        self.flow_otp = set()     # 二次认证方式是动态口令
+        self.flow_mfa_unsupported = set()  # 二次认证方式本站转发不了
+        self.slider_submissions = []
         self.sms_sent = 0
         self.devices = []
         self.qr = "waiting"       # waiting | scanned | expired | <学号>（= 该学号已在手机上确认）
@@ -85,6 +89,20 @@ class FakeFlow:
         if self.username in self.up.flow_captcha:
             self.stage = "captcha"
             return self.stage
+        if self.username in self.up.flow_slider:
+            self.stage = "slider"
+            return self.stage
+        return self.submit("")
+
+    def slider_challenge(self):
+        self.slider_key = "K" * 16
+        return {"big": (b"\xff\xd8\xff big", "image/jpeg"), "small": (b"\x89PNG small", "image/png")}
+
+    def submit_slider(self, canvas_length, move_length, tracks):
+        self.up.slider_submissions.append((canvas_length, move_length, tracks))
+        if not 100 <= move_length <= 110:
+            raise cas.CasError("拼图没有对齐，请再试一次")
+        self.up.flow_slider.discard(self.username)
         return self.submit("")
 
     def captcha_image(self):
@@ -120,7 +138,11 @@ class FakeFlow:
         if PASSWORDS.get(self.username) != self.password:
             self.stage = "init"
             raise cas.CasError("您提供的用户名或者密码有误")
+        if self.username in self.up.flow_mfa_unsupported:
+            self.stage = "failed"
+            raise cas.MfaUnsupported("学校要求用「密保问题」完成二次认证，本站暂不能转发")
         if self.username in self.up.flow_mfa:
+            self.reauth["method"] = "otp" if self.username in self.up.flow_otp else "sms"
             self.stage = "mfa"
             return self.stage
         return self._done()
@@ -249,6 +271,72 @@ def test_cookie_mode_expiry_needs_rebind(up):
     # 重新登录即恢复
     _login(c, "2023001")
     assert c.get("/api/me").json()["status"] == "ok"
+
+
+# ---------- 人机验证转发 ----------
+
+def _slider_drag(move=105):
+    return {"canvas_length": 280, "move_length": move,
+            "tracks": [{"a": 0, "b": 0, "c": 0}, {"a": 40, "b": 1, "c": 120}, {"a": move, "b": 2, "c": 300}]}
+
+
+def test_slider_captcha_forwarded_and_completes(up):
+    up.flow_slider.add("2023001")
+    c = TestClient(app)
+    r = _login(c, "2023001").json()
+    assert r["ok"] is False and r["need"] == "slider"
+    sl = r["slider"]
+    assert sl["width"] == 280 and sl["height"] == 155
+    assert sl["background"].startswith("data:image/jpeg;base64,") and sl["piece"].startswith("data:image/png;base64,")
+    assert "key" not in sl and "K" * 16 not in str(r)  # 签名密钥只留在服务端
+    # 拼歪了：留在滑块步骤，换一张新图
+    bad = c.post("/api/login/slider", headers=ORIGIN, json={"flow_id": r["flow_id"], **_slider_drag(30)}).json()
+    assert bad["need"] == "slider" and "对齐" in bad["error"] and bad["slider"]["piece"]
+    ok = c.post("/api/login/slider", headers=ORIGIN, json={"flow_id": r["flow_id"], **_slider_drag(105)}).json()
+    assert ok["ok"] is True
+    # 用户的拖动原样转交：整数保持整数
+    canvas, move, tracks = up.slider_submissions[-1]
+    assert canvas == 280 and move == 105 and isinstance(move, int) and tracks[-1] == {"a": 105, "b": 2, "c": 300}
+
+
+def test_slider_refresh_and_validation(up):
+    up.flow_slider.add("2023001")
+    c = TestClient(app)
+    fid = _login(c, "2023001").json()["flow_id"]
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": fid}).json()["slider"]["background"]
+    # 不合理的输入直接 422，不转给学校
+    for bad in ({**_slider_drag(), "canvas_length": 20}, {**_slider_drag(), "tracks": []},
+                {**_slider_drag(), "move_length": -5}):
+        assert c.post("/api/login/slider", headers=ORIGIN, json={"flow_id": fid, **bad}).status_code == 422
+    assert up.slider_submissions == []
+    # 不在滑块步骤时拒绝
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": "nope"}).status_code == 400
+
+
+def test_slider_refresh_limit(up):
+    up.flow_slider.add("2023001")
+    c = TestClient(app)
+    fid = _login(c, "2023001").json()["flow_id"]
+    codes = [c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": fid}).status_code
+             for _ in range(service.MAX_CAPTCHA_IMAGES + 1)]
+    assert codes[-1] == 400 and 200 in codes
+
+
+def test_otp_mfa_method_is_reported(up):
+    up.flow_mfa.add("2023001")
+    up.flow_otp.add("2023001")
+    c = TestClient(app)
+    r = _login(c, "2023001").json()
+    assert r["need"] == "mfa" and r["method"] == "otp"
+    ok = c.post("/api/login/sms/verify", headers=ORIGIN, json={"flow_id": r["flow_id"], "code": "123456"}).json()
+    assert ok["ok"] is True
+
+
+def test_unsupported_mfa_fails_with_clear_message(up):
+    up.flow_mfa_unsupported.add("2023001")
+    r = _login(TestClient(app), "2023001")
+    assert r.status_code == 400 and "密保问题" in r.json()["detail"]
+    assert not service._pending  # 流程已释放，不留密码在内存里
 
 
 def test_cookie_mode_expiry_renews_via_castgc(up):
