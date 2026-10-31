@@ -345,8 +345,14 @@ test("快上课时小组件会再请求一次刷新", async () => {
   assert.equal(once.requests.length, 1);
 });
 
+test("桌面刷新只画小组件，不排通知", async () => {
+  const run = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW });
+  assert.equal(run.notifications.scheduled.length, 0);
+  assert.ok(run.widget.texts().includes("概率论"));
+});
+
 test("上课提醒会写进系统通知；Parameter 0 关闭并清掉旧的", async () => {
-  const first = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW });
+  const first = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true });
   const english = first.notifications.scheduled.find((n) => n.title === "大学英语");
   assert.equal(english.subtitle, "10 分钟后上课");
   assert.equal(english.triggerDate.toISOString(), "2026-10-26T06:05:00.000Z");
@@ -355,12 +361,14 @@ test("上课提醒会写进系统通知；Parameter 0 关闭并清掉旧的", as
   assert.ok(!first.notifications.scheduled.some((n) => n.title === "概率论"));
 
   const again = await runWidgetScript({
-    payload: PAYLOAD, url: URL_OK, nowMs: NOW, pending: first.notifications.pending,
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, pending: first.notifications.pending, inApp: true,
   });
   assert.equal(again.notifications.scheduled.length, 0);
   assert.equal(again.notifications.removed.length, 0);
 
-  const custom = await runWidgetScript({ payload: PAYLOAD, parameter: "today 15", url: URL_OK, nowMs: NOW });
+  const custom = await runWidgetScript({
+    payload: PAYLOAD, parameter: "today 15", url: URL_OK, nowMs: NOW, inApp: true,
+  });
   const earlier = custom.notifications.scheduled.find((n) => n.title === "大学英语");
   assert.equal(earlier.subtitle, "15 分钟后上课");
   assert.equal(earlier.triggerDate.toISOString(), "2026-10-26T06:00:00.000Z");

@@ -14,12 +14,13 @@
  *   锁屏小组件同样可用：显示下一节课和倒计时。
  *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站。
  *   课表过期或快上课时，小组件会请服务器向学校拉取，标题栏显示“更新中”，大约两分钟后再画一次。
- *   上课提醒是本机通知。第一次运行脚本时允许 Scriptable 发通知；课表变了，下次刷新会改掉旧提醒。
+ *   上课提醒是本机通知，只在 Scriptable 里运行脚本时安排（小组件进程里排通知会被系统掐掉）。
+ *   第一次运行时允许 Scriptable 发通知；课表变了，再运行一次脚本就会改掉旧提醒。
  *
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
  */
 const WIDGET_URL = "__WIDGET_URL__";
-const SCRIPT_VERSION = "2026.11.02";
+const SCRIPT_VERSION = "2026.11.03";
 
 const TZ_OFFSET_MINUTES = 8 * 60; // 北京时间，学校课表按它算
 const STALE_SECONDS = 2 * 86400;  // 课表超过这么久没更新就提示
@@ -758,6 +759,11 @@ function remindSummary(leadMinutes, result, error) {
   return `上课提醒：提前 ${leadMinutes} 分钟，已安排 ${result.scheduled} 条`;
 }
 
+/** 桌面小组件进程。widgetFamily 有值就一定是小组件，避免只看 runsInWidget 漏判。 */
+function inWidget() {
+  return Boolean(config.runsInWidget || config.widgetFamily);
+}
+
 // ---------- 在 Scriptable 里直接运行：预览 / 更新 / 打开网站 ----------
 
 async function updateScript() {
@@ -837,14 +843,17 @@ async function main() {
   const { mode } = param;
   if (!/^https?:\/\//.test(WIDGET_URL)) {
     const widget = errorWidget("请从网站「设置 → 桌面小组件」复制脚本，里面会带上你的专属链接");
-    if (config.runsInWidget) Script.setWidget(widget);
+    if (inWidget()) Script.setWidget(widget);
     else await widget.presentMedium();
     return;
   }
   const result = await load();
-  if (config.runsInWidget) {
+  // 先把小组件交出去再结束。桌面进程里调用 Notification 经常不返回，
+  // 系统会杀掉脚本，桌面就留下 “Call Script.setWidget()”。
+  if (inWidget()) {
     Script.setWidget(result.error ? errorWidget(result.error)
       : buildWidget(result.data, { family, mode, offline: result.offline }));
+    return;
   }
   let remindNote = "";
   if (result.data) {
@@ -852,12 +861,9 @@ async function main() {
       const synced = await syncReminders(result.data, shanghaiNow(), param.remindMinutes, siteUrl());
       remindNote = remindSummary(param.remindMinutes, synced);
     } catch (e) {
-      // 小组件里系统可能还不让排通知：桌面照常显示，打开脚本时能看到原因
       remindNote = remindSummary(param.remindMinutes, null, e);
-      if (config.runsInWidget) remindNote = "";
     }
   }
-  if (config.runsInWidget) return;
   try {
     await inAppMenu(result, mode, remindNote);
   } catch (e) {
@@ -878,6 +884,8 @@ if (typeof ListWidget === "undefined") {
   };
 } else {
   main().catch((e) => {
-    if (config.runsInWidget) Script.setWidget(errorWidget(`出错了：${e && e.message ? e.message : e}`));
+    if (inWidget()) {
+      try { Script.setWidget(errorWidget(`出错了：${e && e.message ? e.message : e}`)); } catch (_) { /* 已经在收尾 */ }
+    }
   }).finally(() => Script.complete());
 }
