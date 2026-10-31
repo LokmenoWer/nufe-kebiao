@@ -36,6 +36,8 @@ const MAX_REDRAW_MS = 30 * 60000;      // 最长 30 分钟重画一次
 const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两分钟后再看
 const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
+const ROW_GAP_MINUTES = 60;            // 周视图：开始时间相差不到这么久的课排在同一行
+const SEGMENTS = [{ first: 0, label: "上午" }, { first: 12 * 60, label: "下午" }, { first: 18 * 60, label: "晚上" }];
 const MODE_ALIASES = {
   today: "today", 今天: "today", 今日: "today", "": "today",
   tomorrow: "tomorrow", 明天: "tomorrow", 明日: "tomorrow",
@@ -267,6 +269,47 @@ function weekColumns(block, now) {
       d.date === now.date),
     cancelled: d.date < now.date ? [] : cancelledOn(d, d.date === now.date ? now.minutes : -1),
   }));
+}
+
+function hm(minutes) {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/**
+ * 周视图的行：按上课时间对齐，而不是每天从第一格往下堆——
+ * 只有一节下午课的那天，这节课也画在下午那一行。
+ * 开始时间相差不到 ROW_GAP_MINUTES 的归一行（08:00 和 08:20 是同一大节），行标签取最早的那个；
+ * 行数放不下时退成上午 / 下午 / 晚上三行。
+ */
+function timeRows(columns, maxRows) {
+  const starts = new Set();
+  for (const col of columns) {
+    for (const x of [...(col.lessons || []), ...(col.cancelled || [])]) starts.add(toMinutes(x.start));
+  }
+  const rows = [];
+  for (const m of [...starts].sort((a, b) => a - b)) {
+    if (!rows.length || m - rows[rows.length - 1].first >= ROW_GAP_MINUTES) rows.push({ first: m, label: hm(m) });
+  }
+  if (rows.length <= maxRows) return rows;
+  return SEGMENTS.filter((seg, i) => [...starts].some((m) => m >= seg.first && (i === SEGMENTS.length - 1 || m < SEGMENTS[i + 1].first)));
+}
+
+function rowOf(rows, minutes) {
+  let index = 0;
+  rows.forEach((row, i) => { if (minutes >= row.first) index = i; });
+  return index;
+}
+
+/** { rows, cells }：cells[列][行] = { lessons, cancelled }。同一格里有两节（撞课）时都留着。 */
+function weekGrid(columns, maxRows) {
+  const rows = timeRows(columns, maxRows);
+  const cells = columns.map((col) => {
+    const out = rows.map(() => ({ lessons: [], cancelled: [] }));
+    for (const lesson of col.lessons || []) out[rowOf(rows, toMinutes(lesson.start))].lessons.push(lesson);
+    for (const c of col.cancelled || []) out[rowOf(rows, toMinutes(c.start))].cancelled.push(c);
+    return out;
+  });
+  return { rows, cells };
 }
 
 /** 画面上有没有调课 / 停课标记。 */
@@ -628,61 +671,98 @@ function renderSmall(widget, C, plan) {
   else if (others > 0) addText(widget, `之后还有 ${others} 节`, { size: 10, color: C.faint });
 }
 
+function weekChip(cell, C, lesson, { width, height, large, rowLabel, more = 0 }) {
+  const tint = new Color(lesson.color || "#4b63e0");
+  const chip = vstack(cell);
+  chip.size = new Size(width, height);
+  chip.setPadding(2, 4, 2, 2);
+  chip.cornerRadius = 5;
+  chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.18);
+  if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
+    chip.borderColor = lesson.state === "live" ? tint : C.warn;
+    chip.borderWidth = 1.5;
+  }
+  // 行标签已经写了时间；只有和标签不一样（同一大节里晚 20 分钟开始）或调过课时才在格子里再写
+  const timeNote = [lesson.start !== rowLabel ? lesson.start : "", lesson.changed ? "调" : ""].filter(Boolean).join(" ");
+  const lines = large ? 2 : height >= 28 ? 2 : 1;
+  if (timeNote && (large || height >= 28)) {
+    addText(chip, timeNote, { size: 8.5, weight: "semibold", color: lesson.changed ? C.warn : tint });
+  }
+  // 撞课：同一格里还有别的课，名字后面注“+1”
+  const name = `${lesson.name}${!large && height < 28 && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
+  addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
+  if (large && lesson.room && height >= 40) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
+  chip.addSpacer();
+}
+
+function cancelledChip(cell, C, c, { width, height }) {
+  const chip = vstack(cell);
+  chip.size = new Size(width, height);
+  chip.setPadding(2, 4, 2, 2);
+  chip.cornerRadius = 5;
+  chip.borderColor = C.warn;
+  chip.borderWidth = 1;
+  addText(chip, `停 ${c.name}`, { size: 9, weight: "medium", color: C.warn, lines: height >= 28 ? 2 : 1, scale: 0.6 });
+  chip.addSpacer();
+}
+
+/** 周视图：左边一列是上课时间，每天一列，课画在它开始时间那一行；没课的格子留空。 */
 function renderWeek(widget, C, columns, family, payload) {
   const large = family === "large" || family === "extraLarge";
-  const perDay = large ? 6 : 3;
+  const { rows, cells } = weekGrid(columns, large ? 7 : 5);
   // 中 / 大号内容区宽约 293（iPhone SE）~ 336pt：按窄的估，宁可留白也别被截断
   const width = family === "extraLarge" ? 680 : 296;
-  const colW = Math.floor((width - (columns.length - 1) * 4) / Math.max(columns.length, 1));
+  const axisW = 28;
+  const gap = 3;
+  const colW = Math.floor((width - axisW - columns.length * gap) / Math.max(columns.length, 1));
+  // 标题栏、星期行之外留给课程格的高度（中号约 100pt，大号约 300pt）
+  const avail = large ? 296 : 98;
+  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 56 : 32,
+    Math.floor((avail - Math.max(rows.length - 1, 0) * gap) / Math.max(rows.length, 1))));
   const base = siteUrl();
-  widget.addSpacer(8);
-  const row = widget.addStack();
-  row.spacing = 4;
-  row.topAlignContent();
+
+  widget.addSpacer(6);
+  const head = widget.addStack();
+  head.spacing = gap;
+  head.addSpacer(axisW);
   for (const col of columns) {
-    const stack = vstack(row);
-    stack.size = new Size(colW, 0);
-    stack.url = siteLink(base, payload, col);
-    const head = stack.addStack();
-    head.addSpacer();
-    addText(head, `周${WEEKDAY[col.weekday]}`, {
+    const cell = head.addStack();
+    cell.size = new Size(colW, 0);
+    cell.url = siteLink(base, payload, col);
+    cell.addSpacer();
+    addText(cell, `周${WEEKDAY[col.weekday]}`, {
       size: 11, weight: col.isToday ? "bold" : "medium", color: col.isToday ? C.accent : C.sub,
     });
-    head.addSpacer();
-    stack.addSpacer(4);
-    if (!col.lessons.length && !col.cancelled.length) {
-      const free = stack.addStack();
-      free.addSpacer();
-      addText(free, "—", { size: 11, color: C.faint });
-      free.addSpacer();
-    }
-    col.lessons.slice(0, perDay).forEach((lesson, i) => {
-      if (i) stack.addSpacer(3);
-      const tint = new Color(lesson.color || "#4b63e0");
-      const chip = vstack(stack);
-      chip.setPadding(3, 4, 3, 2);
-      chip.cornerRadius = 5;
-      chip.size = new Size(colW, 0);
-      chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.18);
-      if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
-        chip.borderColor = lesson.state === "live" ? tint : C.warn;
-        chip.borderWidth = 1.5;
-      }
-      addText(chip, lesson.changed ? `${lesson.start} 调` : lesson.start, {
-        size: 9, weight: "semibold", color: lesson.changed ? C.warn : tint,
-      });
-      addText(chip, lesson.name, { size: large ? 10 : 9.5, weight: "medium", color: C.text, lines: large ? 2 : 1 });
-      if (large && lesson.room) addText(chip, lesson.room, { size: 8.5, color: C.sub });
-    });
-    if (col.lessons.length > perDay) {
-      stack.addSpacer(2);
-      addText(stack, `+${col.lessons.length - perDay}`, { size: 9, color: C.faint });
-    }
-    for (const c of col.cancelled.slice(0, large ? 2 : 1)) {
-      stack.addSpacer(3);
-      addText(stack, `停 ${c.name}`, { size: 8.5, weight: "medium", color: C.warn });
-    }
+    cell.addSpacer();
   }
+  widget.addSpacer(4);
+
+  if (!rows.length) {
+    centered(widget, C, "这一周没有课", 12);
+    return;
+  }
+  rows.forEach((row, r) => {
+    if (r) widget.addSpacer(gap);
+    const line = widget.addStack();
+    line.spacing = gap;
+    line.topAlignContent();
+    const axis = vstack(line);
+    axis.size = new Size(axisW - gap, rowH);
+    addText(axis, row.label, { size: 8.5, weight: "medium", color: C.faint, scale: 0.7 });
+    axis.addSpacer();
+    columns.forEach((col, i) => {
+      const cell = vstack(line);
+      cell.size = new Size(colW, rowH);
+      cell.url = siteLink(base, payload, col);
+      const { lessons, cancelled } = cells[i][r];
+      const opts = { width: colW, height: rowH, large, rowLabel: row.label };
+      if (lessons.length) {
+        weekChip(cell, C, lessons[0], { ...opts, more: lessons.length - 1 });
+      } else if (cancelled.length) {
+        cancelledChip(cell, C, cancelled[0], opts);
+      }
+    });
+  });
   widget.addSpacer();
 }
 
@@ -980,7 +1060,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, timeRows, weekGrid, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {

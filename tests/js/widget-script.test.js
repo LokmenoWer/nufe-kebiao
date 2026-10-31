@@ -123,6 +123,29 @@ test("本周：没有周末课时只显示 5 天，今天高亮", () => {
   assert.equal(cols[1].lessons[0].state, "later");
 });
 
+test("本周：按上课时间分行，一天只有一节下午课也画在下午那一行", () => {
+  const cols = W.weekColumns(PAYLOAD.week, W.shanghaiNow(NOW));
+  const { rows, cells } = W.weekGrid(cols, 5);
+  assert.deepEqual([...rows.map((r) => r.label)], ["08:20", "10:00", "13:30"]);
+  const where = (i) => [...cells[i].map((cell) => cell.lessons.map((l) => l.name).join("/"))];
+  assert.deepEqual(where(0), ["高等数学", "概率论", ""]);  // 周一
+  assert.deepEqual(where(1), ["", "宏观经济学", ""]);       // 周二只有 10:00：不顶到第一格
+  assert.deepEqual(where(4), ["", "", "金融学"]);          // 周五只有下午一节
+  // 同一大节里晚 20 分钟开始的课归到同一行；停课也占它那一格
+  const mixed = [
+    { lessons: [{ name: "A", start: "08:00", end: "09:35" }], cancelled: [] },
+    { lessons: [{ name: "B", start: "08:20", end: "09:55" }], cancelled: [{ name: "C", start: "14:00", end: "15:35" }] },
+  ];
+  const g = W.weekGrid(mixed, 5);
+  assert.deepEqual([...g.rows.map((r) => r.label)], ["08:00", "14:00"]);
+  assert.equal(g.cells[1][0].lessons[0].name, "B");
+  assert.equal(g.cells[1][1].cancelled[0].name, "C");
+  // 行太多放不下：退成上午 / 下午 / 晚上
+  const busy = [{ lessons: ["08:00", "09:10", "10:20", "11:30", "13:00", "14:10", "19:00"].map((t, i) => ({ name: `课${i}`, start: t, end: t })), cancelled: [] }];
+  assert.deepEqual([...W.timeRows(busy, 5).map((r) => r.label)], ["上午", "下午", "晚上"]);
+  assert.equal(W.weekGrid([], 5).rows.length, 0);
+});
+
 // ---- 整个脚本在 Scriptable 替身里跑一遍 ----
 
 const URL_OK = "https://kb.example.com/widget/tok.json";
@@ -171,6 +194,8 @@ test("小号与锁屏也有倒计时", async () => {
 test("本周（大号）：每天一列，课程名和教室都在", async () => {
   const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "week", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
+  // 左边是时间轴：每行一个上课时间
+  assert.ok(t.includes("08:20") && t.includes("10:00") && t.includes("13:30"), t.join("|"));
   for (const label of ["周一", "周二", "周三", "周四", "周五"]) assert.ok(t.includes(label), label);
   assert.ok(!t.includes("周六"));
   assert.ok(t.includes("金融学") && t.includes("宏观经济学"));
