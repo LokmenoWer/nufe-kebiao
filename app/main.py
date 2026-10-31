@@ -494,6 +494,7 @@ def index():
     return HTMLResponse(_render_index(), headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/health")
 @app.get("/healthz")
 def healthz():
     return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})

@@ -747,6 +747,7 @@ def test_frontend_index_references_existing_assets(up):
 def test_healthz_and_unknown_api(up):
     c = TestClient(app)
     assert c.get("/healthz").json()["ok"] is True
+    assert c.get("/health").json()["ok"] is True
     r = c.get("/api/does-not-exist")
     assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
 
