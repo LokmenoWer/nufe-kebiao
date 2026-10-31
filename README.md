@@ -69,7 +69,7 @@ uv pip install -p .venv ruff         # 可选：Python 静态检查
 
 ```
 static/
-  index.html          # 模板（{{v}} 由后端替换为资源内容哈希）
+  index.html          # 模板（{{assets}} / {{modulepreload}} 由后端替换）
   css/
     tokens.css        # 颜色/圆角/阴影令牌 + 深色主题
     base.css          # 重置、按钮、表单、提示条、骨架屏
@@ -88,7 +88,7 @@ static/
 设计取舍：
 
 - **CSP 友好**：页面没有内联脚本/样式，所有 DOM 都用 `textContent` / `setAttribute` 创建；服务端 CSP 额外启用 `require-trusted-types-for 'script'`。
-- **无构建也能发版**：`/` 每次读取 `index.html`，把 `{{v}}` 替换成 `static/` 全部资源的内容哈希；入口 CSS/JS 带 `?v=`，模块 import 无法逐个带哈希，因此 `/static/` 统一 `Cache-Control: max-age=0, must-revalidate`（ETag 304 很便宜）。改完前端刷新即生效，不需要重启 Python。
+- **无构建也能发版**：`/` 每次读取 `index.html`，资源地址写成 `assets/<static/ 全部资源的内容哈希>/…`。版本号在路径里，模块之间的相对 import 自动带上同一版本，所以整套 CSS/JS 都是 `max-age=1年, immutable`，再次打开页面不发任何资源请求；页面里还会为全部模块加 `modulepreload`，首次访问并行下载而不是逐层瀑布。页面和资源走 gzip（`/api` 不压缩，避免 BREACH）。改完前端刷新即生效，不需要重启 Python；不带版本的 `/static/` 旧地址仍可用（可重新验证缓存），给部署前打开的页面兜底。
 - **深链接**：当前学期、周次、视图、日期写在 hash 里，刷新/分享不丢位置。例：
   - `#sem=161&w=8&view=week`
   - `#sem=161&w=8&view=day&d=2`
@@ -203,7 +203,7 @@ MAIL_FROM_NAME=南财课表
 
 - 同一账号可在多台设备同时登录，每人最多保留最近 8 个会话（`MAX_SESSIONS_PER_USER`）；设置里有“退出所有设备”。
 - 扫码登录的状态轮询跑在独立线程（`qr-pump`），不受后台刷新批次影响，`SCHEDULER_ENABLED=false` 时也照常工作。
-- `index.html` 不缓存，入口 CSS/JS 地址带整体内容哈希，`/static/` 使用可重新验证的缓存；部署后浏览器立刻使用新前端，模块文件也不会长期陈旧。
+- `index.html` 不缓存，全部 CSS/JS 地址路径里带整体内容哈希并长期缓存；部署后哈希变化，浏览器立刻使用新前端。
 
 ## 对学校服务器的节流
 
@@ -251,7 +251,7 @@ app/
   security.py   会话、CSRF、限速
   main.py       FastAPI 路由 + 安全响应头 + 静态资源版本
 static/
-  index.html    前端模板（{{v}} 由后端替换）
+  index.html    前端模板（{{assets}} 等由后端替换）
   css/          设计令牌、布局、课表、浮层
   js/           无构建 ES modules（见上文）
 tests/

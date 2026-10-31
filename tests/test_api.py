@@ -997,15 +997,16 @@ def test_frontend_index_references_existing_assets(up):
     from bs4 import BeautifulSoup
     c = TestClient(app)
     r = c.get("/")
-    assert r.status_code == 200 and "?v=" in r.text
+    assert r.status_code == 200 and "{{" not in r.text
     soup = BeautifulSoup(r.text, "html.parser")
     refs = [t["src"] for t in soup.find_all(src=True)] + [t["href"] for t in soup.find_all(href=True)]
-    local = [ref for ref in refs if ref.startswith("static/")]
-    assert local, "index.html 应该引用 static/ 下的前端资源"
+    local = [ref for ref in refs if ref.startswith("assets/")]
+    assert local, "index.html 应该引用 assets/<版本>/ 下的前端资源"
     for ref in local:
-        path, _, query = ref.partition("?")
-        assert query.startswith("v="), ref
-        assert c.get("/" + path).status_code == 200, path
+        assert c.get("/" + ref).status_code == 200, ref
+    # 所有模块都预加载，不用等 import 一层层解析
+    preloaded = {t["href"].split("/", 2)[2] for t in soup.find_all("link", rel="modulepreload")}
+    assert {"js/api.js", "js/views/timetable.js", "js/views/settings-email.js"} <= preloaded
     # CSP 不允许内联脚本/样式，页面里也不该有
     assert not soup.find_all("script", src=False)
     assert not soup.find_all("style")
@@ -1057,13 +1058,25 @@ def test_frontend_module_graph_and_security_hygiene(up):
             todo.append(target)
     assert len(seen) >= 10
 
+    from app.main import _asset_version
     c = TestClient(app)
-    css = c.get("/static/css/tokens.css")
-    assert css.status_code == 200 and "must-revalidate" in css.headers["cache-control"]
-    js = c.get("/static/js/main.js")
-    assert js.status_code == 200 and "must-revalidate" in js.headers["cache-control"]
+    ver = _asset_version()
+    css = c.get(f"/assets/{ver}/css/tokens.css")
+    assert css.status_code == 200 and "immutable" in css.headers["cache-control"]
+    js = c.get(f"/assets/{ver}/js/main.js", headers={"Accept-Encoding": "gzip"})
+    assert js.status_code == 200 and "immutable" in js.headers["cache-control"]
+    assert js.headers.get("content-encoding") == "gzip"
+    # 旧版本号拿到的是新文件，不能被长期缓存
+    assert "immutable" not in c.get("/assets/000000000000/js/main.js").headers["cache-control"]
+    # 部署前打开的页面仍用不带版本的旧地址
+    old = c.get("/static/js/main.js")
+    assert old.status_code == 200 and "must-revalidate" in old.headers["cache-control"]
+    for bad in ("index.html", "../app/main.py", "js/missing.js", ".gitignore"):
+        assert c.get(f"/assets/{ver}/{bad}").status_code == 404, bad
     html = c.get("/").text
-    assert "theme-init.js" in html and "static/js/main.js" in html
+    assert "theme-init.js" in html and f"assets/{ver}/js/main.js" in html
+    # /api 带 CSRF token，不压缩（防 BREACH）
+    assert "content-encoding" not in c.get("/api/me", headers={"Accept-Encoding": "gzip"}).headers
     assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html)
 
 

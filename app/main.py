@@ -16,6 +16,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import cas, crypto, db, mailer, notify, scheduler, service, widget
@@ -152,9 +154,26 @@ async def security_mw(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
     elif request.url.path.startswith("/static/"):
-        # 模块化前端的 import 语句无法逐个带 ?v=，用可重新验证的缓存保证部署后立刻生效
+        # 不带版本的旧地址（部署前打开的页面还会用到）：可重新验证，保证拿到的是新文件
         resp.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
     return resp
+
+
+class _CompressFrontend:
+    """只压缩页面和前端资源。/api 的响应里有 CSRF token，和用户输入一起压缩会给 BREACH 留口子。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if path == "/" or path.startswith(("/assets/", "/static/")):
+            return await self.gzip(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+app.add_middleware(_CompressFrontend)
 
 
 # ---------- 认证 ----------
@@ -730,13 +749,38 @@ def _asset_version() -> str:
 def _render_index() -> str:
     # 每次读模板（几 KB）但内容哈希按 mtime 缓存：本地改前端不用重启服务
     html = (STATIC / "index.html").read_text("utf-8")
-    return html.replace("{{v}}", _asset_version())
+    base = f"assets/{_asset_version()}"
+    # 一次列出全部模块，浏览器并行下载，不用等上一层 import 解析完才发现下一层
+    preload = "\n  ".join(
+        f'<link rel="modulepreload" href="{base}/{p.relative_to(STATIC).as_posix()}">'
+        for p in _static_files() if p.suffix == ".js" and p.relative_to(STATIC).parts[:1] == ("js",)
+        and p.name not in ("theme-init.js", "main.js"))
+    return html.replace("{{modulepreload}}", preload).replace("{{assets}}", base)
 
 
 @app.get("/")
 def index():
     # 静态资源 URL 带内容哈希；页面本身不缓存
     return HTMLResponse(_render_index(), headers={"Cache-Control": "no-cache"})
+
+
+_assets = StaticFiles(directory=STATIC)
+
+
+@app.get("/assets/{version}/{path:path}")
+async def versioned_asset(version: str, path: str, request: Request):
+    # 版本号放在路径里，模块之间的相对 import 自动带上同一个版本，整套资源都能长期缓存
+    if not path or path.rsplit("/", 1)[-1] == "index.html" or any(part.startswith(".") for part in path.split("/")):
+        return PlainTextResponse("Not Found", status_code=404)
+    try:
+        resp = await _assets.get_response(path, request.scope)
+    except StarletteHTTPException:
+        return PlainTextResponse("Not Found", status_code=404)
+    if resp.status_code in (200, 304):
+        # 版本对不上（部署前打开的旧页面）时给的是新文件，不能让它冒充旧版本被长期缓存
+        resp.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if version == _asset_version()
+                                         else "no-cache")
+    return resp
 
 
 @app.get("/health")
