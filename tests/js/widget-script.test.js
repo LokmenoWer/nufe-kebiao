@@ -267,16 +267,55 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   for (const room of ["德正楼\nZ3-117", "德业楼\nZ4-106", "德经楼\nZ1-101", "博文楼\nJA108", "德济楼\nZ2S206"]) {
     assert.ok(t.includes(room), `${room}: ${t.join("|")}`);
   }
-  // 大屏 6 列（列宽约 48pt）：“18:30–20:00”一行会被截断，统一分两行写全，不再有半截时间
-  assert.equal(W.timeFitsOneLine(42, 9), false);
-  assert.equal(W.timeFitsOneLine(47, 9), true);
+  // 大屏 6 列（列宽约 47pt）：“18:30–20:00”一行放不下，分两行写全，不再有“18:30–20:…”
   const big = (await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW, screen: { width: 440, height: 956 } })).widget.texts();
   for (const when of ["18:30–\n20:00", "13:30–\n14:55", "15:10–\n16:35"]) assert.ok(big.includes(when), `${when}: ${big.join("|")}`);
-  assert.ok(!big.some((x) => /^\d\d:\d\d–\d\d:\d\d/.test(x)), big.join("|"));
   // 周日也有课（7 列）：仍然写全
   const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
   const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
   for (const room of ["德业楼\nZ4-106", "博远楼\nJC105"]) assert.ok(seven.includes(room), `${room}: ${seven.join("|")}`);
+});
+
+test("卡片自适应：字号逐档试，课名、教室、起止时间都写全；放不下才缩字或分行", () => {
+  const sizes = { time: 9, name: 10, room: 8.5 };
+  const lesson = L("创新创业实践：财会视角", "13:30", "14:55", "德业楼Z4-102");
+  // 铺满模式里 85 分钟的格子（约 47×64pt）：原先课名只给两行、被系统缩成小字
+  const plan = W.chipPlan(lesson, lesson.name, { width: 47, height: 64, padV: 5, sizes });
+  assert.ok(plan.nameFull && plan.room === "Z4-102" && plan.time.includes("14:55"), JSON.stringify(plan));
+  assert.ok(plan.scale < 1); // 这么长的课名要缩一档字号才放得下
+  // 格子够高：不缩字，教室分两行写全
+  const tall = W.chipPlan(lesson, lesson.name, { width: 47, height: 110, padV: 5, sizes });
+  assert.equal(tall.scale, 1);
+  assert.ok(tall.nameFull && tall.room === "德业楼\nZ4-102", JSON.stringify(tall));
+  // 很矮的格子：先保课名和教室，时间让给左边的时间轴
+  const short = W.chipPlan(lesson, lesson.name, { width: 47, height: 26, padV: 5, sizes });
+  assert.ok(short.room && !short.time, JSON.stringify(short));
+  // 起止时间：一行放得下（字号最多小 20%）就写一行，否则分两行
+  assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 53, height: 90, padV: 4, sizes }).time, "18:30–20:00");
+  assert.equal(W.chipPlan(L("体育", "18:30", "20:00"), "体育", { width: 47, height: 90, padV: 4, sizes }).time, "18:30–\n20:00");
+});
+
+test("铺满（大号）：截图里那一周每节课的课名、教室、起止时间都在，时间轴不被截断", async () => {
+  const D = (date, weekday, lessons) => day(date, weekday, lessons, 9);
+  const lessons = [
+    [2, L("创新创业实践：财会视角", "13:30", "14:55", "德业楼Z4-102")], [2, L("财务审计", "15:10", "17:25", "德业楼Z4-116")],
+    [4, L("经济学前沿", "13:30", "14:55", "德经楼Z1-113")], [4, L("信用管理学", "15:10", "17:25", "博文楼JA205")],
+    [5, L("成本管理会计", "14:15", "16:35", "德济楼Z2-113")], [6, L("财务审计", "14:15", "16:35", "博文楼JA212")],
+    [1, L("中外古典园林史", "18:30", "20:50", "")],
+  ];
+  const dates = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-07", "2026-11-08"];
+  const week = { week: 9, monday: dates[0], days: dates.map((d, i) => D(d, i + 1, lessons.filter(([w]) => w === i + 1).map(([, l]) => l))) };
+  for (const screen of [{ width: 440, height: 956 }, { width: 393, height: 852 }]) {
+    for (const parameter of ["full", "week"]) {
+      const t = (await runWidgetScript({ payload: { ...PAYLOAD, week }, family: "large", parameter, url: URL_OK, nowMs: NOW, screen })).widget.texts();
+      const all = t.join("|");
+      for (const [, l] of lessons) {
+        assert.ok(t.includes(l.name), `${parameter} ${screen.width} ${l.name}: ${all}`);
+        assert.ok(t.some((x) => x.startsWith(l.start) && x.includes(l.end)), `${parameter} ${screen.width} ${l.start}–${l.end}: ${all}`);
+        if (l.room) assert.ok(t.some((x) => x.includes(l.room.replace(/^[^A-Za-z]+/, ""))), `${parameter} ${screen.width} ${l.room}: ${all}`);
+      }
+    }
+  }
 });
 
 test("上午到晚上排满的一周：两节小课在本周和铺满模式里都写教室", async () => {
