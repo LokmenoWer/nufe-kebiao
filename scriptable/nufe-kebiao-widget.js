@@ -671,7 +671,19 @@ function renderSmall(widget, C, plan) {
   else if (others > 0) addText(widget, `之后还有 ${others} 节`, { size: 10, color: C.faint });
 }
 
-function weekChip(cell, C, lesson, { width, height, large, rowLabel, more = 0 }) {
+/** 课程色做文字：深色模式下调亮一些，免得深蓝 / 深紫的时间在黑底上看不清。 */
+function mixHex(hex, other, t) {
+  const parse = (h) => [1, 3, 5].map((i) => parseInt(String(h).slice(i, i + 2), 16) || 0);
+  const [a, b] = [parse(hex), parse(other)];
+  return `#${a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function tintText(hex) {
+  const base = /^#[0-9a-f]{6}$/i.test(String(hex)) ? hex : "#4b63e0";
+  return Color.dynamic(new Color(base), new Color(mixHex(base, "#ffffff", 0.4)));
+}
+
+function weekChip(cell, C, lesson, { width, height, large, more = 0 }) {
   const tint = new Color(lesson.color || "#4b63e0");
   const chip = vstack(cell);
   chip.size = new Size(width, height);
@@ -682,16 +694,20 @@ function weekChip(cell, C, lesson, { width, height, large, rowLabel, more = 0 })
     chip.borderColor = lesson.state === "live" ? tint : C.warn;
     chip.borderWidth = 1.5;
   }
-  // 行标签已经写了时间；只有和标签不一样（同一大节里晚 20 分钟开始）或调过课时才在格子里再写
-  const timeNote = [lesson.start !== rowLabel ? lesson.start : "", lesson.changed ? "调" : ""].filter(Boolean).join(" ");
-  const lines = large ? 2 : height >= 28 ? 2 : 1;
-  if (timeNote && (large || height >= 28)) {
-    addText(chip, timeNote, { size: 8.5, weight: "semibold", color: lesson.changed ? C.warn : tint });
+  // 每张卡片顶上写自己的上课时间（大号写起止，中号格子够高时写开始），用课程色，一眼对上行
+  const showTime = large || height >= 30;
+  if (showTime) {
+    // 起止时间约需 46pt 宽；有周末课排成 7 列时放不下，只写开始
+    const when = large && width >= 46 ? `${lesson.start}–${lesson.end}` : lesson.start;
+    addText(chip, lesson.changed ? `${when} 调` : when, {
+      size: large ? 9 : 8.5, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), scale: 0.7,
+    });
   }
+  const lines = large ? (height >= 46 ? 2 : 1) : (!showTime && height >= 28 ? 2 : 1);
   // 撞课：同一格里还有别的课，名字后面注“+1”
-  const name = `${lesson.name}${!large && height < 28 && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
+  const name = `${lesson.name}${!showTime && lesson.changed ? "·调" : ""}${more ? ` +${more}` : ""}`;
   addText(chip, name, { size: large ? 10 : 9.5, weight: "medium", color: lesson.changed ? C.warn : C.text, lines, scale: 0.6 });
-  if (large && lesson.room && height >= 40) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
+  if (large && lesson.room && height >= 56) addText(chip, lesson.room, { size: 8.5, color: C.sub, scale: 0.7 });
   chip.addSpacer();
 }
 
@@ -715,9 +731,9 @@ function renderWeek(widget, C, columns, family, payload) {
   const axisW = 28;
   const gap = 3;
   const colW = Math.floor((width - axisW - columns.length * gap) / Math.max(columns.length, 1));
-  // 标题栏、星期行之外留给课程格的高度（中号约 100pt，大号约 300pt）
-  const avail = large ? 296 : 98;
-  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 56 : 32,
+  // 标题栏、星期行之外留给课程格的高度（中号约 100pt，大号约 310pt）
+  const avail = large ? 306 : 98;
+  const rowH = Math.max(large ? 26 : 16, Math.min(large ? 64 : 32,
     Math.floor((avail - Math.max(rows.length - 1, 0) * gap) / Math.max(rows.length, 1))));
   const base = siteUrl();
 
@@ -748,14 +764,14 @@ function renderWeek(widget, C, columns, family, payload) {
     line.topAlignContent();
     const axis = vstack(line);
     axis.size = new Size(axisW - gap, rowH);
-    addText(axis, row.label, { size: 8.5, weight: "medium", color: C.faint, scale: 0.7 });
+    addText(axis, row.label, { size: large ? 9.5 : 8.5, weight: "semibold", color: C.sub, scale: 0.7 });
     axis.addSpacer();
     columns.forEach((col, i) => {
       const cell = vstack(line);
       cell.size = new Size(colW, rowH);
       cell.url = siteLink(base, payload, col);
       const { lessons, cancelled } = cells[i][r];
-      const opts = { width: colW, height: rowH, large, rowLabel: row.label };
+      const opts = { width: colW, height: rowH, large };
       if (lessons.length) {
         weekChip(cell, C, lessons[0], { ...opts, more: lessons.length - 1 });
       } else if (cancelled.length) {

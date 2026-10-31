@@ -196,6 +196,12 @@ test("本周（大号）：每天一列，课程名和教室都在", async () =>
   const t = widget.texts();
   // 左边是时间轴：每行一个上课时间
   assert.ok(t.includes("08:20") && t.includes("10:00") && t.includes("13:30"), t.join("|"));
+  // 每张卡片顶上写自己的起止时间
+  assert.ok(t.includes("08:20–09:45") && t.includes("13:30–14:55"), t.join("|"));
+  // 有周末课（7 列）时格子太窄：只写开始时间
+  const weekend = { ...PAYLOAD, week: { ...PAYLOAD.week, days: PAYLOAD.week.days.map((d) => (d.weekday === 6 ? { ...d, lessons: [L("选修", "08:20", "09:45")] } : d)) } };
+  const seven = (await runWidgetScript({ payload: weekend, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
+  assert.ok(seven.includes("周日") && !seven.includes("08:20–09:45") && seven.includes("13:30"), seven.join("|"));
   for (const label of ["周一", "周二", "周三", "周四", "周五"]) assert.ok(t.includes(label), label);
   assert.ok(!t.includes("周六"));
   assert.ok(t.includes("金融学") && t.includes("宏观经济学"));
