@@ -337,9 +337,35 @@ function fillUnits(all) {
 }
 
 /**
- * 按真实时间：课的高度和时长成正比，一周里没人上课的时段压成 FULL_GAP。返回 y(分钟) → pt。
+ * 把一周的纵轴切成小段：segs[k] 是第 k 和 k+1 条分界线之间的一段，{ ideal } 按比例分高度，{ gap: true } 是固定的 FULL_GAP。
+ * 按时间（"time"）：一周里有课的时段合并成几块，块里每个开始 / 下课时刻是一条分界线，一段的 ideal 是它的分钟数；
+ * 按节次（"unit"）：用到的每一节是一段，ideal 都是 1；节号不连续或前后两节隔了半小时以上（午休、傍晚）的地方断开。
+ * 返回 { segs, startIdx(it), endIdx(it) }：一节课从哪条分界线画到哪条。
  */
-function timeScale(all, height) {
+function gridSegments(all, mode) {
+  const segs = [];
+  if (mode === "unit") {
+    const used = new Set();
+    const startOf = new Map();
+    const endOf = new Map();
+    for (const it of all) {
+      for (let u = it.units[0]; u <= it.units[1]; u += 1) used.add(u);
+      startOf.set(it.units[0], Math.min(startOf.get(it.units[0]) ?? Infinity, it.s));
+      endOf.set(it.units[1], Math.max(endOf.get(it.units[1]) ?? -Infinity, it.e));
+    }
+    const units = [...used].sort((a, b) => a - b);
+    const top = new Map();
+    const bottom = new Map();
+    units.forEach((u, i) => {
+      if (i > 0 && (u !== units[i - 1] + 1 || (startOf.has(u) && endOf.has(u - 1) && startOf.get(u) - endOf.get(u - 1) >= 30))) {
+        segs.push({ gap: true });
+      }
+      top.set(u, segs.length);
+      segs.push({ ideal: 1 });
+      bottom.set(u, segs.length);
+    });
+    return { segs, startIdx: (it) => top.get(it.units[0]), endIdx: (it) => bottom.get(it.units[1]) };
+  }
   const spans = all.map((it) => [it.s, it.e]).sort((a, b) => a[0] - b[0]);
   const blocks = [];
   for (const [s, e] of spans) {
@@ -347,70 +373,84 @@ function timeScale(all, height) {
     if (last && s <= last[1]) last[1] = Math.max(last[1], e);
     else blocks.push([s, e]);
   }
-  const total = blocks.reduce((sum, [s, e]) => sum + e - s, 0);
-  const scale = (height - (blocks.length - 1) * FULL_GAP) / total;
-  const y = (t) => {
-    let offset = 0;
-    for (const [s, e] of blocks) {
-      if (t <= e) return offset + Math.max(0, t - s) * scale;
-      offset += (e - s) * scale + FULL_GAP;
-    }
-    return offset - FULL_GAP;
-  };
-  return { top: (it) => y(it.s), bottom: (it) => y(it.e) };
+  const at = new Map();
+  blocks.forEach(([bs, be], i) => {
+    if (i > 0) segs.push({ gap: true });
+    const marks = [...new Set(all.flatMap((it) => [it.s, it.e]).filter((t) => t >= bs && t <= be))].sort((a, b) => a - b);
+    marks.forEach((t, j) => {
+      if (j > 0) segs.push({ ideal: t - marks[j - 1] });
+      at.set(t, segs.length);
+    });
+  });
+  return { segs, startIdx: (it) => at.get(it.s), endIdx: (it) => at.get(it.e) };
 }
 
 /**
- * 按节次：用到的每一节一样高，课从起始节画到结束节——和学校课表一个样子，两节课和四节课一眼分得出。
- * 节号不连续（中间那节一周都没课）或前后两节隔了半小时以上（午休、傍晚）的地方断开，空出 FULL_GAP。
+ * 摆分界线：每一段至少 t × 它按比例该占的高度，每节课至少它要的高度（need，写全它的字），
+ * 相邻两个时间轴标签之间至少 LABEL_H。从上往下逐条取下限（最长路径），返回每条分界线的 y。
  */
-function unitScale(all, height) {
-  const used = new Set();
-  const startOf = new Map();
-  const endOf = new Map();
-  for (const it of all) {
-    for (let u = it.units[0]; u <= it.units[1]; u += 1) used.add(u);
-    startOf.set(it.units[0], Math.min(startOf.get(it.units[0]) ?? Infinity, it.s));
-    endOf.set(it.units[1], Math.max(endOf.get(it.units[1]) ?? -Infinity, it.e));
-  }
-  const units = [...used].sort((a, b) => a - b);
-  const isBreak = (u, i) => i > 0 && (u !== units[i - 1] + 1
-    || (startOf.has(u) && endOf.has(u - 1) && startOf.get(u) - endOf.get(u - 1) >= 30));
-  const unitH = (height - units.filter(isBreak).length * FULL_GAP) / units.length;
-  const topOf = new Map();
-  let y = 0;
-  units.forEach((u, i) => {
-    if (isBreak(u, i)) y += FULL_GAP;
-    topOf.set(u, y);
-    y += unitH;
+function placeBounds(segs, cons, labelIdx, height, t) {
+  const gaps = segs.filter((s) => s.gap).length * FULL_GAP;
+  const ideal = segs.reduce((sum, s) => sum + (s.ideal || 0), 0);
+  const unit = ideal ? (height - gaps) / ideal : 0;
+  const ending = segs.map(() => []);
+  for (const c of cons) ending[c.b - 1].push(c);
+  const prevLabel = new Map(labelIdx.map((k, i) => [k, i ? labelIdx[i - 1] : -1]));
+  const y = [0];
+  segs.forEach((seg, k) => {
+    let v = y[k] + (seg.gap ? FULL_GAP : t * unit * seg.ideal);
+    for (const c of ending[k]) v = Math.max(v, y[c.a] + c.need);
+    const p = prevLabel.get(k + 1);
+    if (p !== undefined && p >= 0) v = Math.max(v, y[p] + LABEL_H);
+    y.push(v);
   });
-  return { top: (it) => topOf.get(it.units[0]), bottom: (it) => topOf.get(it.units[1]) + unitH, unitH };
+  // 最后一个标签下面也要放得下它自己
+  if (labelIdx.length) y[segs.length] = Math.max(y[segs.length], y[labelIdx[labelIdx.length - 1]] + LABEL_H);
+  return y;
 }
+
+/**
+ * 在 height 里摆得下就尽量按比例（t 越大越接近纯按比例），摆不下返回 null。
+ * 不给 need 时 t = 1，就是纯按比例。
+ */
+function solveBounds(segs, cons, labelIdx, height) {
+  const fits = (t) => placeBounds(segs, cons, labelIdx, height, t)[segs.length] <= height + 1e-6;
+  if (fits(1)) return placeBounds(segs, cons, labelIdx, height, 1);
+  if (!fits(0)) return null;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (fits(mid)) lo = mid;
+    else hi = mid;
+  }
+  return placeBounds(segs, cons, labelIdx, height, lo);
+}
+
+const DETAIL_LEVELS = 5; // chipPlan 的 level：0 全写（起止、课名、教室带楼名）… 4 只有课名第一行和教室
 
 /**
  * 周视图 / 铺满共用的版面。scale 为 "unit"（周视图，按节次）或 "time"（铺满，按真实时间）；
  * 有课没写节次又补不上时，按节次也退成按时间。
  * 两种都把课画在自己真实的起止位置：不再把开始时间相近的课并成一行，不撞课的课一节都不会被藏起来；
  * 真撞课（时间重叠）画不下第二张，记在前一张上（“+1”）。
- * 返回 { scale, labels: [{ top, text, unit }], cols: [[{ kind, item, top, height, more, labeled }]] }，单位 pt；
- * labeled 表示这节课的开始时间正好标在时间轴上它那一格旁边，卡片上可以不写。
+ *
+ * need(entry, fontScale, level) 给出一张卡片按某档字号写到某个详细程度要多高（pt，写不下返回 Infinity）。
+ * 给了 need 就按内容排：格子高度先保证每节课都写得全，剩下的高度再按比例（按节次 / 按时长）分——
+ * 两节的小课字多就多给点高度，四节的长课字少就少给点；同一节的分界线在各天还是对齐的，时间轴照样准。
+ * 依次试“全写”的 1 / 0.9 / 0.8 倍字号、再逐级少写（先省楼名，再省下课时间……），取第一个摆得下的；
+ * 全都摆不下（中号这种很矮的格子）才退回纯按比例，由卡片自己尽量写。
+ * 返回 { scale, level, fontScale, labels: [{ top, text, unit }], cols: [[{ kind, item, top, height, more, labeled }]] }，单位 pt；
+ * labeled 表示这节课的开始时间正好标在时间轴上它那一格旁边。
  */
-function gridLayout(columns, height, { scale = "time" } = {}) {
+function gridLayout(columns, height, { scale = "time", need } = {}) {
   const perCol = gridItems(columns);
   const all = perCol.flat();
   if (!all.length) return { scale, labels: [], cols: columns.map(() => []) };
   const mode = scale === "unit" && fillUnits(all) ? "unit" : "time";
-  const ys = mode === "unit" ? unitScale(all, height) : timeScale(all, height);
-  // 时间轴：每个不同的开始时间标在它那节课的顶上；挨得太近就省掉后一个（那节课的卡片自己写时间）
-  const labels = [];
-  const starts = [...new Map(all.map((it) => [it.s, it])).values()].sort((a, b) => ys.top(a) - ys.top(b) || a.s - b.s);
-  for (const it of starts) {
-    const top = ys.top(it);
-    if (labels.length && top < labels[labels.length - 1].top + LABEL_H) continue;
-    labels.push({ top, text: hm(it.s), minutes: it.s, unit: mode === "unit" ? it.units[0] : null });
-  }
-  const labeled = new Map(labels.map((l) => [l.minutes, l.top]));
-  const cols = perCol.map((items) => {
+  const { segs, startIdx, endIdx } = gridSegments(all, mode);
+  // 每列真正画出来的课（撞课的第二节记在前一张上）
+  const drawn = perCol.map((items) => {
     const out = [];
     let busyUntil = -1;
     for (const it of items) {
@@ -418,16 +458,45 @@ function gridLayout(columns, height, { scale = "time" } = {}) {
         if (it.kind === "lesson" && out.length) out[out.length - 1].more += 1;
         continue;
       }
-      const top = ys.top(it);
-      out.push({
-        kind: it.kind, item: it.item, top, height: ys.bottom(it) - top, more: 0,
-        labeled: labeled.has(it.s) && Math.abs(labeled.get(it.s) - top) < 0.5,
-      });
+      out.push({ ...it, a: startIdx(it), b: endIdx(it), more: 0 });
       busyUntil = it.e;
     }
     return out;
   });
-  return { scale: mode, labels, cols, unitH: ys.unitH };
+  const flat = drawn.flat();
+  const labelIdx = [...new Set(flat.map((it) => it.a))].sort((a, b) => a - b);
+  let bounds = null;
+  let level = null;
+  let fontScale = null;
+  if (need) {
+    search: for (let lv = 0; lv < DETAIL_LEVELS; lv += 1) {
+      for (const fs of CHIP_SCALES) {
+        const cons = flat.map((it) => ({ a: it.a, b: it.b, need: need(it, fs, lv) }));
+        if (cons.some((c) => !Number.isFinite(c.need))) continue;
+        bounds = solveBounds(segs, cons, labelIdx, height);
+        if (bounds) {
+          level = lv;
+          fontScale = fs;
+          break search;
+        }
+      }
+    }
+  }
+  if (!bounds) bounds = solveBounds(segs, [], [], height);
+  // 时间轴：每个开始位置标那里最早的开始时间；挨得太近就省掉后一个（那节课的卡片自己写时间）
+  const labels = [];
+  for (const k of labelIdx) {
+    const first = flat.filter((it) => it.a === k).sort((x, y) => x.s - y.s)[0];
+    const top = bounds[k];
+    if (labels.length && top < labels[labels.length - 1].top + LABEL_H - 1e-6) continue;
+    labels.push({ top, text: hm(first.s), minutes: first.s, unit: mode === "unit" ? first.units[0] : null, idx: k });
+  }
+  const labeled = new Map(labels.map((l) => [l.idx, l.minutes]));
+  const cols = drawn.map((items) => items.map((it) => ({
+    kind: it.kind, item: it.item, top: bounds[it.a], height: bounds[it.b] - bounds[it.a], more: it.more,
+    labeled: labeled.get(it.a) === it.s,
+  })));
+  return { scale: mode, level, fontScale, labels, cols };
 }
 
 /**
@@ -796,7 +865,7 @@ const CHIP_SLACK = 1;               // 行高估得已经偏高（苹方 1.42 �
 /**
  * 一张课程卡片怎么排：依次试几档字号，每档按优先级往格子里放——
  *   课名第一行 → 教室编号 → 课名写全 → 开始时间 → 结束时间（一行放不下就分两行）→ 教室楼名 → 教师，
- * 取信息最全的一档，一样全就取字大的。开始时间已经准确地标在左边时间轴上、卡片的位置和长短也是按真实时间画的，
+ * 取写得最全的一档（看 level），一样全就取字大的。开始时间已经准确地标在左边时间轴上、卡片的位置和长短也是按真实时间画的，
  * 所以卡片上的时间排在课名后面；needTime：时间轴上没标出这节课的开始时间（挨得太近被省掉），开始时间排到最前，
  * 保证每节课的开始时间要么在轴上、要么在卡片上，而且是准的。
  * 起止时间单独按宽度定字号（最多小 20%），放不下再分两行。楼名和教师不计分：不为它们缩字，放得下才写。
@@ -804,12 +873,12 @@ const CHIP_SLACK = 1;               // 行高估得已经偏高（苹方 1.42 �
  * 返回的 left 是估计还剩下的高度，chipBody 用定长空白把内容顶到上面。
  * sizes：{ time, name, room } 的基准字号；padV：卡片上下内边距之和。
  */
-function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teacher = false, needTime = false }) {
+function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teacher = false, needTime = false, scales = CHIP_SCALES }) {
   const inner = width - 7; // 左右内边距 6pt，再留 1pt：字宽是估的
   const mark = lesson.changed ? " 调" : "";
   const fullRoom = room ? roomText(lesson) : "";
   let best = null;
-  for (const scale of CHIP_SCALES) {
+  for (const scale of scales) {
     const sz = { time: sizes.time * scale, name: sizes.name * scale, room: sizes.room * scale };
     let left = height - padV - CHIP_SLACK - lineHeight(name, sz.name);
     const take = (h) => {
@@ -834,7 +903,7 @@ function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teach
       const lines = linesNeeded(code, inner, sz.room, 2);
       if (take(lineHeight(code, sz.room, lines))) Object.assign(plan, { room: code, roomLines: lines, score: plan.score + 16 });
     }
-    const need = linesNeeded(name, inner, sz.name, 4);
+    const need = linesNeeded(name, inner, sz.name, 6);
     // 课名多写一行也算分（比卡片上的时间重要：时间轴上已经有了），免得为了挤进时间把课名砍成一行
     while (plan.nameLines < need && take(lineHeight(name, sz.name))) {
       plan.nameLines += 1;
@@ -860,6 +929,13 @@ function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teach
         plan.timeSize = twoSize;
         plan.timeLines = 2;
         plan.score += 2;
+      } else if (!needTime && fitTime(`–${lesson.end}${mark}`) >= sizes.time * 0.7) {
+        // 开始时间就标在左边时间轴上、和卡片顶边对齐，卡片上只写“–09:45”：一行就够，下课时间也不丢
+        const size = fitTime(`–${lesson.end}${mark}`);
+        left += lineHeight(lesson.start, plan.timeSize) - lineHeight(lesson.end, size);
+        plan.time = `–${lesson.end}${mark}`;
+        plan.timeSize = size;
+        plan.score += 1;
       }
     }
     if (plan.room && plan.room !== fullRoom) {
@@ -871,15 +947,39 @@ function chipPlan(lesson, name, { width, height, padV, sizes, room = true, teach
         if (take(lineHeight(text, sz.room, lines) - lineHeight(plan.room, sz.room, plan.roomLines))) {
           plan.room = text;
           plan.roomLines = lines;
+          plan.score += 1;
           break;
         }
       }
     }
     if (teacher && lesson.teachers && textWidth(lesson.teachers, sz.room) <= inner && take(lineHeight(lesson.teachers, sz.room))) plan.teacher = true;
     plan.left = left;
-    if (!best || plan.score > best.score) best = plan;
+    // 写得多全：0 全写（起止时间、课名、教室带楼名）、1 省楼名、2 只写开始时间、3 不写时间、4 课名只写一部分
+    const roomOk = !fullRoom || plan.room;
+    const roomFull = !fullRoom || plan.room === fullRoom || plan.room.includes("\n");
+    const ended = plan.time.includes("–");
+    plan.level = !plan.nameFull || !roomOk ? 4 : !plan.time ? 3 : !ended ? 2 : !roomFull ? 1 : 0;
+    // 先比写得全不全，再比分数（课名折的行数多也加分，只在都写不全时用来挑），一样就取字大的
+    if (!best || plan.level < best.level || (plan.level === best.level && plan.score > best.score)) best = plan;
   }
   return best;
+}
+
+/**
+ * 一张卡片在某档字号下写到某个详细程度（chipPlan 的 level）至少要多高（pt）：在高度上二分找。
+ * 字号再小宽度也放不下（比如时间在窄列里缩到下限还写不下一行）就返回 Infinity。
+ */
+function chipNeed(lesson, name, opts, fontScale, level) {
+  const ok = (height) => chipPlan(lesson, name, { ...opts, height, scales: [fontScale] }).level <= level;
+  let hi = 400;
+  if (!ok(hi)) return Infinity;
+  let lo = 0;
+  for (let i = 0; i < 12; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (ok(mid)) hi = mid;
+    else lo = mid;
+  }
+  return hi;
 }
 
 /** 按 chipPlan 把卡片里的字写进去。 */
@@ -1046,6 +1146,23 @@ function chipSizes(large, colW) {
   return { time: base.time * k, name: base.name * k, room: base.room * k };
 }
 
+/** 课程卡片排版用的参数（chipPlan / chipNeed 共用，排版时算的高度和画出来的才对得上）。 */
+function chipOptions(large, width) {
+  return { width, padV: 3, sizes: chipSizes(large, width), teacher: large };
+}
+
+/** 卡片名字：撞课时后面注“+1”。 */
+function chipName(lesson, more) {
+  return `${lesson.name}${more ? ` +${more}` : ""}`;
+}
+
+/** 停课卡片的字：“停 课名”，最多 3 行。 */
+function cancelledLines(c, width, height = Infinity) {
+  const text = `停 ${c.name}`;
+  const lines = Math.max(1, Math.min(linesNeeded(text, width - 6, 9, 3), Math.floor((height - 5 - CHIP_SLACK) / lineHeight(text, 9))));
+  return { text, lines };
+}
+
 function lessonChip(cell, C, lesson, { width, height, large, more, needTime }) {
   const tint = new Color(lesson.color || "#4b63e0");
   const chip = vstack(cell);
@@ -1057,9 +1174,8 @@ function lessonChip(cell, C, lesson, { width, height, large, more, needTime }) {
     chip.borderColor = lesson.state === "live" ? tint : C.warn;
     chip.borderWidth = 1.5;
   }
-  // 撞课：同一时间还有别的课，名字后面注“+1”
-  const name = `${lesson.name}${more ? ` +${more}` : ""}`;
-  const plan = chipPlan(lesson, name, { width, height, padV: 3, sizes: chipSizes(large, width), teacher: large, needTime });
+  const name = chipName(lesson, more);
+  const plan = chipPlan(lesson, name, { ...chipOptions(large, width), height, needTime });
   chipBody(chip, C, lesson, name, plan, "semibold");
 }
 
@@ -1070,12 +1186,10 @@ function cancelledChip(cell, C, c, { width, height }) {
   chip.cornerRadius = 6;
   chip.borderColor = C.warn;
   chip.borderWidth = 1;
-  const text = `停 ${c.name}`;
-  const room = height - 5 - CHIP_SLACK;
-  const lines = Math.max(1, Math.min(linesNeeded(text, width - 6, 9, 3), Math.floor(room / lineHeight(text, 9))));
+  const { text, lines } = cancelledLines(c, width, height);
   addText(chip, text, { size: 9, weight: "medium", color: C.warn, lines, scale: 0.8 });
   // 定长空白把字顶到上面（弹性 Spacer 的最小高度会挤掉字，原因同 chipBody）
-  const left = room - lineHeight(text, 9, lines);
+  const left = height - 5 - CHIP_SLACK - lineHeight(text, 9, lines);
   if (left >= 1) chip.addSpacer(Math.floor(left));
 }
 
@@ -1091,7 +1205,8 @@ function axisWidth(size, gap) {
  */
 function renderGrid(widget, C, columns, family, payload, size, scale) {
   const large = family === "large" || family === "extraLarge";
-  const showDate = large && scale === "time";
+  // 星期行不再带日期：标题栏已经写了“11/2–11/8”，这 11pt 留给课程卡片把字写全
+  const showDate = false;
   const gap = 3;
   const axisSize = large ? 9 : 8.5;
   const axisW = axisWidth(axisSize, gap);
@@ -1099,7 +1214,14 @@ function renderGrid(widget, C, columns, family, payload, size, scale) {
   const colW = Math.floor((contentW - axisW - columns.length * gap) / Math.max(columns.length, 1));
   // 内容区高度：去掉内边距、标题栏、星期行，再留 4pt 余量
   const gridH = Math.max(60, size.h - 26 - 18 - 6 - (showDate ? 26 : 15) - 4 - 4);
-  const layout = gridLayout(columns, gridH, { scale });
+  // 按内容排：每张卡片要多高由它的字决定（画的时候卡片比格子矮 1.5pt，留一条缝）
+  const need = (it, fontScale, level) => 1.5 + (it.kind === "lesson"
+    ? chipNeed(it.item, chipName(it.item, it.more), chipOptions(large, colW), fontScale, level)
+    : (() => {
+      const { text, lines } = cancelledLines(it.item, colW);
+      return 5 + CHIP_SLACK + lineHeight(text, 9, level >= 4 ? 1 : lines);
+    })());
+  const layout = gridLayout(columns, gridH, { scale, need });
   const base = siteUrl();
 
   widget.addSpacer(6);
@@ -1476,7 +1598,7 @@ if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
     SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
-    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
+    resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };
 } else {

@@ -116,7 +116,46 @@ function html(node) {
   return `<div class="s${fixed ? " fixed" : ""}" style="${style.join(";")}">${kids}</div>`;
 }
 
+/** 一张课程卡片里的字（卡片是带圆角和底色的定尺寸竖排）。 */
+function chipTexts(widget) {
+  const chips = [];
+  const walk = (n) => {
+    if (n.kind === "stack" && n.vertical && n.cornerRadius === 6 && n.backgroundColor) chips.push(n.texts());
+    for (const c of n.children || []) walk(c);
+  };
+  walk(widget);
+  return chips;
+}
+
+/**
+ * 写全了没有：每节课要有一张卡片写着完整课名、起止时间、教室编号（楼名放得下才写，不算缺）。
+ * 撞课被记成“+1”的那节不算（它画不出来）。返回缺了什么的清单。
+ */
+function missingInfo(widget, week) {
+  const chips = chipTexts(widget);
+  const out = [];
+  const days = week.days.filter((d, i) => i < 5 || week.days.slice(i).some((x) => x.lessons.length));
+  for (const d of days) {
+    for (const l of d.lessons) {
+      // 撞课（和同一天别的课时间重叠）：只画得出一张，另一节记成“+1”，不算
+      if (d.lessons.some((o) => o !== l && o.start < l.end && l.start < o.end)) continue;
+      const code = l.room.replace(/^[\u4e00-\u9fff]+(?=[A-Za-z])/, "");
+      const i = chips.findIndex((t) => t.some((x) => x === l.name) && (!code || t.some((x) => x.endsWith(code))));
+      const j = i >= 0 ? i : chips.findIndex((t) => t.some((x) => x === l.name));
+      if (j < 0) { out.push(`${l.name}：没有卡片 / 课名不全`); continue; }
+      const [chip] = chips.splice(j, 1);
+      const lack = [];
+      // “–09:45”：开始时间在时间轴上和卡片顶边对齐，也算写全
+      if (!chip.some((x) => (x.startsWith(l.start) && x.includes(l.end)) || x.startsWith(`–${l.end}`))) lack.push("起止时间");
+      if (l.room && !chip.some((x) => x.endsWith(code))) lack.push("教室");
+      if (lack.length) out.push(`${l.name}：缺${lack.join("、")}`);
+    }
+  }
+  return out;
+}
+
 const sections = [];
+const report = {};
 for (const [weekName, week] of Object.entries(WEEKS)) {
   const cards = [];
   for (const [w, h, label] of [...PHONES, ...PADS]) {
@@ -131,8 +170,17 @@ for (const [weekName, week] of Object.entries(WEEKS)) {
         const { widget } = await runWidgetScript({
           payload, family, parameter, url: "https://kb.example.com/widget/tok.json", nowMs: NOW, screen: { width: w, height: h },
         });
-        cards.push(`<figure data-name="${esc(`${weekName} · ${label} ${w}×${h} · ${family} · ${parameter}`)}">
-<figcaption>${esc(label)} ${w}×${h} · ${family} · ${parameter}</figcaption>
+        const missing = missingInfo(widget, week);
+        const key = `${family} ${parameter}`;
+        report[key] ||= { layouts: 0, incomplete: 0, cards: 0, examples: [] };
+        report[key].layouts += 1;
+        if (missing.length) {
+          report[key].incomplete += 1;
+          report[key].cards += missing.length;
+          if (report[key].examples.length < (process.env.ALL ? 1e9 : 6)) report[key].examples.push(`${weekName} · ${label} → ${missing.join("；")}`);
+        }
+        cards.push(`<figure data-name="${esc(`${weekName} · ${label} ${w}×${h} · ${family} · ${parameter}`)}" data-missing="${esc(missing.join("；"))}">
+<figcaption>${esc(label)} ${w}×${h} · ${family} · ${parameter}${missing.length ? ` · <b style="color:#e8590c">没写全 ${missing.length} 张</b>` : ""}</figcaption>
 <div class="widget" data-family="${family}" data-screen="${w}x${h}">${html(widget)}</div></figure>`);
       }
     }
@@ -187,6 +235,10 @@ for (const fig of document.querySelectorAll("figure")) {
 window.__bad = bad;
 document.getElementById("sum").textContent = bad.length ? "有 " + bad.length + " 处字放不下（标红）" : "全部放得下 ✓（" + document.querySelectorAll("figure").length + " 个版面）";
 </script>`;
+for (const [key, r] of Object.entries(report)) {
+  console.log(`${key}：${r.layouts} 个版面里 ${r.incomplete} 个有没写全的卡片（共 ${r.cards} 张）`);
+  for (const e of r.examples) console.log(`    ${e}`);
+}
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, page);
 console.log(`写好了 ${OUT}`);

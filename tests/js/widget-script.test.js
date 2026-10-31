@@ -256,13 +256,15 @@ test("小号与锁屏也有倒计时", async () => {
   assert.deepEqual(circ.widget.texts(), ["下课", "12:15"]);
 });
 
-test("铺满（大号）：每天一列带日期，卡片写起止时间、课名、教室和教师", async () => {
+test("铺满（大号）：每天一列，卡片写起止时间、课名、教室和教师", async () => {
   assert.equal(W.parseMode("铺满", "large"), "full");
   assert.equal(W.parseMode("full", "small"), "today");
   const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "full", url: URL_OK, nowMs: NOW });
   const t = widget.texts();
   assert.equal(t[0], "本周");
-  for (const x of ["周一", "10/26", "08:20", "高等数学", "A101", "教师A", "金融学"]) assert.ok(t.includes(x), `${x}: ${t.join("|")}`);
+  // 星期行不带日期（标题栏写了“10/26–11/1”），省下的高度给卡片
+  for (const x of ["周一", "08:20", "高等数学", "A101", "教师A", "金融学"]) assert.ok(t.includes(x), `${x}: ${t.join("|")}`);
+  assert.ok(!t.includes("10/26"));
   assert.ok(hasTime(t, "08:20", "09:45"), t.join("|"));
   assert.ok(widget.urls().includes("https://kb.example.com/#sem=161&w=8&view=day&d=4"));
   const medium = await runWidgetScript({ payload: PAYLOAD, family: "medium", parameter: "full", url: URL_OK, nowMs: NOW });
@@ -311,7 +313,7 @@ test("只有下午、晚上有课的一周（大号）：教室写全编号，�
   const sunday = { ...week, days: week.days.map((d) => (d.weekday === 7 ? { ...d, lessons: [L("形势与政策", "13:30", "14:55", "博远楼JC105")] } : d)) };
   const seven = (await runWidgetScript({ payload: { ...PAYLOAD, week: sunday }, family: "large", parameter: "week", url: URL_OK, nowMs: NOW })).widget.texts();
   // 7 列也是课名写全、教室编号都在
-  assert.ok(seven.includes("创新创业实践：财会") && seven.includes("Z4-106"), seven.join("|"));
+  assert.ok(seven.includes("创新创业实践：财会") && seven.some((x) => x.endsWith("Z4-106")), seven.join("|"));
   assert.ok(seven.includes("形势与政策") && seven.some((x) => x.endsWith("JC105")), seven.join("|"));
 });
 
@@ -359,6 +361,48 @@ test("铺满（大号）：截图里那一周每节课的课名、教室、起�
       }
     }
   }
+});
+
+test("按内容排：每张卡片至少有写全它要的高度，同一节在各天还是对齐的", () => {
+  const cols = [
+    { lessons: [L("食品营养学（双语）", "08:20", "09:45", "德业楼Z4-106"), L("储藏物害虫与防治", "10:00", "12:15", "食工楼203")], cancelled: [] },
+    { lessons: [L("粮油加工工艺与设备", "10:00", "12:15", "德经楼Z1-101"), L("食品物性学", "15:10", "16:35", "德业楼Z4-117")], cancelled: [] },
+    { lessons: [L("机械设计基础", "14:15", "16:35", "德业楼Z4-108")], cancelled: [] },
+  ];
+  const opts = { width: 60, padV: 3, sizes: { time: 9, name: 10, room: 8.5 }, teacher: true };
+  const need = (it, fs, lv) => 1.5 + W.chipNeed(it.item, it.item.name, opts, fs, lv);
+  for (const scale of ["unit", "time"]) {
+    const g = W.gridLayout(cols, 300, { scale, need });
+    assert.equal(g.level, 0, scale);
+    for (const it of g.cols.flat()) {
+      assert.ok(it.height + 1e-6 >= need(it, g.fontScale, 0), `${scale} ${it.item.name} ${it.height}`);
+      // 按这个高度排卡片：起止时间、课名、教室都写全
+      const plan = W.chipPlan(it.item, it.item.name, { ...opts, height: it.height - 1.5 });
+      assert.ok(plan.level <= 1 && plan.nameFull && plan.time.includes("–"), `${scale} ${JSON.stringify(plan)}`);
+    }
+    assert.ok(Math.max(...g.cols.flat().map((it) => it.top + it.height)) <= 300 + 1e-6);
+    // 10:00 开始的两节在周一、周二顶边对齐；时间轴每个开始时间都标上了
+    assert.ok(Math.abs(g.cols[0][1].top - g.cols[1][0].top) < 1e-6);
+    assert.ok(g.cols.flat().every((it) => it.labeled));
+  }
+  // 高度不够就逐级少写；连只写课名都摆不下（中号）才退回按比例，卡片自己尽量写
+  assert.ok(W.gridLayout(cols, 120, { scale: "unit", need }).level > 0);
+  assert.equal(W.gridLayout(cols, 30, { scale: "unit", need }).level, null);
+});
+
+test("卡片先比写得全不全：字小一档能写全就不选字大但缺楼名的；窄列里只写“–下课时间”", () => {
+  const sizes = { time: 9, name: 10, room: 8.5 };
+  const lesson = L("微观经济学", "18:30", "20:50", "德经楼Z1-101");
+  const need = W.chipNeed(lesson, lesson.name, { width: 52, padV: 3, sizes }, 0.8, 0);
+  const plan = W.chipPlan(lesson, lesson.name, { width: 52, padV: 3, sizes, height: need });
+  assert.equal(plan.level, 0, JSON.stringify(plan));
+  // 窄列、格子矮：开始时间在时间轴上，卡片写“–09:45”
+  const narrow = L("高等数学", "08:20", "09:45", "德业楼Z4-106");
+  const p = W.chipPlan(narrow, narrow.name, { width: 40, padV: 3, sizes, height: 34 });
+  assert.equal(p.time, "–09:45", JSON.stringify(p));
+  // 轴上没标开始时间时不能这么省
+  const q = W.chipPlan(narrow, narrow.name, { width: 40, padV: 3, sizes, height: 34, needTime: true });
+  assert.ok(q.time.startsWith("08:20"), JSON.stringify(q));
 });
 
 test("各机型、两种模式：每节课的开始时间都写得准（在时间轴上它那一格旁边，或者在卡片上）", () => {
