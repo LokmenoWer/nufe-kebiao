@@ -23,6 +23,12 @@ class Node {
     return s;
   }
 
+  addDate(date) {
+    const d = new WidgetDate(date);
+    this.children.push(d);
+    return d;
+  }
+
   addSpacer(length) {
     this.children.push({ kind: "spacer", length });
   }
@@ -31,10 +37,22 @@ class Node {
     this.padding = p;
   }
 
+  /** 文本按出现顺序；倒计时写成 “[timer→ISO]” / “[relative→ISO]”。 */
   texts() {
     const out = [];
     const walk = (n) => {
       if (n.kind === "text") out.push(n.text);
+      if (n.kind === "date") out.push(`[${n.style}→${n.date.toISOString()}]`);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(this);
+    return out;
+  }
+
+  urls() {
+    const out = [];
+    const walk = (n) => {
+      if (n.url) out.push(n.url);
       for (const c of n.children || []) walk(c);
     };
     walk(this);
@@ -46,6 +64,24 @@ class WidgetText {
   constructor(text) {
     this.kind = "text";
     this.text = text;
+  }
+
+  centerAlignText() {}
+}
+
+class WidgetDate {
+  constructor(date) {
+    this.kind = "date";
+    this.date = date;
+    this.style = "date";
+  }
+
+  applyTimerStyle() {
+    this.style = "timer";
+  }
+
+  applyRelativeStyle() {
+    this.style = "relative";
   }
 
   centerAlignText() {}
@@ -72,10 +108,17 @@ class ListWidget extends Node {
 
   async presentMedium() {
     this.presented = "medium";
+    ListWidget.onPresent?.(this);
   }
 
   async presentLarge() {
     this.presented = "large";
+    ListWidget.onPresent?.(this);
+  }
+
+  async presentSmall() {
+    this.presented = "small";
+    ListWidget.onPresent?.(this);
   }
 }
 
@@ -101,6 +144,7 @@ class Size {
 
 export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
+  inApp = false, choose = [], scriptBody, scriptStatus = 200,
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -118,6 +162,40 @@ export async function runWidgetScript({
       if (fail) throw new Error("offline");
       this.response = { statusCode: status };
       return JSON.parse(JSON.stringify(payload));
+    }
+
+    async loadString() {
+      if (fail) throw new Error("offline");
+      this.response = { statusCode: scriptStatus };
+      return scriptBody;
+    }
+  }
+
+  const presented = [];
+  ListWidget.onPresent = (w) => presented.push(w);
+  const alerts = [];
+  const choices = [...choose];
+  class Alert {
+    constructor() {
+      this.actions = [];
+      alerts.push(this);
+    }
+
+    addAction(label) {
+      this.actions.push(label);
+    }
+
+    addCancelAction(label) {
+      this.cancel = label;
+    }
+
+    async presentSheet() {
+      const want = choices.shift();
+      return want === undefined ? -1 : this.actions.indexOf(want);
+    }
+
+    async present() {
+      return 0;
     }
   }
 
@@ -142,12 +220,15 @@ export async function runWidgetScript({
 
   const context = {
     ListWidget, Color, Font, Size, Request,
-    FileManager: { local: () => fm },
+    FileManager: { local: () => fm, iCloud: () => { throw new Error("iCloud disabled"); } },
+    Alert,
+    Safari: { open: (u) => presented.push(`safari:${u}`) },
+    module: { filename: "/Documents/南财课表.js" },
     Script: {
       setWidget: (w) => { result = w; },
       complete: () => done(),
     },
-    config: { runsInWidget: true, widgetFamily: family },
+    config: { runsInWidget: !inApp, widgetFamily: inApp ? undefined : family },
     args: { widgetParameter: parameter },
     Date: FakeDate,
     JSON, Math, Number, String, Object, Array, Promise, console,
@@ -155,5 +236,5 @@ export async function runWidgetScript({
   context.globalThis = context;
   vm.runInNewContext(source, context);
   await finished;
-  return { widget: result, files };
+  return { widget: result, files, alerts, presented };
 }

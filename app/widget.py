@@ -110,6 +110,27 @@ def upcoming(today: dt.date, activities: list, week1: dt.date | None, units: dic
     return None
 
 
+def term_bounds(activities: list, week1: dt.date | None) -> dict | None:
+    """本学期第一天 / 最后一天有课的日期：开学前显示倒计时，结课后显示“已结束”。"""
+    if not week1:
+        return None
+    dates = []
+    for a in activities:
+        if not isinstance(a, dict) or not isinstance(a.get("weekday"), int) or not 1 <= a["weekday"] <= 7:
+            continue
+        for w in a.get("weekIndexes") or []:
+            if isinstance(w, int) and 1 <= w <= 60:
+                dates.append(week1 + dt.timedelta(weeks=w - 1, days=a["weekday"] - 1))
+    if not dates:
+        return None
+    return {"first_day": min(dates).isoformat(), "last_day": max(dates).isoformat()}
+
+
+def _week_block(monday: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict) -> dict:
+    days = [_day(monday + dt.timedelta(days=i), activities, week1, units, colors) for i in range(7)]
+    return {"week": days[0]["week"], "monday": monday.isoformat(), "days": days}
+
+
 def next_change(now: dt.datetime, days: list[dict]) -> str | None:
     """下一个上课 / 下课时刻：小组件在这之后刷新，“正在上课 / 下一节”才能准时切换。"""
     moments = []
@@ -123,8 +144,12 @@ def next_change(now: dt.datetime, days: list[dict]) -> str | None:
     return future[0].isoformat() if future else None
 
 
-def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: dt.datetime | None = None) -> dict:
-    """view: service.timetable_view() 的结果（当前学期）；week1_iso: 第 1 周周一。"""
+def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: dt.datetime | None = None,
+          script_version: str | None = None) -> dict:
+    """view: service.timetable_view() 的结果（当前学期）；week1_iso: 第 1 周周一。
+
+    script_version：服务器上最新的小组件脚本版本，旧脚本据此提示“可更新”。
+    """
     now = (now or dt.datetime.now(_TZ)).astimezone(_TZ)
     today = now.date()
     try:
@@ -137,17 +162,22 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
     monday = today - dt.timedelta(days=today.weekday())
     today_d = _day(today, activities, week1, units, colors)
     tomorrow_d = _day(today + dt.timedelta(days=1), activities, week1, units, colors)
-    week_days = [_day(monday + dt.timedelta(days=i), activities, week1, units, colors) for i in range(7)]
+    this_week = _week_block(monday, activities, week1, units, colors)
     return {
         "v": PAYLOAD_VERSION,
         "now": now.isoformat(timespec="seconds"),
         "semester": (view or {}).get("semester_name"),
+        "semester_id": (view or {}).get("semester_id"),
+        "script_version": script_version,
         "updated_at": (view or {}).get("fetched_at"),
         "status": status,               # ok | error | captcha | needs_rebind：脚本据此提示“需要重新登录”
         "has_calendar": week1 is not None,
         "today": today_d,
         "tomorrow": tomorrow_d,
-        "week": {"week": today_d["week"], "monday": monday.isoformat(), "days": week_days},
+        "week": this_week,
+        # 周末本周已经没课时，week 模式改看下周
+        "next_week": _week_block(monday + dt.timedelta(days=7), activities, week1, units, colors),
+        "term": term_bounds(activities, week1),
         "upcoming": upcoming(today, activities, week1, units, colors),
         "next_change": next_change(now, [today_d, tomorrow_d]),
     }

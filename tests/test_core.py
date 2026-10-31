@@ -537,6 +537,9 @@ def test_widget_payload_today_tomorrow_week():
     # 周二晚上：下次上课是第 2 周周一（第 1 周周三之后都没课）
     late = dt.datetime(2026, 9, 8, 22, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     assert widget.build(_widget_view(), "2026-09-07", now=late)["upcoming"]["date"] == "2026-09-14"
+    assert p["term"] == {"first_day": "2026-09-07", "last_day": "2026-09-21"}  # 第 3 周周一最后一节
+    assert p["next_week"]["week"] == 2 and p["next_week"]["monday"] == "2026-09-14"
+    assert [x["name"] for x in p["next_week"]["days"][0]["lessons"]] == ["高数"]
 
 
 def test_widget_payload_vacation_and_missing_calendar():

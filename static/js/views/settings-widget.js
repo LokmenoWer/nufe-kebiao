@@ -40,7 +40,8 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     h("li", {}, "长按小组件 → 编辑小组件：Script 选刚才的脚本；Parameter 填 ",
       h("code", {}, "today"), "（今天，默认）、", h("code", {}, "tomorrow"), "（明天）或 ",
       h("code", {}, "week"), "（本周，用中号 / 大号）。"),
-    h("li", {}, "锁屏小组件同理，会显示下一节课。"));
+    h("li", {}, "锁屏小组件同理，会显示下一节课和倒计时。"),
+    h("li", {}, "在 Scriptable 里直接运行这个脚本，可以预览各种尺寸；小组件提示“脚本可更新”时，运行脚本选“更新脚本”即可，不用重新复制。"));
 
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "借助免费的 Scriptable App，在 iPhone / iPad 桌面和锁屏上显示今天、明天或本周的课。"

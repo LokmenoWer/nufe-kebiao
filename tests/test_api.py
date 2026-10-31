@@ -1322,6 +1322,21 @@ def test_widget_link_lifecycle(up):
     assert c.get("/api/me").json()["widget_url"] is None
 
 
+def test_widget_script_self_update_by_token(up):
+    import re
+
+    c = TestClient(app)
+    _login(c, "2023001")
+    url = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"]
+    anon = TestClient(app)
+    js = anon.get(url.removeprefix("http://testserver").removesuffix(".json") + ".js")
+    assert js.status_code == 200 and url in js.text and "no-store" in js.headers["cache-control"]
+    version = re.search(r'const SCRIPT_VERSION = "([^"]+)"', js.text).group(1)
+    payload = anon.get(url.removeprefix("http://testserver")).json()
+    assert payload["script_version"] == version and payload["semester_id"] == 161
+    assert anon.get("/widget/nope.js").status_code == 404
+
+
 def test_widget_requires_login_and_reports_status(up):
     anon = TestClient(app)
     assert anon.get("/api/widget/script").status_code == 401

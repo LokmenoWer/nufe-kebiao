@@ -575,6 +575,31 @@ def ics_disable(sess=Depends(csrf_protected)):
 # ---------- iOS 桌面小组件（Scriptable） ----------
 
 WIDGET_SCRIPT = ROOT / "scriptable" / "nufe-kebiao-widget.js"
+_script_cache: tuple[int, str, str | None] | None = None
+
+
+def _widget_template() -> tuple[str, str | None]:
+    """(脚本模板, 版本号)；按 mtime 缓存，部署新脚本后不用重启。"""
+    global _script_cache
+    mtime = WIDGET_SCRIPT.stat().st_mtime_ns
+    if not _script_cache or _script_cache[0] != mtime:
+        text = WIDGET_SCRIPT.read_text("utf-8")
+        m = re.search(r'const SCRIPT_VERSION = "([^"]+)"', text)
+        _script_cache = (mtime, text, m.group(1) if m else None)
+    return _script_cache[1], _script_cache[2]
+
+
+def _widget_user(token: str):
+    if not token or len(token) > 128:
+        raise HTTPException(404)
+    user = db.connect().execute(
+        "SELECT id, status FROM users WHERE widget_token_hash=?", (crypto.token_hash(token),)).fetchone()
+    if not user:
+        raise HTTPException(404)
+    return user
+
+
+_WIDGET_HEADERS = {"X-Robots-Tag": "noindex, nofollow, noarchive"}
 
 
 @app.post("/api/widget/rotate")
@@ -601,29 +626,30 @@ def widget_script(sess=Depends(current_session)):
     url = _widget_url(sess["id"])
     if not url:
         raise HTTPException(404, "请先生成小组件链接")
-    template = WIDGET_SCRIPT.read_text("utf-8")
+    template, _version = _widget_template()
     return PlainTextResponse(template.replace("__WIDGET_URL__", url),
                              media_type="text/javascript; charset=utf-8", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/widget/{token}.js")
+def widget_script_by_token(token: str):
+    """脚本在 Scriptable 里自我更新用：凭同一个只读 token 取最新脚本（已填好本人链接）。"""
+    _widget_user(token)
+    template, _version = _widget_template()
+    return PlainTextResponse(template.replace("__WIDGET_URL__", f"{PUBLIC_BASE_URL}/widget/{token}.json"),
+                             media_type="text/javascript; charset=utf-8",
+                             headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
 @app.get("/widget/{token}.json")
-def widget_feed(token: str, request: Request):
-    if not token or len(token) > 128:
-        raise HTTPException(404)
-    user = db.connect().execute(
-        "SELECT id, status, current_semester_id FROM users WHERE widget_token_hash=?",
-        (crypto.token_hash(token),)).fetchone()
-    if not user:
-        raise HTTPException(404)
+def widget_feed(token: str):
+    user = _widget_user(token)
     view = service.timetable_view(user["id"], None)
     week1 = view.get("week1_monday") if view else None
-    payload = widget.build(view, week1, status=user["status"])
-    headers = {
-        # 内容随时间变化（今天 / 明天），只做很短的缓存
-        "Cache-Control": "private, max-age=60",
-        "X-Robots-Tag": "noindex, nofollow, noarchive",
-    }
-    return JSONResponse(payload, headers=headers)
+    _template, version = _widget_template()
+    payload = widget.build(view, week1, status=user["status"], script_version=version)
+    # 内容随时间变化（今天 / 明天），只做很短的缓存
+    return JSONResponse(payload, headers={"Cache-Control": "private, max-age=60", **_WIDGET_HEADERS})
 
 
 @app.post("/api/account/delete")
