@@ -11,14 +11,17 @@
  *   3. Parameter 填 today（今天，默认）/ tomorrow（明天）/ week（本周，建议用大号或中号）/
  *      full（铺满：本周课表按时长铺满整块，信息更全，建议大号）。
  *      再加一个数字是提前几分钟上课提醒：today 15；today 0 关闭。不写则提前 10 分钟。
- *      几块小组件请写同一个数字，后刷新的那块会改掉已经安排的提醒。
+ *      提醒是在 Scriptable 里运行脚本时排的（那时拿不到 Parameter），所以小组件刷新时会把这个数字记在本机，
+ *      运行脚本时照它排；数字和已经排好的提醒不一样时标题栏提示“点按更新提醒”。
+ *      也可以在 Scriptable 里运行脚本 → “提醒时间”直接选（Parameter 里写了数字的话以 Parameter 为准）。
+ *      几块小组件请写同一个数字，后刷新的那块说了算。
  *   锁屏小组件同样可用：显示下一节课和倒计时。
  *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站。
  *
  * 调课：服务器每节课出门前（上课前半小时）会替你向学校确认一次课表，小组件在那之后重画。
  *   改了教室 / 时间的课标“调”（附原来的安排），当天停掉的课列在“停课”里，标题栏提示“有调课”。
  *   上课提醒是本机通知，只能在 Scriptable 里运行脚本时安排（小组件进程里排通知会被系统掐掉）；
- *   课表变了而提醒还是旧的，标题栏会提示“点按更新提醒”，点一下小组件就会在 Scriptable 里重排。
+ *   课表变了、或者改了提前分钟数而提醒还是旧的，标题栏会提示“点按更新提醒”，点一下小组件就会在 Scriptable 里重排。
  *
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
  */
@@ -74,16 +77,33 @@ function parseMode(param, family) {
   return mode;
 }
 
-/** Parameter：`today` / `tomorrow` / `week`，可选再跟提前分钟数（`today 15`，`0` 关闭提醒）。 */
+/**
+ * Parameter：`today` / `tomorrow` / `week` / `full`，可选再跟提前分钟数（`today 15`，`0` 关闭提醒）。
+ * 没写数字时 remindMinutes 为 null，由 remindLead 按本机记下的设置补上。
+ */
 function parseParam(param, family) {
   const parts = String(param || "").trim().split(/[\s,，]+/).filter(Boolean);
   let modeWord = "";
-  let remind = DEFAULT_REMIND_MINUTES;
+  let remind = null;
   for (const part of parts) {
     if (/^\d{1,3}$/.test(part)) remind = Math.min(MAX_REMIND_MINUTES, Number(part));
     else if (!modeWord) modeWord = part;
   }
   return { mode: parseMode(modeWord, family), remindMinutes: remind };
+}
+
+function validLead(n) {
+  return Number.isInteger(n) && n >= 0 && n <= MAX_REMIND_MINUTES;
+}
+
+/**
+ * 实际用的提前分钟数：Parameter 里写的数字 > 本机记下的（小组件刷新时记的 / 菜单里选的）> 默认 10。
+ * 在 Scriptable 里运行脚本时拿不到 Parameter，全靠本机记下的那个数。
+ */
+function remindLead(remindMinutes, state) {
+  if (validLead(remindMinutes)) return remindMinutes;
+  if (state && validLead(state.want)) return state.want;
+  return DEFAULT_REMIND_MINUTES;
 }
 
 function shanghaiNow(ms = Date.now()) {
@@ -530,10 +550,12 @@ function planHasChanges(plan) {
   return showsChanges(plan.lessons, plan.cancelled) || Boolean(plan.preview && showsChanges(plan.preview.lessons, plan.preview.cancelled));
 }
 
-/** 课表在上次排提醒之后变过：已经排好的本机提醒可能是旧的。 */
+/** 已经排好的本机提醒过期了：要的分钟数和排的时候不一样，或者课表在那之后变过。 */
 function needsReminderResync(payload, state, remindMinutes) {
+  if (!state || !validLead(state.lead)) return false; // 从没在 Scriptable 里排过提醒
+  if (validLead(remindMinutes) && remindMinutes !== state.lead) return true; // 改了提前分钟数，或关掉了
   if (!remindMinutes || !payload || !payload.changed_at) return false;
-  if (!state || !state.remindSyncedAt) return false; // 从没在 Scriptable 里排过提醒
+  if (!state.remindSyncedAt) return false;
   return payload.changed_at > state.remindSyncedAt;
 }
 
@@ -1468,7 +1490,7 @@ async function syncReminders(payload, now, leadMinutes, base) {
     n.setTriggerDate(new Date(item.when));
     await n.schedule();
   }
-  writeJsonFile(STATE_FILE(), { remindSyncedAt: leadMinutes > 0 ? now.ms / 1000 : null, lead: leadMinutes });
+  writeJsonFile(STATE_FILE(), { ...readJsonFile(STATE_FILE()), remindSyncedAt: leadMinutes > 0 ? now.ms / 1000 : null, lead: leadMinutes });
   return { scheduled: plan.length, created: create.length, removed: remove.length };
 }
 
@@ -1533,7 +1555,26 @@ async function refreshNow() {
   }
 }
 
-async function inAppMenu(result, mode, remindNote) {
+const LEAD_CHOICES = [0, 5, 10, 15, 20, 30, 45, 60];
+
+/** 菜单 → 提醒时间：选好记到本机，马上按新的分钟数重排。 */
+async function chooseLead(result, current, fromParam) {
+  const sheet = new Alert();
+  sheet.title = "提前多久提醒上课";
+  sheet.message = fromParam
+    ? `小组件 Parameter 里写了 ${current}，以 Parameter 为准；要改请编辑小组件。`
+    : `现在：${current ? `提前 ${current} 分钟` : "已关闭"}。桌面小组件的 Parameter 里写了数字的话，以 Parameter 为准。`;
+  for (const n of LEAD_CHOICES) sheet.addAction(n ? `提前 ${n} 分钟${n === current ? "（当前）" : ""}` : `关闭提醒${current === 0 ? "（当前）" : ""}`);
+  sheet.addCancelAction("取消");
+  const index = await sheet.presentSheet();
+  if (index < 0 || index >= LEAD_CHOICES.length) return;
+  const lead = LEAD_CHOICES[index];
+  writeJsonFile(STATE_FILE(), { ...readJsonFile(STATE_FILE()), want: lead });
+  const synced = await syncReminders(result.data, shanghaiNow(), lead, siteUrl());
+  await say("已设置", remindSummary(lead, synced));
+}
+
+async function inAppMenu(result, mode, remindNote, lead, fromParam) {
   const alert = new Alert();
   alert.title = "南财课表小组件";
   const latest = result.data && result.data.script_version;
@@ -1546,6 +1587,7 @@ async function inAppMenu(result, mode, remindNote) {
     ["预览本周（大号）", () => preview("large", "week").presentLarge()],
     ["预览铺满（大号）", () => preview("large", "full").presentLarge()],
     ["预览小号", () => preview("small", mode).presentSmall()],
+    ["提醒时间", () => chooseLead(result, lead, fromParam)],
     ["刷新课表", refreshNow],
     ["更新脚本", async () => {
       const version = await updateScript();
@@ -1554,6 +1596,7 @@ async function inAppMenu(result, mode, remindNote) {
     ["打开网站", () => Safari.open(siteUrl())],
   ];
   if (result.error) actions.splice(0, actions.findIndex(([label]) => label === "预览小号") + 1);
+  if (!result.data) actions.splice(actions.findIndex(([label]) => label === "提醒时间"), 1);
   for (const [label] of actions) alert.addAction(label);
   alert.addCancelAction("取消");
   const index = await alert.presentSheet();
@@ -1570,10 +1613,16 @@ async function main() {
     return;
   }
   const result = await load();
+  const state = readJsonFile(STATE_FILE());
+  const lead = remindLead(param.remindMinutes, state);
   // 先把小组件交出去再结束。桌面进程里调用 Notification 经常不返回，
   // 系统会杀掉脚本，桌面就留下 “Call Script.setWidget()”。
   if (inWidget()) {
-    const resync = needsReminderResync(result.data, readJsonFile(STATE_FILE()), param.remindMinutes);
+    // 提醒要到 Scriptable 里运行脚本时才排，那时拿不到 Parameter：把这里写的分钟数记到本机
+    if (validLead(param.remindMinutes) && (!state || state.want !== param.remindMinutes)) {
+      writeJsonFile(STATE_FILE(), { ...state, want: param.remindMinutes });
+    }
+    const resync = needsReminderResync(result.data, state, lead);
     Script.setWidget(result.error ? errorWidget(result.error)
       : buildWidget(result.data, { family, mode: param.mode, offline: result.offline, resync }));
     return;
@@ -1581,14 +1630,14 @@ async function main() {
   let remindNote = "";
   if (result.data) {
     try {
-      const synced = await syncReminders(result.data, shanghaiNow(), param.remindMinutes, siteUrl());
-      remindNote = remindSummary(param.remindMinutes, synced);
+      const synced = await syncReminders(result.data, shanghaiNow(), lead, siteUrl());
+      remindNote = remindSummary(lead, synced);
     } catch (e) {
-      remindNote = remindSummary(param.remindMinutes, null, e);
+      remindNote = remindSummary(lead, null, e);
     }
   }
   try {
-    await inAppMenu(result, param.mode, remindNote);
+    await inAppMenu(result, param.mode, remindNote, lead, validLead(param.remindMinutes));
   } catch (e) {
     await say("出错了", String(e && e.message ? e.message : e));
   }
@@ -1597,7 +1646,7 @@ async function main() {
 if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
-    SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
+    SCRIPT_VERSION, parseMode, parseParam, remindLead, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
   };

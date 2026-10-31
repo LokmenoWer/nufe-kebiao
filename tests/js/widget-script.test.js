@@ -530,11 +530,20 @@ test("标题栏提示的优先级：登录失效 > 数据过旧 > 离线 > 更�
 
 test("参数里的提醒分钟：默认 10，0 关闭，过大则封顶", () => {
   const param = (raw, family) => ({ ...W.parseParam(raw, family) });
-  assert.deepEqual(param("", "medium"), { mode: "today", remindMinutes: 10 });
+  assert.deepEqual(param("", "medium"), { mode: "today", remindMinutes: null });
   assert.deepEqual(param("today 15", "medium"), { mode: "today", remindMinutes: 15 });
-  assert.deepEqual(param("明天", "large"), { mode: "tomorrow", remindMinutes: 10 });
+  assert.deepEqual(param("明天", "large"), { mode: "tomorrow", remindMinutes: null });
   assert.deepEqual(param("week 0", "small"), { mode: "today", remindMinutes: 0 });
   assert.deepEqual(param("week 999", "large"), { mode: "week", remindMinutes: 180 });
+  assert.deepEqual(param("full 20", "large"), { mode: "full", remindMinutes: 20 });
+  assert.deepEqual(param("铺满，5", "large"), { mode: "full", remindMinutes: 5 });
+  // 没写数字：用本机记下的，再没有就默认 10；写了数字以 Parameter 为准
+  assert.equal(W.remindLead(null, null), 10);
+  assert.equal(W.remindLead(null, { want: 25 }), 25);
+  assert.equal(W.remindLead(null, { want: 0 }), 0);
+  assert.equal(W.remindLead(15, { want: 25 }), 15);
+  assert.equal(W.remindLead(0, { want: 25 }), 0);
+  assert.equal(W.remindLead(null, { want: "x" }), 10); // 状态文件坏了
 });
 
 test("调课：改过的课标“调”并附原安排，停掉的课单独列出", () => {
@@ -565,10 +574,14 @@ test("调课：改过的课标“调”并附原安排，停掉的课单独列�
 
 test("课表在排提醒之后变过：提示到 Scriptable 里重排", () => {
   const payload = { ...PAYLOAD, changed_at: 2000 };
-  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 1000 }, 10), true);
-  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 3000 }, 10), false);
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 1000, lead: 10 }, 10), true);
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 3000, lead: 10 }, 10), false);
   assert.equal(W.needsReminderResync(payload, null, 10), false); // 从没排过提醒
-  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 1000 }, 0), false); // 关了提醒
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: null, lead: 0 }, 0), false); // 关了提醒
+  // 改了提前分钟数（包括关掉）：排好的提醒是按旧数字排的
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 3000, lead: 10 }, 15), true);
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: 3000, lead: 10 }, 0), true);
+  assert.equal(W.needsReminderResync(payload, { remindSyncedAt: null, lead: 0 }, 10), true);
   assert.equal(W.headerNote(payload, false, PAYLOAD.today, "medium", { resync: true, changed: true, nowMs: NOW }).text, "点按更新提醒");
 });
 
@@ -727,21 +740,64 @@ test("上课提醒会写进系统通知；Parameter 0 关闭并清掉旧的", as
   assert.equal(again.notifications.scheduled.length, 0);
   assert.equal(again.notifications.removed.length, 0);
 
-  const custom = await runWidgetScript({
-    payload: PAYLOAD, parameter: "today 15", url: URL_OK, nowMs: NOW, inApp: true,
-  });
+  // 真机上在 Scriptable 里运行时拿不到 Parameter：桌面小组件刷新时把 “today 15” 里的 15 记在本机，运行脚本时照它排
+  const cache = new Map();
+  await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  const widget15 = await runWidgetScript({ payload: PAYLOAD, parameter: "today 15", url: URL_OK, nowMs: NOW, cache });
+  assert.equal(widget15.notifications.scheduled.length, 0); // 桌面进程仍然不碰通知
+  assert.ok(widget15.widget.texts().includes("点按更新提醒")); // 排好的是 10 分钟的，提示重排
+  assert.equal(widget15.widget.url, `scriptable:///run/${encodeURIComponent("南财课表")}`);
+  const custom = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
   const earlier = custom.notifications.scheduled.find((n) => n.title === "大学英语");
   assert.equal(earlier.subtitle, "15 分钟后上课");
   assert.equal(earlier.triggerDate.toISOString(), "2026-10-26T06:00:00.000Z");
+  assert.match(custom.alerts[0].message, /上课提醒：提前 15 分钟/);
+  const synced = await runWidgetScript({ payload: PAYLOAD, parameter: "today 15", url: URL_OK, nowMs: NOW + 60000, cache });
+  assert.ok(!synced.widget.texts().includes("点按更新提醒"));
+  // week / full 的 Parameter 同样带分钟数
+  await runWidgetScript({ payload: PAYLOAD, family: "large", parameter: "week 20", url: URL_OK, nowMs: NOW, cache });
+  const week20 = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  assert.equal(week20.notifications.scheduled.find((n) => n.title === "大学英语").subtitle, "20 分钟后上课");
 
+  // Parameter 写 0：记下来，运行脚本时清掉旧的
+  await runWidgetScript({ payload: PAYLOAD, parameter: "today 0", url: URL_OK, nowMs: NOW, cache });
   const off = await runWidgetScript({
-    payload: PAYLOAD, parameter: "today 0", url: URL_OK, nowMs: NOW,
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache,
     pending: first.notifications.pending, inApp: true, choose: ["预览今天（中号）"],
   });
   assert.equal(off.notifications.scheduled.length, 0);
   assert.equal(off.notifications.pending.length, 0);
   assert.ok(off.notifications.removed.length > 0);
   assert.match(off.alerts[0].message, /上课提醒：已关闭/);
+  // Parameter 没写数字：不覆盖记下的设置
+  await runWidgetScript({ payload: PAYLOAD, parameter: "today", url: URL_OK, nowMs: NOW, cache });
+  const stillOff = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  assert.match(stillOff.alerts[0].message, /上课提醒：已关闭/);
+});
+
+test("在 Scriptable 里运行 → 提醒时间：选好记到本机并马上重排", async () => {
+  const cache = new Map();
+  const first = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  const run = await runWidgetScript({
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true,
+    pending: first.notifications.pending, choose: ["提醒时间", "提前 30 分钟"],
+  });
+  assert.ok(run.alerts[1].actions.includes("提前 10 分钟（当前）") && run.alerts[1].actions.includes("关闭提醒"));
+  assert.match(run.alerts[2].message, /上课提醒：提前 30 分钟/);
+  assert.equal(run.notifications.pending.find((n) => n.title === "大学英语").subtitle, "30 分钟后上课");
+  // 下次运行还是 30
+  const next = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true });
+  assert.match(next.alerts[0].message, /上课提醒：提前 30 分钟/);
+  // 关闭
+  const off = await runWidgetScript({
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true,
+    pending: run.notifications.pending, choose: ["提醒时间", "关闭提醒"],
+  });
+  assert.equal(off.notifications.pending.length, 0);
+  assert.match(off.alerts[2].message, /上课提醒：已关闭/);
+  // 连不上又没缓存时菜单里没有这一项
+  const broken = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, fail: true });
+  assert.ok(!broken.alerts[0].actions.includes("提醒时间"));
 });
 
 test("在 Scriptable 里运行：菜单可预览，也能更新脚本", async () => {

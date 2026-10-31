@@ -297,7 +297,8 @@ export async function runWidgetScript({
       complete: () => done(),
     },
     config: { runsInWidget: !inApp, widgetFamily: inApp ? undefined : family },
-    args: { widgetParameter: parameter },
+    // 和真机一样：在 Scriptable 里直接运行时拿不到小组件的 Parameter
+    args: { widgetParameter: inApp ? null : parameter },
     Date: FakeDate,
     JSON, Math, Number, String, Object, Array, Promise, console,
   };
