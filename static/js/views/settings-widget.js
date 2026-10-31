@@ -39,12 +39,18 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     h("li", {}, "回到桌面长按 → 左上角 ＋ → 搜索 Scriptable → 选尺寸并添加。"),
     h("li", {}, "长按小组件 → 编辑小组件：Script 选刚才的脚本；Parameter 填 ",
       h("code", {}, "today"), "（今天，默认）、", h("code", {}, "tomorrow"), "（明天）或 ",
-      h("code", {}, "week"), "（本周，用中号 / 大号）。"),
+      h("code", {}, "week"), "（本周，用中号 / 大号）。再写一个数字是提前几分钟提醒，例如 ",
+      h("code", {}, "today 15"), "；", h("code", {}, "today 0"), " 关闭。不写则提前 10 分钟。几块小组件请写同一个数字。"),
     h("li", {}, "锁屏小组件同理，会显示下一节课和倒计时。"),
-    h("li", {}, "在 Scriptable 里直接运行这个脚本，可以预览各种尺寸；小组件提示“脚本可更新”时，运行脚本选“更新脚本”即可，不用重新复制。"));
+    h("li", {}, "上课提醒是手机本地通知（课程、时间、教室）。第一次请打开 Scriptable 运行脚本并允许通知；"
+      + "课表有变动时，小组件下次刷新会改掉已经安排的提醒。"),
+    h("li", {}, "课表过期，或下一节课在一个半小时内且数据已超过 15 分钟，小组件会请服务器向学校拉取。"
+      + "标题栏显示“更新中”，大约两分钟后再画一次。在 Scriptable 里运行脚本，选“刷新课表”可以马上排一次。"),
+    h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
 
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "借助免费的 Scriptable App，在 iPhone / iPad 桌面和锁屏上显示今天、明天或本周的课。"
+      + "课表过期或快上课时，小组件会主动请服务器更新，并在上课前发本地通知。"
       + "小组件用一条只读链接取数据，链接本身就是凭证，泄露后请重新生成。"),
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
     manual,

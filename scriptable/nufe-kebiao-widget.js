@@ -9,16 +9,28 @@
  *   1. App Store 安装免费的 Scriptable，新建脚本，把这整段粘贴进去（网站设置里“复制脚本”已经填好你的链接）。
  *   2. 桌面长按 → 添加小组件 → Scriptable → 选尺寸 → 编辑小组件：Script 选这个脚本。
  *   3. Parameter 填 today（今天，默认）/ tomorrow（明天）/ week（本周，建议用大号或中号）。
+ *      再加一个数字是提前几分钟上课提醒：today 15；today 0 关闭。不写则提前 10 分钟。
+ *      几块小组件请写同一个数字，后刷新的那块会改掉已经安排的提醒。
  *   锁屏小组件同样可用：显示下一节课和倒计时。
- *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、更新脚本、打开网站。
+ *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站。
+ *   课表过期或快上课时，小组件会请服务器向学校拉取，标题栏显示“更新中”，大约两分钟后再画一次。
+ *   上课提醒是本机通知。第一次运行脚本时允许 Scriptable 发通知；课表变了，下次刷新会改掉旧提醒。
  *
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
  */
 const WIDGET_URL = "__WIDGET_URL__";
-const SCRIPT_VERSION = "2026.11.01";
+const SCRIPT_VERSION = "2026.11.02";
 
 const TZ_OFFSET_MINUTES = 8 * 60; // 北京时间，学校课表按它算
 const STALE_SECONDS = 2 * 86400;  // 课表超过这么久没更新就提示
+const DEFAULT_REMIND_MINUTES = 10;
+const MAX_REMIND_MINUTES = 180;
+const REMIND_HORIZON_DAYS = 7;    // 安排未来这么多天的提醒；更远的等下次刷新
+const MAX_REMINDERS = 40;         // iOS 待发送通知上限是 64，留出余量
+const REMIND_MIN_GAP_MS = 60 * 1000;
+const SOON_CLASS_MINUTES = 90;    // 下一节课在这么久之内，且数据已旧，就主动拉一次
+const SOON_CLASS_MAX_AGE = 15 * 60;
+const PENDING_REFRESH_MS = 2 * 60000;
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const MODE_ALIASES = {
   today: "today", 今天: "today", 今日: "today", "": "today",
@@ -34,6 +46,18 @@ function parseMode(param, family) {
   // 小号和锁屏放不下一周，退回今天
   if (mode === "week" && (family === "small" || String(family || "").startsWith("accessory"))) return "today";
   return mode;
+}
+
+/** Parameter：`today` / `tomorrow` / `week`，可选再跟提前分钟数（`today 15`，`0` 关闭提醒）。 */
+function parseParam(param, family) {
+  const parts = String(param || "").trim().split(/[\s,，]+/).filter(Boolean);
+  let modeWord = "";
+  let remind = DEFAULT_REMIND_MINUTES;
+  for (const part of parts) {
+    if (/^\d{1,3}$/.test(part)) remind = Math.min(MAX_REMIND_MINUTES, Number(part));
+    else if (!modeWord) modeWord = part;
+  }
+  return { mode: parseMode(modeWord, family), remindMinutes: remind };
 }
 
 function shanghaiNow(ms = Date.now()) {
@@ -220,12 +244,16 @@ function headerNote(payload, offline, day, family) {
   const age = payload && payload.updated_at ? Date.now() / 1000 - payload.updated_at : 0;
   if (age > STALE_SECONDS) return { text: `${Math.floor(age / 86400)} 天未更新`, tone: "warn" };
   if (offline) return { text: "离线", tone: "faint" };
+  if (payload && payload.refresh && (payload.refresh.pending || payload.refresh.due)) {
+    return { text: "更新中", tone: "accent" };
+  }
   if (payload && isNewer(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
   if (day && day.week && family !== "small") return { text: `第 ${day.week} 周`, tone: "faint" };
   return null;
 }
 
-/** 下次刷新：最近的上下课时刻、北京时间零点后一分钟、最多 30 分钟，三者取最早（至少 1 分钟后）。 */
+/** 下次刷新：最近的上下课时刻、北京时间零点后一分钟、最多 30 分钟，三者取最早（至少 1 分钟后）。
+ *  课表正在向学校拉取时改为大约 2 分钟后再看一眼，好把新课表画上去。 */
 function nextRefreshMs(payload, now) {
   const candidates = [now.ms + 30 * 60000];
   const minutesToMidnight = 24 * 60 - now.minutes;
@@ -236,7 +264,115 @@ function nextRefreshMs(payload, now) {
       if (t > now.minutes) candidates.push(now.ms + (t - now.minutes) * 60000);
     }
   }
+  const refresh = payload && payload.refresh;
+  if (refresh && (refresh.pending || refresh.due)) candidates.push(now.ms + PENDING_REFRESH_MS);
   return Math.max(now.ms + 60000, Math.min(...candidates));
+}
+
+/** 未来几天有课的日子（去重）。今天 / 明天会按缓存日期纠正，避免把昨天的“今天”排进提醒。 */
+function lessonDays(payload, now) {
+  const seen = new Set();
+  const out = [];
+  const add = (day) => {
+    if (!day || !day.date || seen.has(day.date)) return;
+    const delta = daysBetween(now.date, day.date);
+    if (!Number.isFinite(delta) || delta < 0 || delta > REMIND_HORIZON_DAYS) return;
+    if (!day.lessons || !day.lessons.length) return;
+    seen.add(day.date);
+    out.push(day);
+  };
+  const { today, tomorrow } = resolveDays(payload, now);
+  add(today);
+  add(tomorrow);
+  add(payload && payload.upcoming);
+  for (const block of [payload && payload.week, payload && payload.next_week]) {
+    for (const day of (block && block.days) || []) add(day);
+  }
+  out.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return out;
+}
+
+function classSoon(payload, now, withinMinutes = SOON_CLASS_MINUTES) {
+  const horizon = withinMinutes * 60000;
+  for (const day of lessonDays(payload, now)) {
+    for (const lesson of day.lessons) {
+      const until = lessonDate(day.date, lesson.start).getTime() - now.ms;
+      if (until > 0 && until <= horizon) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 要不要再请求一次 `?refresh=1`。
+ * 普通打开时服务端已经会把“超过目标间隔”的人排队；这里补两种脚本自己能判断的情况：
+ * 响应里明确写了 due，或下一节课快到了但课表已经超过 15 分钟没更新。
+ * 正在排队、两分钟内刚同步过、或需要重新登录时不再请求。
+ */
+function shouldPushRefresh(payload, now) {
+  if (!payload || (payload.status && payload.status !== "ok")) return false;
+  const refresh = payload.refresh || {};
+  if (refresh.pending || refresh.fresh) return false;
+  if (refresh.due) return true;
+  const age = payload.updated_at ? now.ms / 1000 - payload.updated_at : Infinity;
+  return age >= SOON_CLASS_MAX_AGE && classSoon(payload, now);
+}
+
+function refreshUrl(url) {
+  return `${url}${String(url).includes("?") ? "&" : "?"}refresh=1`;
+}
+
+function reminderId(date, lesson) {
+  let h = 2166136261;
+  const raw = `${lesson.end}|${lesson.name}|${lesson.room || ""}`;
+  for (const ch of raw) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return `nufe-kb-${date}-${lesson.start}-${h.toString(16)}`;
+}
+
+/** 本地通知计划：每节未来的课一条，提前 leadMinutes 分钟。已经开始、或不足 1 分钟的不再响。 */
+function reminderPlan(payload, now, leadMinutes, base) {
+  const lead = Number(leadMinutes);
+  if (!Number.isFinite(lead) || lead <= 0) return [];
+  const items = [];
+  const seen = new Set();
+  for (const day of lessonDays(payload, now)) {
+    for (const lesson of day.lessons) {
+      const startMs = lessonDate(day.date, lesson.start).getTime();
+      const until = startMs - now.ms;
+      if (until < REMIND_MIN_GAP_MS) continue;
+      const when = Math.max(now.ms + 5000, startMs - lead * 60000);
+      if (when >= startMs) continue;
+      const id = reminderId(day.date, lesson);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const mins = Math.max(1, Math.round((startMs - when) / 60000));
+      items.push({
+        id,
+        title: lesson.name,
+        subtitle: mins <= 1 ? "即将上课" : `${mins} 分钟后上课`,
+        body: [`${lesson.start}–${lesson.end}`, lesson.room].filter(Boolean).join(" · "),
+        when,
+        url: base ? siteLink(base, payload, day) : "",
+      });
+    }
+  }
+  items.sort((a, b) => a.when - b.when);
+  return items.slice(0, MAX_REMINDERS);
+}
+
+function triggerMs(value) {
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+function reminderUnchanged(existing, item) {
+  if (!existing || existing.identifier !== item.id) return false;
+  if (existing.title !== item.title || existing.subtitle !== item.subtitle || existing.body !== item.body) return false;
+  const ms = triggerMs(existing.triggerDate || existing.nextTriggerDate);
+  return Number.isFinite(ms) && Math.abs(ms - item.when) < 20000;
 }
 
 // ---------- Scriptable 渲染 ----------
@@ -531,28 +667,95 @@ function buildWidget(payload, { family, mode, offline, nowMs = Date.now() }) {
 
 // ---------- 读取数据 ----------
 
-async function load() {
+function cachePath() {
   const fm = FileManager.local();
-  const cachePath = fm.joinPath(fm.cacheDirectory(), cacheName(WIDGET_URL));
+  return { fm, path: fm.joinPath(fm.cacheDirectory(), cacheName(WIDGET_URL)) };
+}
+
+function feedRequest(url) {
+  const req = new Request(url);
+  req.timeoutInterval = 12;
+  req.headers = { "Cache-Control": "no-cache" };
+  return req;
+}
+
+async function readFeed(url) {
+  const req = feedRequest(url);
+  const data = await req.loadJSON();
+  const status = req.response && req.response.statusCode;
+  if (status === 404) return { error: "小组件链接已失效：请到网站设置里重新生成，并重新复制脚本" };
+  if (!data || data.v !== 1) throw new Error(`unexpected response ${status}`);
+  return { data };
+}
+
+function saveCache(data) {
+  const { fm, path } = cachePath();
+  fm.writeString(path, JSON.stringify(data));
+}
+
+async function load() {
+  const { fm, path } = cachePath();
   try {
-    const req = new Request(WIDGET_URL);
-    req.timeoutInterval = 10;
-    const data = await req.loadJSON();
-    const status = req.response && req.response.statusCode;
-    if (status === 404) return { error: "小组件链接已失效：请到网站设置里重新生成，并重新复制脚本" };
-    if (!data || data.v !== 1) throw new Error(`unexpected response ${status}`);
-    fm.writeString(cachePath, JSON.stringify(data));
-    return { data, offline: false };
-  } catch (e) {
-    if (fm.fileExists(cachePath)) {
+    let got = await readFeed(WIDGET_URL);
+    if (got.error) return got;
+    // 快上课或服务端说该刷了：再要一次。只写库、不访问学校，失败就用第一次的结果。
+    if (shouldPushRefresh(got.data, shanghaiNow())) {
       try {
-        return { data: JSON.parse(fm.readString(cachePath)), offline: true };
+        const again = await readFeed(refreshUrl(WIDGET_URL));
+        if (again.data) got = again;
+      } catch (_) {
+        // 主动刷新没发出去
+      }
+    }
+    saveCache(got.data);
+    return { data: got.data, offline: false };
+  } catch (e) {
+    if (fm.fileExists(path)) {
+      try {
+        return { data: JSON.parse(fm.readString(path)), offline: true };
       } catch (_) {
         // 缓存坏了就当没有
       }
     }
     return { error: "暂时连不上南财课表，稍后会自动重试" };
   }
+}
+
+/** 按最新课表改本地通知：没变的留下，多出来的删掉，新的补上。lead 为 0 时清空本脚本的提醒。 */
+async function syncReminders(payload, now, leadMinutes, base) {
+  if (typeof Notification === "undefined") return { scheduled: 0, created: 0, removed: 0 };
+  const plan = reminderPlan(payload, now, leadMinutes, base);
+  const pending = typeof Notification.allPending === "function" ? await Notification.allPending() : [];
+  const ours = (pending || []).filter((n) => String(n.identifier || "").startsWith("nufe-kb-"));
+  const keep = new Set();
+  const create = [];
+  for (const item of plan) {
+    const found = ours.find((n) => reminderUnchanged(n, item));
+    if (found) keep.add(found.identifier);
+    else create.push(item);
+  }
+  const remove = ours.map((n) => n.identifier).filter((id) => id && !keep.has(id));
+  if (remove.length && typeof Notification.removePending === "function") await Notification.removePending(remove);
+  for (const item of create) {
+    const n = new Notification();
+    n.identifier = item.id;
+    n.title = item.title;
+    n.subtitle = item.subtitle;
+    n.body = item.body;
+    n.sound = "default";
+    n.threadIdentifier = "nufe-kebiao";
+    if (item.url) n.openURL = item.url;
+    n.setTriggerDate(new Date(item.when));
+    await n.schedule();
+  }
+  return { scheduled: plan.length, created: create.length, removed: remove.length };
+}
+
+function remindSummary(leadMinutes, result, error) {
+  if (error) return `上课提醒未能设置：${error && error.message ? error.message : error}`;
+  if (!result) return "";
+  if (!leadMinutes) return "上课提醒：已关闭";
+  return `上课提醒：提前 ${leadMinutes} 分钟，已安排 ${result.scheduled} 条`;
 }
 
 // ---------- 在 Scriptable 里直接运行：预览 / 更新 / 打开网站 ----------
@@ -578,16 +781,39 @@ async function updateScript() {
   return version;
 }
 
-async function inAppMenu(result, mode) {
+async function inAppMenu(result, mode, remindNote) {
   const alert = new Alert();
   alert.title = "南财课表小组件";
   const latest = result.data && result.data.script_version;
-  alert.message = `脚本版本 ${SCRIPT_VERSION}${isNewer(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
+  const versionNote = `脚本版本 ${SCRIPT_VERSION}${isNewer(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
+  alert.message = remindNote ? `${versionNote}\n${remindNote}` : versionNote;
   const actions = [
     ["预览今天（中号）", () => buildWidget(result.data, { family: "medium", mode: "today", offline: result.offline }).presentMedium()],
     ["预览明天（中号）", () => buildWidget(result.data, { family: "medium", mode: "tomorrow", offline: result.offline }).presentMedium()],
     ["预览本周（大号）", () => buildWidget(result.data, { family: "large", mode: "week", offline: result.offline }).presentLarge()],
     ["预览小号", () => buildWidget(result.data, { family: "small", mode, offline: result.offline }).presentSmall()],
+    ["刷新课表", async () => {
+      const got = await readFeed(refreshUrl(WIDGET_URL));
+      if (got.error) throw new Error(got.error);
+      saveCache(got.data);
+      const refresh = got.data.refresh || {};
+      const done = new Alert();
+      if (got.data.status && got.data.status !== "ok") {
+        done.title = "需要重新登录";
+        done.message = "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。";
+      } else if (refresh.pending) {
+        done.title = "已安排刷新";
+        done.message = "正在向学校拉取课表，小组件大约两分钟后会换成新的。";
+      } else if (refresh.fresh) {
+        done.title = "刚刚更新过";
+        done.message = "两分钟内刚同步过，先用现在的课表。";
+      } else {
+        done.title = "没能刷新";
+        done.message = "服务器没有安排刷新，稍后再试。";
+      }
+      done.addAction("好");
+      await done.present();
+    }],
     ["更新脚本", async () => {
       const version = await updateScript();
       const done = new Alert();
@@ -607,7 +833,8 @@ async function inAppMenu(result, mode) {
 
 async function main() {
   const family = config.widgetFamily || "medium";
-  const mode = parseMode(args.widgetParameter, family);
+  const param = parseParam(args.widgetParameter, family);
+  const { mode } = param;
   if (!/^https?:\/\//.test(WIDGET_URL)) {
     const widget = errorWidget("请从网站「设置 → 桌面小组件」复制脚本，里面会带上你的专属链接");
     if (config.runsInWidget) Script.setWidget(widget);
@@ -618,10 +845,21 @@ async function main() {
   if (config.runsInWidget) {
     Script.setWidget(result.error ? errorWidget(result.error)
       : buildWidget(result.data, { family, mode, offline: result.offline }));
-    return;
   }
+  let remindNote = "";
+  if (result.data) {
+    try {
+      const synced = await syncReminders(result.data, shanghaiNow(), param.remindMinutes, siteUrl());
+      remindNote = remindSummary(param.remindMinutes, synced);
+    } catch (e) {
+      // 小组件里系统可能还不让排通知：桌面照常显示，打开脚本时能看到原因
+      remindNote = remindSummary(param.remindMinutes, null, e);
+      if (config.runsInWidget) remindNote = "";
+    }
+  }
+  if (config.runsInWidget) return;
   try {
-    await inAppMenu(result, mode);
+    await inAppMenu(result, mode, remindNote);
   } catch (e) {
     const fail = new Alert();
     fail.title = "出错了";
@@ -634,8 +872,9 @@ async function main() {
 if (typeof ListWidget === "undefined") {
   // Node 测试：只导出纯逻辑
   globalThis.__nufeWidget = {
-    SCRIPT_VERSION, parseMode, shanghaiNow, lessonDate, daysBetween, isNewer, cacheName, siteLink, resolveDays,
-    annotate, termState, buildPlan, weekToShow, weekColumns, headerNote, nextRefreshMs,
+    SCRIPT_VERSION, parseMode, parseParam, shanghaiNow, lessonDate, daysBetween, isNewer, cacheName, siteLink,
+    resolveDays, annotate, termState, buildPlan, weekToShow, weekColumns, headerNote, nextRefreshMs,
+    lessonDays, classSoon, shouldPushRefresh, refreshUrl, reminderPlan,
   };
 } else {
   main().catch((e) => {

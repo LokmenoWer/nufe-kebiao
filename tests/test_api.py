@@ -1373,6 +1373,42 @@ def test_opening_stale_page_queues_background_refresh(up):
     assert c.get("/api/me").json()["refresh_pending"] is False
 
 
+def test_widget_push_refresh(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    anon = TestClient(app)
+
+    fresh = anon.get(path + "?refresh=1")
+    assert fresh.json()["refresh"] == {"pending": False, "due": False, "fresh": True}
+    assert "max-age=60" in fresh.headers["cache-control"]
+    assert _row("2023001", "refresh_requested_at")[0] is None
+
+    # 10 分钟前同步过：还没到目标间隔，普通打开不排队；小组件点了刷新则会排队
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_success_at=? WHERE student_id='2023001'", (db.now() - 600,))
+    opened = anon.get(path).json()["refresh"]
+    assert opened == {"pending": False, "due": False, "fresh": False}
+    pushed = anon.get(path + "?refresh=1")
+    assert pushed.json()["refresh"]["pending"] is True
+    assert "no-store" in pushed.headers["cache-control"]
+    assert _row("2023001", "refresh_request_reason")[0] == "小组件请求刷新"
+    anon.get(path + "?refresh=1")  # 已经在排队：不改原因
+    assert _row("2023001", "refresh_request_reason")[0] == "小组件请求刷新"
+
+    with db.tx() as conn:
+        conn.execute(
+            """UPDATE users SET last_success_at=?, refresh_requested_at=NULL, refresh_request_reason=NULL
+               WHERE student_id='2023001'""", (db.now() - 30 * 86400,))
+    assert anon.get(path).json()["refresh"]["pending"] is True
+    assert _row("2023001", "refresh_request_reason")[0] == "打开时数据已过期"
+
+    up.expired.add("2023001")
+    c.post("/api/refresh", headers=_csrf(c), json={})
+    denied = anon.get(path + "?refresh=1").json()
+    assert denied["status"] == "needs_rebind" and denied["refresh"]["pending"] is False
+
+
 def test_widget_and_ics_record_activity(up, monkeypatch):
     monkeypatch.setattr(service, "_touched", {})
     c = TestClient(app)

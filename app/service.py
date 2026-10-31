@@ -736,6 +736,43 @@ def request_if_stale(uid: int, now: float | None = None) -> bool:
     return True
 
 
+def _widget_data_fresh(last_success_at: float | None, now: float) -> bool:
+    """两分钟内刚同步过。读配置模块本身：测试会把 service 里的同名全局改成 0，不能跟着变。"""
+    from .config import MANUAL_REFRESH_FRESH_SECONDS as window
+    return bool(last_success_at and now - last_success_at < window)
+
+
+def widget_refresh_state(uid: int, now: float | None = None) -> dict:
+    """小组件 JSON 里的 refresh：是否在排队、是否刚刷过、策略上是否已经逾期。"""
+    now = db.now() if now is None else now
+    row = db.connect().execute(f"SELECT status, {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        return {"pending": False, "due": False, "fresh": False}
+    sig = signals_of(row)
+    pending = bool(
+        row["status"] == "ok" and sig.refresh_requested_at
+        and (not sig.last_success_at or sig.refresh_requested_at > sig.last_success_at))
+    fresh = _widget_data_fresh(sig.last_success_at, now)
+    due = row["status"] == "ok" and not pending and not fresh and refresh_policy.overdue(sig, now) >= 1
+    return {"pending": pending, "due": due, "fresh": fresh}
+
+
+def push_widget_refresh(uid: int, now: float | None = None) -> dict:
+    """小组件明确要求刷新：状态正常、没在排队、也不是刚刚同步过，就插到队首。
+
+    不看目标间隔。脚本只在快上课或用户点了“刷新课表”时才调用；两分钟内刚成功过则跳过，
+    避免和网站上的手动刷新抢学校。真正访问学校仍走调度器的全站预算。
+    """
+    now = db.now() if now is None else now
+    state = widget_refresh_state(uid, now)
+    if state["pending"] or state["fresh"]:
+        return state
+    row = db.connect().execute("SELECT status FROM users WHERE id=?", (uid,)).fetchone()
+    if row and row["status"] == "ok":
+        request_refresh(uid, "小组件请求刷新", now)
+    return widget_refresh_state(uid, now)
+
+
 def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, int]]:
     """该刷的人，按逾期程度从高到低：[(score, uid)]。顺带惰性重算过期的“下一节课”。"""
     now = db.now() if now is None else now

@@ -637,15 +637,30 @@ def widget_script_by_token(token: str):
 
 
 @app.get("/widget/{token}.json")
-def widget_feed(token: str):
+def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     user = _widget_user(token)
-    _record_use(user["id"])
+    try:
+        service.touch(user["id"])
+        # ?refresh=1：脚本判断快上课，或用户在 Scriptable 里点了“刷新课表”。
+        # 普通打开仍只在超过目标间隔时排队（旧脚本也靠这个）。
+        if refresh:
+            service.push_widget_refresh(user["id"])
+        else:
+            service.request_if_stale(user["id"])
+    except Exception as e:
+        log.warning("record use failed for user %s: %s", user["id"], type(e).__name__)
     view = service.timetable_view(user["id"], None)
     week1 = view.get("week1_monday") if view else None
     _template, version = _widget_template()
     payload = widget.build(view, week1, status=user["status"], script_version=version)
-    # 内容随时间变化（今天 / 明天），只做很短的缓存
-    return JSONResponse(payload, headers={"Cache-Control": "private, max-age=60", **_WIDGET_HEADERS})
+    try:
+        payload["refresh"] = service.widget_refresh_state(user["id"])
+    except Exception as e:
+        log.warning("widget refresh state failed for user %s: %s", user["id"], type(e).__name__)
+        payload["refresh"] = {"pending": False, "due": False, "fresh": False}
+    # 正在排队时不要缓存，两分钟后的重画必须打到服务器
+    caching = "private, no-store" if payload["refresh"].get("pending") else "private, max-age=60"
+    return JSONResponse(payload, headers={"Cache-Control": caching, **_WIDGET_HEADERS})
 
 
 @app.post("/api/account/delete")

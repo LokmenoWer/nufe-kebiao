@@ -144,7 +144,7 @@ class Size {
 
 export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
-  inApp = false, choose = [], scriptBody, scriptStatus = 200,
+  inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [],
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -153,15 +153,24 @@ export async function runWidgetScript({
   let done;
   const finished = new Promise((resolve) => { done = resolve; });
 
+  const requests = [];
   class Request {
     constructor(u) {
       this.url = u;
+      requests.push(u);
     }
 
     async loadJSON() {
       if (fail) throw new Error("offline");
       this.response = { statusCode: status };
-      return JSON.parse(JSON.stringify(payload));
+      const data = JSON.parse(JSON.stringify(payload));
+      if (String(this.url).includes("refresh=1")) {
+        // 替身不跑服务器：刚同步过就保持 fresh，否则视为已经排队
+        data.refresh = data.refresh && data.refresh.fresh
+          ? { ...data.refresh, pending: false, due: false }
+          : { ...(data.refresh || {}), pending: true, due: false, fresh: false };
+      }
+      return data;
     }
 
     async loadString() {
@@ -218,8 +227,55 @@ export async function runWidgetScript({
     }
   };
 
+  const bucket = {
+    pending: pending.map((n) => ({ ...n })),
+    scheduled: [],
+    removed: [],
+  };
+  class Notification {
+    constructor() {
+      this.title = "";
+      this.subtitle = "";
+      this.body = "";
+      this.sound = "";
+      this.threadIdentifier = "";
+      this.openURL = "";
+      this.identifier = "";
+    }
+
+    setTriggerDate(date) {
+      this.triggerDate = date;
+    }
+
+    async schedule() {
+      const copy = {
+        identifier: this.identifier,
+        title: this.title,
+        subtitle: this.subtitle,
+        body: this.body,
+        sound: this.sound,
+        threadIdentifier: this.threadIdentifier,
+        openURL: this.openURL,
+        triggerDate: this.triggerDate,
+      };
+      bucket.pending = bucket.pending.filter((n) => n.identifier !== copy.identifier);
+      bucket.pending.push(copy);
+      bucket.scheduled.push(copy);
+    }
+
+    static async allPending() {
+      return bucket.pending.map((n) => ({ ...n }));
+    }
+
+    static async removePending(ids) {
+      const drop = new Set(ids);
+      bucket.removed.push(...ids);
+      bucket.pending = bucket.pending.filter((n) => !drop.has(n.identifier));
+    }
+  }
+
   const context = {
-    ListWidget, Color, Font, Size, Request,
+    ListWidget, Color, Font, Size, Request, Notification,
     FileManager: { local: () => fm, iCloud: () => { throw new Error("iCloud disabled"); } },
     Alert,
     Safari: { open: (u) => presented.push(`safari:${u}`) },
@@ -236,5 +292,5 @@ export async function runWidgetScript({
   context.globalThis = context;
   vm.runInNewContext(source, context);
   await finished;
-  return { widget: result, files, alerts, presented };
+  return { widget: result, files, alerts, presented, requests, notifications: bucket };
 }
