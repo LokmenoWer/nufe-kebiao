@@ -47,7 +47,6 @@ class TomorrowReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = TomorrowWidget()
 }
 
-private const val COUNTDOWN_WITHIN_MS = 60 * 60_000L
 private const val ROW_H = 44      // 列表一行（课名 + 时间教室）的高度，含间距；汉字行高约 1.4 倍字号
 private const val HEADER_H = 26
 
@@ -88,48 +87,54 @@ private fun DayContent(context: Context, data: WidgetData, tomorrow: Boolean) {
     }
 }
 
-private const val MORE_H = 16   // “还有 N 节”一行
+private const val MORE_H = 16f  // “还有 N 节”一行
 
-/** 小号：只画最要紧的一节课——正在上的，或下一节。 */
+/**
+ * 小号（和 iOS 的小号一样）：只画最要紧的一节——正在上的，或下一节。
+ * 从上到下：“上课中 / 下一节”（调过的课加“· 调课”）→ 大字起止时间 → 课名（课程色）→ 教室 → 倒计时 → “之后还有 N 节”或停课。
+ */
 @Composable
 private fun ColumnScope.Focus(context: Context, plan: DayPlan) {
     val slot = plan.slots.first()
     val lesson = slot.lesson
     val date = plan.day?.date
-    Label(lesson.name, size = 15.sp, bold = true, lines = 2)
-    Spacer(GlanceModifier.height(2.dp))
-    Label("${lesson.start}–${lesson.end}", size = 12.sp, color = GlanceTheme.colors.onSurfaceVariant)
-    Label(roomText(lesson.room, lesson.was), size = 12.sp, color = GlanceTheme.colors.onSurfaceVariant)
+    val height = LocalSize.current.height.value
+    val tag = when (slot.state) {
+        State.LIVE -> "上课中"
+        State.NEXT -> "下一节"
+        else -> ""
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (tag.isNotEmpty()) Label(tag, size = 11.sp, bold = true, color = if (slot.state == State.LIVE) solid(LIVE) else GlanceTheme.colors.primary)
+        if (lesson.changed) Label(if (tag.isNotEmpty()) " · 调课" else "调课", size = 11.sp, bold = true, color = solid(WARN))
+    }
+    Label("${lesson.start}–${lesson.end}", size = 18.sp, bold = true)
+    // 2×2 一般只有 140dp 上下：课名矮的时候只写一行
+    Label(lesson.name, size = 14.sp, bold = true, lines = if (height >= 170) 2 else 1, color = chipText(lesson.color))
+    Label(roomText(lesson.room, lesson.was), size = 11.sp,
+        color = if (lesson.changed) solid(WARN) else GlanceTheme.colors.onSurfaceVariant)
+    if (date != null) StateLine(context, slot, date)
     Spacer(GlanceModifier.defaultWeight())
-    StateLine(context, slot, date)
     val more = plan.slots.size - 1
-    if (more > 0 && slot.state != State.LIVE) {
-        Label("之后还有 $more 节", size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
-    } else if (more > 0) {
-        Label("下一节 ${plan.slots[1].lesson.start} ${plan.slots[1].lesson.name}", size = 11.sp,
-            color = GlanceTheme.colors.onSurfaceVariant)
+    when {
+        plan.cancelled.isNotEmpty() -> Label(cancelledText(plan.cancelled), size = 10.sp, color = solid(WARN))
+        more > 0 -> Label("之后还有 $more 节", size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
     }
 }
 
-/** “正在上课 · 还剩 mm:ss” / “下一节 · mm:ss 后”，一小时以外只写开始时间。 */
+/** 倒计时（系统每秒自己走）：上课中“还剩 mm:ss”，下一节“距上课 h:mm:ss”——不论多久以后都显示。 */
 @Composable
-private fun StateLine(context: Context, slot: Slot, date: String?) {
-    if (date == null) return
+private fun StateLine(context: Context, slot: Slot, date: String) {
     val lesson = slot.lesson
     Row(verticalAlignment = Alignment.CenterVertically) {
         when (slot.state) {
             State.LIVE -> {
-                Label("上课中 · 还剩 ", size = 12.sp, color = solid(LIVE), bold = true)
+                Label("还剩 ", size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
                 Countdown(context, lessonMs(date, lesson.end), LIVE)
             }
             State.NEXT -> {
-                val start = lessonMs(date, lesson.start)
-                if (start - Now.current().ms <= COUNTDOWN_WITHIN_MS) {
-                    Label("距上课 ", size = 12.sp, color = GlanceTheme.colors.primary, bold = true)
-                    Countdown(context, start, ACCENT)
-                } else {
-                    Label("下一节 · ${lesson.start} 开始", size = 12.sp, color = GlanceTheme.colors.primary, bold = true)
-                }
+                Label("距上课 ", size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                Countdown(context, lessonMs(date, lesson.start), ACCENT)
             }
             else -> Unit
         }
@@ -141,51 +146,56 @@ fun roomText(room: String, was: String? = null): String {
     return if (was != null) "$place（$was）" else place
 }
 
-/** 中 / 大号：按高度能放几行就放几行，放不下的合成“还有 N 节”。 */
+fun cancelledText(list: List<Cancelled>) = "停课：" + list.joinToString("、") { "${it.name} ${it.start}" }
+
+/**
+ * 中 / 大号：按高度能放几行就放几行，放不下的合成“还有 N 节”；有停课时停课比“还有 N 节”更要紧，挤掉最后一节。
+ * 大号（拉高拉宽）再写上教师。
+ */
 @Composable
 private fun ColumnScope.LessonList(context: Context, slots: List<Slot>, cancelled: List<Cancelled>, date: String?, height: Float) {
-    // 全放得下就全放；放不下时留出“还有 N 节”那一行
+    val size = LocalSize.current
+    val showTeacher = size.width.value >= 250 && size.height.value >= 250
     val fitAll = ((height + 4) / ROW_H).toInt()
-    val showCancelled = cancelled.isNotEmpty() && fitAll > slots.size
-    val shown = if (slots.size <= fitAll) slots
-    else slots.take(maxOf(1, ((height - MORE_H + 4) / ROW_H).toInt()))
+    val reserve = (if (cancelled.isNotEmpty()) MORE_H else 0f)
+    val shown = if (slots.size <= ((height - reserve + 4) / ROW_H).toInt()) slots
+    else slots.take(maxOf(1, ((height - reserve - MORE_H + 4) / ROW_H).toInt()))
     for (slot in shown) {
-        LessonRow(context, slot, date)
+        LessonRow(context, slot, date, showTeacher)
         Spacer(GlanceModifier.height(4.dp))
     }
+    if (cancelled.isNotEmpty() && fitAll > 0) Label(cancelledText(cancelled), size = 11.sp, color = solid(WARN))
     val hidden = slots.size - shown.size
     if (hidden > 0) {
         val last = slots.last().lesson
         Label("还有 $hidden 节 · 到 ${last.end}", size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
     }
-    if (showCancelled) {
-        Label("停课：" + cancelled.joinToString("、") { "${it.start} ${it.name}" }, size = 11.sp, color = solid(WARN))
-    }
 }
 
+/** 一行课：课名（调过的加“调”）、“起止 · 教室 · 教师”（调过的标橙色），右边“上课中 / 下一节”和倒计时。 */
 @Composable
-private fun LessonRow(context: Context, slot: Slot, date: String?) {
+private fun LessonRow(context: Context, slot: Slot, date: String?, showTeacher: Boolean = false) {
     val lesson = slot.lesson
     val live = slot.state == State.LIVE
     Chip(lesson.color, height = 40.dp) {
         Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = GlanceModifier.defaultWeight()) {
-                Label((if (lesson.changed) "调 · " else "") + lesson.name, size = 13.sp, bold = true,
-                    color = chipText(lesson.color))
-                val meta = listOf("${lesson.start}–${lesson.end}", roomText(lesson.room, lesson.was))
-                Label(meta.joinToString("  "), size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Label(lesson.name, size = 13.sp, bold = true, color = chipText(lesson.color))
+                    if (lesson.changed) Label(" 调", size = 11.sp, bold = true, color = solid(WARN))
+                }
+                val meta = listOfNotNull("${lesson.start}–${lesson.end}", roomText(lesson.room, lesson.was),
+                    lesson.teachers.takeIf { showTeacher && it.isNotEmpty() })
+                Label(meta.joinToString(" · "), size = 11.sp,
+                    color = if (lesson.changed) solid(WARN) else GlanceTheme.colors.onSurfaceVariant)
             }
             if (date != null && (live || slot.state == State.NEXT)) {
                 Spacer(GlanceModifier.width(4.dp))
-                val target = lessonMs(date, if (live) lesson.end else lesson.start)
-                if (live || target - Now.current().ms <= COUNTDOWN_WITHIN_MS) {
-                    // 嵌入的 RemoteViews 不受 Glance 的权重约束，给它一个固定宽度，免得把课名挤没
-                    Column(modifier = GlanceModifier.width(56.dp), horizontalAlignment = Alignment.End) {
-                        Label(if (live) "还剩" else "距上课", size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
-                        Countdown(context, target, if (live) LIVE else ACCENT)
-                    }
-                } else {
-                    Label("下一节", size = 11.sp, bold = true, color = GlanceTheme.colors.primary)
+                // 嵌入的 RemoteViews 不受 Glance 的权重约束，给它一个固定宽度，免得把课名挤没
+                Column(modifier = GlanceModifier.width(60.dp), horizontalAlignment = Alignment.End) {
+                    Label(if (live) "上课中" else "下一节", size = 10.sp, bold = true,
+                        color = if (live) solid(LIVE) else GlanceTheme.colors.primary)
+                    Countdown(context, lessonMs(date, if (live) lesson.end else lesson.start), if (live) LIVE else ACCENT)
                 }
             }
         }
@@ -196,7 +206,18 @@ private fun LessonRow(context: Context, slot: Slot, date: String?) {
 @Composable
 private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: DayPlan, small: Boolean) {
     Label(plan.empty, size = if (small) 13.sp else 14.sp, bold = true, lines = 2)
+    if (plan.cancelled.isNotEmpty()) Label(cancelledText(plan.cancelled), size = 10.sp, color = solid(WARN), lines = 2)
     val preview = plan.preview ?: return
+    if (small) {
+        // 小号和 iOS 一样：“明天 周二 10:00”，下面大字写第一节课名
+        val first = preview.slots.first().lesson
+        Spacer(GlanceModifier.defaultWeight())
+        Label("${preview.title.replace(" · ", " ")} ${first.start}", size = 11.sp, bold = true,
+            color = GlanceTheme.colors.onSurfaceVariant)
+        Label(first.name, size = 14.sp, bold = true, lines = 2, color = chipText(first.color))
+        if (preview.slots.size > 1) Label("共 ${preview.slots.size} 节", size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
+        return
+    }
     Spacer(GlanceModifier.height(6.dp))
     Label(preview.title, size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
     Spacer(GlanceModifier.height(3.dp))

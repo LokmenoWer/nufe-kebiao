@@ -21,6 +21,7 @@ import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.resolveDays
 import wiki.nufe.kebiao.remind.Reminders
+import wiki.nufe.kebiao.widget.FullWeekWidget
 import wiki.nufe.kebiao.widget.TodayWidget
 import wiki.nufe.kebiao.widget.TomorrowWidget
 import wiki.nufe.kebiao.widget.WeekWidget
@@ -29,7 +30,7 @@ import wiki.nufe.kebiao.widget.WeekWidget
  * 什么时候拉数据、什么时候重画：
  * - 每 30 分钟一次的周期任务兜底（系统可能推迟，国产 ROM 需要允许后台运行）；
  * - 另排一次“下一个时刻”：最近的上下课、课前 25 分钟（服务器刚在课前半小时确认完课表）、北京时间零点后，
- *   课前 1 小时（开始显示倒计时），服务器正在向学校拉课表时改为大约 2 分钟后，这样“正在上课 / 下一节”能按时切换。
+ *   服务器正在向学校拉课表时改为大约 2 分钟后，这样“正在上课 / 下一节”能按时切换。
  */
 object Sync {
     private const val PERIODIC = "sync-periodic"
@@ -67,10 +68,7 @@ object Sync {
         val candidates = mutableListOf(now.ms + MAX_REDRAW_MS, now.ms + (24 * 60 - now.minutes + 1) * 60_000L)
         val (today, _) = resolveDays(payload, now)
         for (lesson in today?.lessons.orEmpty()) {
-            // 课前 60 分钟：小组件从“几点开始”换成倒计时
-            val moments = listOf(lesson.startMinutes - 60, lesson.startMinutes - AFTER_CHECK_MINUTES, lesson.startMinutes,
-                lesson.endMinutes)
-            for (t in moments) {
+            for (t in listOf(lesson.startMinutes - AFTER_CHECK_MINUTES, lesson.startMinutes, lesson.endMinutes)) {
                 if (t > now.minutes) candidates += now.ms + (t - now.minutes) * 60_000L
             }
         }
@@ -92,6 +90,7 @@ object Sync {
         TodayWidget().updateAll(context)
         TomorrowWidget().updateAll(context)
         WeekWidget().updateAll(context)
+        FullWeekWidget().updateAll(context)
     }
 }
 
