@@ -1,4 +1,4 @@
-/** 设置里的“桌面小组件”：生成只读链接、复制 Scriptable 脚本、使用步骤。 */
+/** 设置里的“桌面小组件”：生成只读链接，iOS 复制 Scriptable 脚本、安卓交给 App，使用步骤。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -28,6 +28,11 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     icon("copy"), h("span", {}, "复制脚本"));
   const rotateBtn = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => rotate() }, "重新生成");
   const disableBtn = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => disable() }, "停用");
+  // 安卓 App（android/）直接读同一条链接：nufekebiao:// 能一键带过去，没装 App 时也可以复制链接手动粘贴
+  const androidOpen = h("a", { class: "btn btn-sm", href: "#" }, "在安卓 App 中打开");
+  const androidCopy = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => copyLink() },
+    icon("copy"), h("span", {}, "复制链接"));
+  const androidRow = h("div", { class: "button-row" }, androidOpen, androidCopy);
   const manual = h("textarea", {
     class: "widget-script", readonly: "", rows: "6", hidden: true, "aria-label": "小组件脚本，手动全选复制",
   });
@@ -49,20 +54,31 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
       + "标题栏显示“更新中”，大约两分钟后再画一次。在 Scriptable 里运行脚本，选“刷新课表”可以马上排一次。"),
     h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
 
+  const androidSteps = h("ol", { class: "widget-steps" },
+    h("li", {}, "安装“南财课表”安卓 App（源码在项目仓库的 android/ 目录）。"),
+    h("li", {}, "在手机浏览器里点上面的“在安卓 App 中打开”，或“复制链接”后在 App 里粘贴。"),
+    h("li", {}, "在 App 里点“添加‘今天’ / ‘明天’ / ‘本周’”，或长按桌面 → 小组件 → 南财课表。本周课表建议 4×3 以上。"),
+    h("li", {}, "上课提醒在 App 里选提前几分钟，并允许通知；国产系统请允许 App 自启动、后台运行。"));
+
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "借助免费的 Scriptable App，在 iPhone / iPad 桌面和锁屏上显示今天、明天或本周的课。"
       + "课表过期或快上课时，小组件会主动请服务器更新，并在上课前发本地通知。"
       + "小组件用一条只读链接取数据，链接本身就是凭证，泄露后请重新生成。"),
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
     manual,
+    h("p", { class: "hint" }, "安卓：用“南财课表”App 在桌面显示今天、明天和本周的课，并在课前提醒。"),
+    androidRow,
     status,
-    h("details", { class: "widget-help" }, h("summary", {}, "安装步骤"), steps));
+    h("details", { class: "widget-help" }, h("summary", {}, "iOS 安装步骤"), steps),
+    h("details", { class: "widget-help" }, h("summary", {}, "安卓安装步骤"), androidSteps));
 
   function render() {
     createBtn.hidden = Boolean(url);
     copyBtn.hidden = !url;
     rotateBtn.hidden = !url;
     disableBtn.hidden = !url;
+    androidRow.hidden = !url;
+    androidOpen.href = url ? `nufekebiao://setup?url=${encodeURIComponent(url)}` : "#";
     if (!url) manual.hidden = true;
   }
 
@@ -75,7 +91,7 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
   async function rotate() {
     if (url && !await confirmDialog({
       title: "重新生成小组件链接？",
-      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本。",
+      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本（安卓 App 里重新粘贴链接）。",
       confirmText: "重新生成",
     })) return;
     try {
@@ -111,6 +127,20 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
       } catch (error) {
         status.textContent = error.message;
       }
+    }
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(url);
+      status.textContent = "链接已复制，打开南财课表 App 粘贴即可。";
+      showToast("链接已复制", { type: "success" });
+    } catch {
+      manual.value = url;
+      manual.hidden = false;
+      manual.focus();
+      manual.select();
+      status.textContent = "浏览器没允许自动复制：链接已选中，请手动复制。";
     }
   }
 

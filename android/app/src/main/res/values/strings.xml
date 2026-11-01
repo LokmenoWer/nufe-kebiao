@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">南财课表</string>
+    <string name="widget_today">今天的课</string>
+    <string name="widget_tomorrow">明天的课</string>
+    <string name="widget_week">本周课表</string>
+    <string name="widget_today_desc">正在上课倒计时、下一节提醒，课上完预告下次上课</string>
+    <string name="widget_tomorrow_desc">明天的全部课程</string>
+    <string name="widget_week_desc">按真实时长铺满的本周课表</string>
+</resources>
