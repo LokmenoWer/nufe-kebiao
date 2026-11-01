@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request, Response
 
-from . import crypto, db
+from . import crypto, db, presence
 from .config import COOKIE_PATH, COOKIE_SECURE, PUBLIC_BASE_URL, SESSION_DAYS_LONG, SESSION_DAYS_SHORT
 
 SESSION_COOKIE = "kb_session"
@@ -127,6 +127,7 @@ def current_session(request: Request):
            WHERE s.token_hash=? AND s.expires_at > ?""", (crypto.token_hash(token), db.now())).fetchone()
     if not row:
         raise HTTPException(401, "会话已失效")
+    presence.mark_user(row["id"], "web")
     return row
 
 

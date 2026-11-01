@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import time
 
 from . import polite, service
 from .config import REFRESH_BUDGET_RPS, SCHEDULER_TICK
@@ -50,6 +51,7 @@ class Budget:
 
 
 _budget = Budget()
+last_tick: dict | None = None   # 最近一个 tick 的概要，管理员页展示用
 
 
 def run_once(budget: Budget | None = None) -> int:
@@ -83,6 +85,8 @@ def run_once(budget: Budget | None = None) -> int:
         done += 1
         if _stop.wait(random.uniform(*USER_GAP)):
             break
+    global last_tick
+    last_tick = {"at": time.time(), "due": len(due), "refreshed": done, "budget_rps": round(budget.rate, 3)}
     # 有人到期、刷了人、或预算变了才记一行：平时安静，需要时能看出调度器在干什么
     if due or done or budget.rate != before:
         log.info("tick: due=%d refreshed=%d budget=%.2f/s (max %.2f)%s",
@@ -125,6 +129,12 @@ def start(refresh: bool = True) -> None:
             _threads.append(threading.Thread(target=_loop, name="refresh-scheduler", daemon=True))
         for t in _threads:
             t.start()
+
+
+def alive() -> dict:
+    """各后台线程是否还活着：{线程名: bool}。"""
+    with _thread_lock:
+        return {t.name: t.is_alive() for t in _threads}
 
 
 def stop() -> None:

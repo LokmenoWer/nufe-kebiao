@@ -24,7 +24,7 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .ruff_cache --exclude .claude \
   ./ "$HOST:$APP_DIR/"
 
-"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' bash -s" <<'REMOTE'
+"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' bash -s" <<'REMOTE'
 set -euo pipefail
 APP_DIR=/opt/nufe-kebiao
 id kebiao >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin kebiao
@@ -43,6 +43,13 @@ FORCE_HTTPS=true
 SCHEDULER_ENABLED=true
 ENV
   )
+fi
+# 管理员页密码：deploy.env 里配了哈希就同步到服务器（只传哈希，不传明文）
+if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
+  (umask 077
+   grep -v '^ADMIN_PASSWORD_HASH=' "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
+   printf "ADMIN_PASSWORD_HASH='%s'\n" "$ADMIN_PASSWORD_HASH" >> "$APP_DIR/.env.tmp"
+   mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 fi
 chown root:kebiao "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 

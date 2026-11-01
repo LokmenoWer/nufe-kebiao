@@ -16,11 +16,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, Field
 
-from . import cas, crypto, db, mailer, notify, scheduler, service, widget
+from . import admin, cas, crypto, db, mailer, notify, presence, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -29,6 +29,7 @@ from .config import (
 )
 from .polite import MAX_CONCURRENCY
 from .security import (
+    RateLimiter,
     clear_device_hint,
     clear_session_cookie,
     create_session,
@@ -71,6 +72,7 @@ class _RedactTokenPaths(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_RedactTokenPaths())
+admin.install_log_capture()
 
 
 _upstream = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix="upstream")
@@ -85,6 +87,8 @@ async def _upstream_call(fn):
 
 @asynccontextmanager
 async def lifespan(_app):
+    # uvicorn.run(app) 会在导入之后才配置 logging、换掉 handler：启动时再挂一次（重复挂不会重复记录）
+    admin.install_log_capture()
     db.init()
     mailer.start()
     scheduler.start(refresh=SCHEDULER_ENABLED)
@@ -123,7 +127,7 @@ async def validation_exception(_request: Request, _exc: RequestValidationError):
 
 @app.middleware("http")
 async def security_mw(request: Request, call_next):
-    if request.url.path == "/static/index.html":
+    if request.url.path in ("/static/index.html", "/static/admin.html"):
         # 模板里的 {{v}} 只应由 / 渲染，避免通过静态目录拿到未替换的版本
         return PlainTextResponse("Not Found", status_code=404)
     if FORCE_HTTPS and request.url.scheme != "https":
@@ -134,6 +138,9 @@ async def security_mw(request: Request, call_next):
         return RedirectResponse(target, 308)
     if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request):
         return JSONResponse({"detail": "非法来源"}, 403)
+    if request.url.path == "/" or (request.url.path.startswith("/api/")
+                                   and not request.url.path.startswith("/api/admin/")):
+        presence.mark_visitor(_client_ip(request))
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
@@ -666,6 +673,7 @@ def widget_script_by_token(token: str):
 @app.get("/widget/{token}.json")
 def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     user = _widget_user(token)
+    presence.mark_user(user["id"], "widget")
     try:
         service.touch(user["id"])
         # ?refresh=1：脚本判断快上课，或用户在 Scriptable 里点了“刷新课表”。
@@ -707,6 +715,7 @@ def ics_feed(token: str, request: Request):
         "SELECT id, student_id FROM users WHERE ics_token_hash=?", (crypto.token_hash(token),)).fetchone()
     if not user:
         raise HTTPException(404)
+    presence.mark_user(user["id"], "ics")
     _record_use(user["id"])
     version, body = service.ics_body(user["id"], user["student_id"])
     etag = f'W/"{version}"'
@@ -764,13 +773,89 @@ def index():
     return HTMLResponse(_render_index(), headers={"Cache-Control": "no-cache"})
 
 
+# ---------- 服务器管理员页 ----------
+
+admin_login_by_ip = RateLimiter(5, 900)
+
+
+class AdminLoginIn(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
+@app.get("/admin")
+def admin_page():
+    if not admin.ENABLED:
+        raise HTTPException(404)
+    html = (STATIC / "admin.html").read_text("utf-8").replace("{{assets}}", f"assets/{_asset_version()}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+
+
+@app.post("/api/admin/login")
+def admin_login(body: AdminLoginIn, request: Request, response: Response):
+    if not admin.ENABLED:
+        raise HTTPException(404)
+    ip = _client_ip(request)
+    if not admin_login_by_ip.hit(ip):
+        raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试")
+    if not admin.verify_password(body.password, admin.ADMIN_PASSWORD_HASH):
+        log.warning("admin login failed from %s", ip)
+        raise HTTPException(401, "密码错误")
+    log.info("admin login from %s", ip)
+    return {"csrf": admin.login(response)}
+
+
+@app.post("/api/admin/logout")
+def admin_logout(request: Request, response: Response, _csrf=Depends(admin.admin_csrf)):
+    admin.logout(request, response)
+    return {"ok": True}
+
+
+@app.get("/api/admin/me")
+def admin_me(csrf=Depends(admin.current_admin)):
+    return {"csrf": csrf}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(_csrf=Depends(admin.current_admin)):
+    return admin.overview()
+
+
+@app.get("/api/admin/logs")
+def admin_logs(after: int = Query(0, ge=0), level: str | None = Query(None, pattern="^(INFO|WARNING|ERROR)$"),
+               q: str | None = Query(None, max_length=100), limit: int = Query(500, ge=1, le=2000),
+               _csrf=Depends(admin.current_admin)):
+    return {"items": admin.ring.since(after, level, q, limit), "seq": admin.ring.seq,
+            "capacity": admin.LOG_CAPACITY}
+
+
+@app.get("/api/admin/schedule")
+def admin_schedule(_csrf=Depends(admin.current_admin)):
+    return admin.schedule()
+
+
+@app.get("/api/admin/refreshes")
+def admin_refreshes(_csrf=Depends(admin.current_admin)):
+    return admin.recent_refreshes()
+
+
+class AdminRefreshIn(BaseModel):
+    uid: int = Field(ge=1)
+
+
+@app.post("/api/admin/request-refresh")
+def admin_request_refresh(body: AdminRefreshIn, _csrf=Depends(admin.admin_csrf)):
+    """把这个人排到队首（仍受全站预算约束，不会绕过对学校的限速）。"""
+    service.request_refresh(body.uid, "管理员手动排队")
+    return {"ok": True}
+
+
 _assets = StaticFiles(directory=STATIC)
 
 
 @app.get("/assets/{version}/{path:path}")
 async def versioned_asset(version: str, path: str, request: Request):
     # 版本号放在路径里，模块之间的相对 import 自动带上同一个版本，整套资源都能长期缓存
-    if not path or path.rsplit("/", 1)[-1] == "index.html" or any(part.startswith(".") for part in path.split("/")):
+    if not path or path.rsplit("/", 1)[-1] in ("index.html", "admin.html") or any(part.startswith(".") for part in path.split("/")):
         return PlainTextResponse("Not Found", status_code=404)
     try:
         resp = await _assets.get_response(path, request.scope)

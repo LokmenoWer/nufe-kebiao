@@ -111,6 +111,9 @@ deploy/deploy.sh
 - 查看日志：`journalctl -u kebiao -f`
 - 看后台刷新在干什么：`journalctl -u kebiao | grep "tick:"`——有人到期、刷了人或预算变化时每个 tick 一行，如 `tick: due=12 refreshed=8 budget=0.65/s (max 0.65)`；学校报错导致预算减半时会写明。
 - 健康检查：`GET /healthz` 返回 `{"ok": true}`。
+- **服务器管理员页** `/admin`：在线人数（5 分钟内有请求的用户 / 访客、1 小时 / 24 小时 / 7 天活跃）、用户与刷新统计、后台刷新排期（每个人的下次刷新时间和原因、预算、学校健康状况，可手动把某人排到队首）、全站刷新记录、实时服务器日志（进程内最近 2000 条，可按级别 / 关键字筛选）。学号和姓名脱敏显示。
+  - 密码只以 PBKDF2 哈希放在服务器 `.env` 的 `ADMIN_PASSWORD_HASH` 里；没配就整个后台返回 404。生成哈希：`.venv/bin/python -m app.admin hash`，写进 `deploy/deploy.env` 后 `deploy/deploy.sh` 会同步到服务器（只传哈希）。
+  - 管理员会话在内存里、12 小时有效，服务重启后需重新登录；登录按 IP 限速（15 分钟 5 次）。
 
 > 订阅链接里的 token 就是凭证。应用已对自身的 uvicorn access log 做 `/ics/<redacted>` 脱敏；如果反向代理、CDN 或云厂商还会记录完整 URL，请自行对 `/ics/` 路径脱敏或不记录。
 
@@ -250,9 +253,12 @@ app/
   notify.py     通知邮箱绑定（验证码）与刷新暂停 / 课表变动提醒
   widget.py     桌面小组件数据（今天 / 明天 / 本周；主动刷新状态在路由里补上）
   security.py   会话、CSRF、限速
+  admin.py      服务器管理员页：密码校验、日志环形缓冲、排期 / 概况数据
+  presence.py   在线人数（进程内记录最近请求）
   main.py       FastAPI 路由 + 安全响应头 + 静态资源版本
 static/
   index.html    前端模板（{{assets}} 等由后端替换）
+  admin.html    服务器管理员页模板；脚本和样式在 admin/
   css/          设计令牌、布局、课表、浮层
   js/           无构建 ES modules（见上文）
 tests/

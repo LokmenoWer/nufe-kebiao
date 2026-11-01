@@ -6,10 +6,12 @@
       captcha → 图形验证码（填 abcd）   slider → 滑块拼图（真的要拖到缺口）
       sms     → 短信二次认证（任意 6 位） otp → 动态口令二次认证（任意 6 位）
     邮件通知在演示模式下不真的发信：绑定邮箱的验证码会打印在这个终端里。
+    服务器管理员页：http://localhost:8765/admin ，密码 demo。
 
 数据库放在临时目录，退出即丢弃。
 """
 import base64
+import hashlib
 import json
 import os
 import random
@@ -26,6 +28,9 @@ os.environ["DB_PATH"] = str(Path(tempfile.mkdtemp()) / "demo.db")
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["PUBLIC_BASE_URL"] = "http://localhost:8765"
 os.environ["MAIL_MAILER"] = "log"  # 邮件通知：不真的发信，验证码等内容打印在服务器日志里
+_salt = os.urandom(16)  # 管理员页密码 demo
+os.environ["ADMIN_PASSWORD_HASH"] = "pbkdf2_sha256$1000${}${}".format(
+    base64.b64encode(_salt).decode(), base64.b64encode(hashlib.pbkdf2_hmac("sha256", b"demo", _salt, 1000)).decode())
 sys.path.insert(0, str(ROOT))
 
 from app import cas, jwxt, security  # noqa: E402

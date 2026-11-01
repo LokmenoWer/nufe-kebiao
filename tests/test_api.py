@@ -1599,3 +1599,91 @@ def test_scheduler_tick_summary_log(up, monkeypatch, caplog):
     scheduler.run_once(b)
     msg = [r.getMessage() for r in caplog.records if "tick:" in r.getMessage()][-1]
     assert "budget=0.33/s" in msg and "减半" in msg
+
+
+# ---------- 服务器管理员页 ----------
+
+def _admin(client, pw="admin-test-pw"):
+    from app import main
+    main.admin_login_by_ip._hits.clear()
+    return client.post("/api/admin/login", headers=ORIGIN, json={"password": pw})
+
+
+def test_admin_requires_password(up):
+    c = TestClient(app)
+    assert c.get("/admin").status_code == 200
+    assert c.get("/api/admin/overview").status_code == 401
+    assert c.get("/api/admin/schedule").status_code == 401
+    assert _admin(c, "wrong").status_code == 401
+    assert c.get("/api/admin/logs").status_code == 401
+    # 用户的会话不能当管理员会话用
+    assert _login(c, "2023001").status_code == 200
+    assert c.get("/api/admin/overview").status_code == 401
+
+
+def test_admin_login_rate_limited(up):
+    from app import main
+    main.admin_login_by_ip._hits.clear()
+    c = TestClient(app)
+    codes = [c.post("/api/admin/login", headers=ORIGIN, json={"password": "x"}).status_code for _ in range(6)]
+    assert codes[:5] == [401] * 5 and codes[5] == 429
+
+
+def test_admin_dashboard(up):
+    user = TestClient(app)
+    assert _login(user, "2023001").status_code == 200
+    user.get("/api/me")
+    c = TestClient(app)
+    r = _admin(c)
+    assert r.status_code == 200
+    csrf = r.json()["csrf"]
+    assert c.get("/api/admin/me").json()["csrf"] == csrf
+
+    o = c.get("/api/admin/overview").json()
+    assert o["users"] == 1 and o["online"]["users"] >= 1 and o["online"]["sessions"] >= 1
+
+    s = c.get("/api/admin/schedule").json()
+    item = s["items"][0]
+    assert item["student"] == "2023*01" and item["name"] == "学**"
+    assert "2023001" not in str(s)          # 学号脱敏
+    assert item["status"] == "ok" and item["next_refresh_at"]
+
+    refreshes = c.get("/api/admin/refreshes").json()
+    assert refreshes and refreshes[0]["trigger"] == "login"
+
+    logs = c.get("/api/admin/logs").json()
+    assert any("admin login" in i["message"] for i in logs["items"])
+    assert all(i["seq"] > logs["seq"] for i in c.get("/api/admin/logs", params={"after": logs["seq"]}).json()["items"])
+
+    # 写操作要 CSRF
+    uid = item["uid"]
+    assert c.post("/api/admin/request-refresh", headers=ORIGIN, json={"uid": uid}).status_code == 403
+    assert c.post("/api/admin/request-refresh", headers={**ORIGIN, "X-CSRF-Token": csrf},
+                  json={"uid": uid}).status_code == 200
+    assert c.get("/api/admin/schedule").json()["items"][0]["pending"] is True
+
+    assert c.post("/api/admin/logout", headers={**ORIGIN, "X-CSRF-Token": csrf}).status_code == 200
+    assert c.get("/api/admin/overview").status_code == 401
+
+
+def test_admin_disabled_without_hash(up, monkeypatch):
+    from app import admin
+    monkeypatch.setattr(admin, "ENABLED", False)
+    c = TestClient(app)
+    assert c.get("/admin").status_code == 404
+    assert _admin(c).status_code == 404
+    assert c.get("/api/admin/overview").status_code == 404
+
+
+def test_admin_template_not_served_raw(up):
+    c = TestClient(app)
+    assert c.get("/static/admin.html").status_code == 404
+
+
+def test_admin_password_hash_roundtrip():
+    from app import admin
+    stored = admin.hash_password("correct horse", iterations=1000)
+    assert admin.verify_password("correct horse", stored)
+    assert not admin.verify_password("wrong", stored)
+    assert not admin.verify_password("x", "garbage")
+    assert admin.mask_id("2023012345") == "2023****45"
