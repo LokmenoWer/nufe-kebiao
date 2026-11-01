@@ -28,10 +28,13 @@ uv venv .venv && uv pip install -p .venv -r requirements.txt
 cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 ```
 
+> **Windows（pwsh）**：上面开头两条在 PowerShell 7 里直接可用（`&&`、`cp` 原生支持）。下文所有 `.venv/bin/…` 在 Windows 换成 `.venv\Scripts\…`（`python.exe` / `uvicorn.exe` / `ruff.exe`）；或全程用 `uv run …`（例如 `uv run python -m app.cli 你的学号 -o my.json`），两个平台同一写法。仓库已带 `pyproject.toml` + `uv.lock`，用 `uv sync` 建环境同样可以。
+
 ### 1. 先用命令行验证登录 + 抓课表
 
 ```bash
 .venv/bin/python -m app.cli 你的学号 -o my.json
+# Windows: .venv\Scripts\python.exe -m app.cli 你的学号 -o my.json
 ```
 
 密码通过交互输入，不回显，不落盘。成功会打印 `登录成功` 和本学期课程列表，并把规范化后的 JSON 写到 `my.json`。
@@ -44,6 +47,7 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 
 ```bash
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+# Windows: .venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
 ```
 
 生产环境放在 Caddy/Nginx/Apache 后面做 HTTPS，把 `PUBLIC_BASE_URL` 设成 `https://...`，系统会自动开启 Secure cookie、HSTS 和 http→https 跳转。后台刷新线程跑在进程内，**只启动一个 worker**（不要用 `--workers N`）。
@@ -52,6 +56,7 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 
 ```bash
 .venv/bin/python scripts/demo_server.py   # http://localhost:8765
+# Windows: .venv\Scripts\python.exe scripts/demo_server.py   # http://localhost:8765
 ```
 
 用 `examples/sample_timetable.json`（脱敏示例数据）跑完整前端：账号密码登录填**任意学号 + 密码 `demo`**；扫码登录点“显示二维码”，几秒后自动“确认”。密码填 `captcha` / `slider` / `sms` / `otp` 可分别演示图形验证码（填 abcd）、滑块拼图、短信和动态口令二次认证。适合改前端时使用。演示模式的登录限速已放宽，不会误挡反复调试。
@@ -60,9 +65,11 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 
 ```bash
 .venv/bin/python -m pytest -q        # 后端 / API（上游全部打桩）
-node --test tests/js/*.test.js       # 前端纯逻辑（Node 20+，无需 npm install）
+node --test tests/js/*.test.js       # 前端纯逻辑（Node 20+，无需安装 npm 依赖；Windows 同款）
 uv pip install -p .venv ruff         # 可选：Python 静态检查
 .venv/bin/ruff check app tests scripts
+# Windows: .venv\Scripts\python.exe -m pytest -q
+#          .venv\Scripts\ruff.exe check app tests scripts
 ```
 
 测试会给上游（CAS/教务）打桩，不访问学校服务器。前端测试覆盖日期/周次、重叠课程分道、课程颜色与节次兜底、URL hash；浏览器端的登录/课表交互可用演示服务器手工验证。
@@ -275,7 +282,7 @@ examples/       脱敏示例课表
 scripts/        离线演示服务器
 deploy/         systemd / Apache 示例与部署脚本
 package.json    前端测试脚本（无依赖）
-pyproject.toml  ruff / pytest 配置
+pyproject.toml  依赖与 uv 配置、ruff / pytest 配置
 ```
 
 ## 开发约定
