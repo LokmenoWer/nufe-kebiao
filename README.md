@@ -28,8 +28,6 @@ uv venv .venv && uv pip install -p .venv -r requirements.txt
 cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 ```
 
-> **Windows（pwsh）**：上面开头两条在 PowerShell 7 里直接可用（`&&`、`cp` 原生支持）。下文所有 `.venv/bin/…` 在 Windows 换成 `.venv\Scripts\…`（`python.exe` / `uvicorn.exe` / `ruff.exe`）；或全程用 `uv run …`（例如 `uv run python -m app.cli 你的学号 -o my.json`），两个平台同一写法。仓库已带 `pyproject.toml` + `uv.lock`，用 `uv sync` 建环境同样可以。
-
 ### 1. 先用命令行验证登录 + 抓课表
 
 ```bash
