@@ -305,6 +305,19 @@ def test_cas_rejects_error_page_as_logged_in():
     assert "personId" in (flow.course_html or "")
 
 
+def test_ics_alarm():
+    tt = {"semester_id": 161, "activities": [
+        {"courseName": "高数", "teachers": [], "weekday": 3, "startUnit": 1, "endUnit": 2, "weeksStr": "1-2",
+         "weekIndexes": [1, 2], "room": "A101", "building": "", "campus": "", "startTime": "8:20", "endTime": "9:45"},
+    ]}
+    assert "VALARM" not in ics.build("2023001", [(tt, "2026-09-07")])
+    out = ics.build("2023001", [(tt, "2026-09-07")], 15)
+    assert out.count("BEGIN:VALARM") == 2 and out.count("TRIGGER:-PT15M") == 2
+    assert out.index("BEGIN:VALARM") < out.index("END:VEVENT")
+    assert [ics.parse_alarm(v) for v in (None, "", "abc", "0", "-5", "10", " 30 ", "120", "121")] == \
+        [0, 0, 0, 0, 0, 10, 30, 120, 0]
+
+
 def test_ics_skips_invalid_time_ranges():
     tt = {"semester_id": 1, "activities": [
         {"courseName": "倒序", "teachers": [], "weekday": 1, "startUnit": 1, "endUnit": 2,

@@ -947,6 +947,13 @@ def test_ics_etag_and_log_trim(up):
     assert feed.status_code == 200 and "ETag" in feed.headers
     cached = TestClient(app).get(path, headers={"If-None-Match": feed.headers["etag"]})
     assert cached.status_code == 304
+    assert "VALARM" not in feed.text
+    alarmed = TestClient(app).get(path + "?alarm=10")
+    assert alarmed.status_code == 200 and alarmed.text.count("TRIGGER:-PT10M") == feed.text.count("BEGIN:VEVENT")
+    assert alarmed.headers["etag"] != feed.headers["etag"]
+    # 换了提醒分钟数，旧 ETag 不能命中 304
+    assert TestClient(app).get(path + "?alarm=10", headers={"If-None-Match": feed.headers["etag"]}).status_code == 200
+    assert "VALARM" not in TestClient(app).get(path + "?alarm=bad").text
     uid = c.get("/api/me").json()["student_id"]
     assert uid == "2023001"
     with db.tx() as conn:

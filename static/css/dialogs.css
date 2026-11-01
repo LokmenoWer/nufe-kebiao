@@ -177,6 +177,7 @@ dialog[open] { animation: modal-in 0.16s ease-out; }
   letter-spacing: -0.2px;
 }
 .copy-row .btn { flex: none; }
+.field-inline { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--text-2); }
 
 .log-details { border-top: 1px solid var(--line); padding-top: 8px; }
 .log-details summary {

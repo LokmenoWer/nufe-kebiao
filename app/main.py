@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin, cas, crypto, db, mailer, notify, presence, scheduler, service, widget
+from . import admin, cas, crypto, db, ics, mailer, notify, presence, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -741,7 +741,9 @@ def ics_feed(token: str, request: Request):
         raise HTTPException(404)
     presence.mark_user(user["id"], "ics")
     _record_use(user["id"])
-    version, body = service.ics_body(user["id"], user["student_id"])
+    # ?alarm=N：每节课带课前 N 分钟的提醒（安卓 ICSx⁵、Outlook 等会照着响）；不写就和以前一样不带
+    version, body = service.ics_body(user["id"], user["student_id"],
+                                     ics.parse_alarm(request.query_params.get("alarm")))
     etag = f'W/"{version}"'
     headers = {
         "Cache-Control": "private, max-age=3600",

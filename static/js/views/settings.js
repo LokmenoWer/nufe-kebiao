@@ -92,6 +92,21 @@ export function openSettings({
     onClick: () => disableIcs(),
   }, "停用订阅");
   const icsInfo = h("p", { class: "hint" });
+  // 上课提醒只是链接上的 ?alarm=N，不存服务器：同一个 token 可以给不同设备订不同提醒
+  const ICS_ALARM_KEY = "kebiao.icsAlarm";
+  const alarmOptions = [["0", "不提醒"], ["5", "提前 5 分钟"], ["10", "提前 10 分钟"],
+    ["15", "提前 15 分钟"], ["20", "提前 20 分钟"], ["30", "提前 30 分钟"]];
+  const alarmSelect = h("select", {
+    class: "select", "aria-label": "日历上课提醒",
+    onChange: () => {
+      try { localStorage.setItem(ICS_ALARM_KEY, alarmSelect.value); } catch { /* 隐私模式 */ }
+      renderIcs();
+    },
+  }, ...alarmOptions.map(([value, label]) => h("option", { value }, label)));
+  try {
+    const saved = localStorage.getItem(ICS_ALARM_KEY);
+    if (alarmOptions.some(([value]) => value === saved)) alarmSelect.value = saved;
+  } catch { /* 读不到就用默认：不提醒 */ }
 
   const themeButtons = h("div", { class: "seg seg-wide", role: "group", "aria-label": "外观" });
   const themeOptions = [["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
@@ -161,6 +176,9 @@ export function openSettings({
 
     section("日历订阅",
       h("p", { class: "hint" }, "在 iOS / macOS 日历、Google 日历或 Outlook 里“添加订阅”并填入链接。链接本身就是凭证，泄露后请重新生成。"),
+      h("p", { class: "hint" }, "安卓：装开源的 ICSx⁵ 添加这个链接，课表会同步进系统日历，用日历自带的桌面小组件就能看。"
+        + "需要上课提醒就先在下面选好再复制（iOS 日历订阅默认会去掉提醒，iPhone 用小组件的提醒即可）。"),
+      h("label", { class: "field-inline" }, h("span", {}, "上课提醒"), alarmSelect),
       h("div", { class: "copy-row" }, icsInput, copyBtn),
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
       icsInfo),
@@ -213,8 +231,14 @@ export function openSettings({
     ].flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, String(value))]));
   }
 
+  function icsLink() {
+    if (!icsUrl) return "";
+    const alarm = alarmSelect.value;
+    return alarm && alarm !== "0" ? `${icsUrl}?alarm=${alarm}` : icsUrl;
+  }
+
   function renderIcs() {
-    icsInput.value = icsUrl || "";
+    icsInput.value = icsLink();
     copyBtn.disabled = !icsUrl;
     rotateBtn.textContent = icsUrl ? "重新生成链接" : "生成链接";
     disableBtn.hidden = !icsUrl;
@@ -256,7 +280,7 @@ export function openSettings({
   async function copyIcs() {
     if (!icsUrl) return;
     try {
-      await navigator.clipboard.writeText(icsUrl);
+      await navigator.clipboard.writeText(icsLink());
       showToast("订阅链接已复制", { type: "success" });
     } catch {
       icsInput.focus();

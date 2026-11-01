@@ -1280,7 +1280,7 @@ def housekeeping() -> None:
             _locks.pop(uid, None)
 
 
-def ics_body(uid: int, student_id: str) -> tuple[str, str]:
+def ics_body(uid: int, student_id: str, alarm_minutes: int = 0) -> tuple[str, str]:
     """一次查出全部学期。按影响正文的全部输入缓存，返回 (正文哈希/ETag, 正文)。"""
     rows = db.connect().execute(
         """SELECT t.semester_id, t.semester_name, t.data_json, t.fetched_at, s.week1_monday AS db_week1
@@ -1293,6 +1293,7 @@ def ics_body(uid: int, student_id: str) -> tuple[str, str]:
         len(rows),
         tuple((r["semester_id"], r["semester_name"], r["db_week1"]) for r in rows),
         tuple(sorted(ov.items())),
+        alarm_minutes,
     )
     cached = _ics_cache.get(uid)
     if cached and cached[0] == key:
@@ -1322,7 +1323,7 @@ def ics_body(uid: int, student_id: str) -> tuple[str, str]:
             **payload,
         }
         sems.append((view, week1))
-    body = ics.build(student_id, sems)
+    body = ics.build(student_id, sems, alarm_minutes)
     # ETag 必须跟随正文（校历/学期数据变化时正文会变），不能只看 fetched_at
     version = hashlib.sha256(body.encode()).hexdigest()[:24]
     _ics_cache[uid] = (key, version, body)
