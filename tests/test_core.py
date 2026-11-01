@@ -394,6 +394,61 @@ def test_error_penalty_grows_and_decays():
         polite.reset_health()
 
 
+def _fake_upstream(monkeypatch, seen=None):
+    """替换底层 HTTPAdapter.send：/a 302 到 /b，/b 返回 200，全程不联网。"""
+    import time
+
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    from app import polite
+    polite.reset_health()
+    monkeypatch.setattr(polite, "MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(polite, "JITTER", 0.0)
+
+    def send(self, request, timeout=None, **kwargs):
+        if seen is not None:
+            seen.append(timeout)
+        r = requests.Response()
+        r.request, r.url, r._content = request, request.url, b""
+        if request.url.endswith("/a"):
+            time.sleep(0.2)  # 让并发的两条都先拿到名额再撞上重定向
+            r.status_code, r.headers["Location"] = 302, "https://jwxt.invalid/b"
+        else:
+            r.status_code = 200
+        return r
+
+    monkeypatch.setattr(HTTPAdapter, "send", send)
+
+
+def test_default_timeout_applies(monkeypatch):
+    from app import polite
+    seen = []
+    _fake_upstream(monkeypatch, seen)
+    s = polite.PoliteSession()
+    s.get("https://jwxt.invalid/b")
+    s.get("https://jwxt.invalid/b", timeout=5)
+    assert seen == [polite.TIMEOUT, 5]
+
+
+def test_concurrent_redirects_do_not_deadlock(monkeypatch):
+    import threading
+
+    from app import polite
+    _fake_upstream(monkeypatch)
+    for slots in (2, 1):  # 并发上限 1 时，单条重定向也不能自锁
+        monkeypatch.setattr(polite, "_slots", threading.BoundedSemaphore(slots))
+        done = []
+        threads = [threading.Thread(target=lambda: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
+                                    daemon=True) for _ in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(5)
+        assert [r.status_code for r in done] == [200, 200]
+        assert all(len(r.history) == 1 for r in done)
+
+
 def test_renew_with_tgc_needs_castgc():
     import requests
     # 没有 CASTGC 时直接返回 False，不发任何请求

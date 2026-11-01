@@ -1,7 +1,7 @@
 """对学校服务器"克制"的 HTTP 会话：全站每秒最多 1 次请求 + 并发上限 + 少量随机抖动。
 
-所有发往 authserver / jwxt 的请求（包括重定向的每一跳）都经过 send()，
-因此这里是唯一的节流点。另外按学校的反应自适应放慢：
+所有发往 authserver / jwxt 的请求（包括重定向的每一跳）都经过 _PoliteAdapter.send()，
+因此这里是唯一的节流点；名额按单跳占用，重定向时不会嵌套申请。另外按学校的反应自适应放慢：
 - 429 / 503 带 Retry-After：全站暂停到指定时间（上限 10 分钟）；不带则暂停 30 秒；
 - 5xx / 超时 / 连接失败：在最小间隔上再加一段惩罚间隔，连续出错翻倍（上限 60 秒），正常响应后逐步减半。
 暂停期间后台刷新直接让路；交互请求最多等 INTERACTIVE_MAX_WAIT 秒，再久就报“学校繁忙”。
@@ -18,6 +18,7 @@ import time
 from contextlib import contextmanager
 
 import requests
+from requests.adapters import HTTPAdapter
 
 USER_AGENT = os.getenv(
     "UPSTREAM_USER_AGENT",
@@ -156,16 +157,39 @@ def _pace(interactive: bool) -> None:
         _last_request_at = time.monotonic()
 
 
+class _PoliteAdapter(HTTPAdapter):
+    """单跳网络请求：占名额、排队限速、记录健康度。每跳结束即释放名额。"""
+
+    def send(self, request, **kwargs):  # type: ignore[override]
+        interactive = _role.get() != "background"
+        with _slots:
+            # 拿到名额后再看一眼：等待期间可能来了交互请求
+            if not interactive and interactive_waiting():
+                raise UpstreamYield()
+            _pace(interactive)  # 可能抛 UpstreamCooldown，不算连接失败
+            try:
+                r = super().send(request, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                _record(None)
+                raise
+            _record(r.status_code, r.headers.get("Retry-After"))
+            return r
+
+
 class PoliteSession(requests.Session):
     def __init__(self) -> None:
         super().__init__()
+        self.mount("https://", _PoliteAdapter())
+        self.mount("http://", _PoliteAdapter())
         self.headers.update({
             "User-Agent": USER_AGENT,
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
     def send(self, request, **kwargs):  # type: ignore[override]
-        kwargs.setdefault("timeout", TIMEOUT)
+        # Session.request() 总会传 timeout=None，setdefault 不顶用
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = TIMEOUT
         interactive = _role.get() != "background"
         if not interactive and (interactive_waiting() or cooldown_remaining() > 0):
             raise UpstreamYield()
@@ -176,18 +200,7 @@ class PoliteSession(requests.Session):
                 global _interactive_waiters
                 _interactive_waiters += 1
         try:
-            with _slots:
-                # 拿到名额后再看一眼：等待期间可能来了交互请求
-                if not interactive and interactive_waiting():
-                    raise UpstreamYield()
-                _pace(interactive)
-                try:
-                    r = super().send(request, **kwargs)
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                    _record(None)
-                    raise
-                _record(r.status_code, r.headers.get("Retry-After"))
-                return r
+            return super().send(request, **kwargs)
         finally:
             if interactive:
                 with _waiters_lock:
