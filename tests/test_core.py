@@ -440,7 +440,8 @@ def test_concurrent_redirects_do_not_deadlock(monkeypatch):
     for slots in (2, 1):  # 并发上限 1 时，单条重定向也不能自锁
         monkeypatch.setattr(polite, "_slots", threading.BoundedSemaphore(slots))
         done = []
-        threads = [threading.Thread(target=lambda: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
+        # lambda 的 done=done 显式绑定当轮列表：列表在循环内重赋值，B023 按晚绑定保守报警
+        threads = [threading.Thread(target=lambda done=done: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
                                     daemon=True) for _ in range(2)]
         for th in threads:
             th.start()
