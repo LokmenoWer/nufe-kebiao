@@ -1401,6 +1401,27 @@ def test_widget_script_self_update_by_token(up):
     assert anon.get("/widget/nope.js").status_code == 404
 
 
+def test_widget_calendar_subscription(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    cal = path.removesuffix(".json") + "/calendar"
+    anon = TestClient(app)
+    # 还没生成 ICS 链接：顺手生成一个，网站设置里也能看到同一个
+    r = anon.post(cal)
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    url = r.json()["ics_url"]
+    assert url.startswith("http://testserver/ics/") and url.endswith(".ics")
+    assert c.get("/api/me").json()["ics_url"] == url
+    assert anon.get(url.removeprefix("http://testserver")).status_code == 200
+    # 已有链接原样返回，不让别处的订阅失效
+    assert anon.post(cal).json()["ics_url"] == url
+    rotated = c.post("/api/ics/rotate", headers=_csrf(c)).json()["ics_url"]
+    assert anon.post(cal).json()["ics_url"] == rotated
+    assert anon.get(cal).status_code == 405
+    assert anon.post("/widget/nope/calendar").status_code == 404
+
+
 def test_widget_requires_login_and_reports_status(up):
     anon = TestClient(app)
     assert anon.get("/api/widget/script").status_code == 401

@@ -845,3 +845,8 @@ test("在 Scriptable 里可以选择刷新课表", async () => {
   });
   assert.equal(relogin.alerts[1].title, "需要重新登录");
 });
+
+test("订阅到日历：链接换成 /calendar，ICS 地址换成 webcal://", () => {
+  assert.equal(W.calendarUrl("https://k.example/widget/abc.json"), "https://k.example/widget/abc/calendar");
+  assert.equal(W.webcalUrl("https://k.example/ics/xyz.ics"), "webcal://k.example/ics/xyz.ics");
+});

@@ -125,6 +125,13 @@ async def validation_exception(_request: Request, _exc: RequestValidationError):
     return JSONResponse({"detail": "请求参数不正确"}, status_code=422)
 
 
+def _widget_post(request: Request) -> bool:
+    """小组件要日历订阅链接：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，没有 CSRF 的问题。
+    浏览器带了别站的 Origin 仍然拒绝。"""
+    return (request.method == "POST" and request.url.path.startswith("/widget/")
+            and request.url.path.endswith("/calendar") and not request.headers.get("origin"))
+
+
 @app.middleware("http")
 async def security_mw(request: Request, call_next):
     if request.url.path in ("/static/index.html", "/static/admin.html"):
@@ -136,7 +143,7 @@ async def security_mw(request: Request, call_next):
         if request.url.query:
             target += "?" + request.url.query
         return RedirectResponse(target, 308)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
         return JSONResponse({"detail": "非法来源"}, 403)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
                                    and not request.url.path.startswith("/api/admin/")):
@@ -699,6 +706,21 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     # 正在排队时不要缓存，两分钟后的重画必须打到服务器
     caching = "private, no-store" if payload["refresh"].get("pending") else "private, max-age=60"
     return JSONResponse(payload, headers={"Cache-Control": caching, **_WIDGET_HEADERS})
+
+
+@app.post("/widget/{token}/calendar")
+def widget_calendar(token: str):
+    """小组件“订阅到日历”：给出本人的 ICS 订阅链接，还没生成就顺手生成一个。
+    小组件链接已经能读到完整课表，ICS 链接是同等的只读权限；已有的链接原样返回，不会让别处的订阅失效。"""
+    user = _widget_user(token)
+    url = _ics_url(user["id"])
+    if not url:
+        new = secrets.token_urlsafe(24)
+        with db.tx() as c:
+            c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=?",
+                      (crypto.token_hash(new), crypto.encrypt(new.encode(), "ics", user["id"]), user["id"]))
+        url = f"{PUBLIC_BASE_URL}/ics/{new}.ics"
+    return JSONResponse({"ics_url": url}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 @app.post("/api/account/delete")
