@@ -120,11 +120,13 @@ class RingHandler(logging.Handler):
             self.records.append({"seq": self.seq, "at": record.created, "level": record.levelname,
                                  "logger": record.name, "message": msg[:2000]})
 
-    # 不用 getLevelName：它对没注册的级别名返回 "Level XXX" 这类字符串,而不是报错，
-    # 筛选两侧都得 isinstance 兜底处理
-    # 这张表只有真实级别，查不到当 0 即可
+    # 不用 getLevelName：它对没注册的级别名返回 "Level XXX" 这类字符串，筛选两侧都得兜底；
+    # 也不用 getLevelNamesMapping：3.11 才有，服务器是 3.10。这张表只有真实级别，查不到当 0
+    _LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING,
+               "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL}
+
     def since(self, after: int, level: str | None, query: str | None, limit: int) -> list[dict]:
-        mapping = logging.getLevelNamesMapping()
+        mapping = self._LEVELS
         floor = mapping.get(level, 0) if level else 0
         q = (query or "").lower()
         with self._ring_lock:

@@ -213,8 +213,8 @@ function renderOverview(o) {
     h("dl", { class: "adm-kv" },
       h("dt", "已运行"), h("dd", `${fmtDuration(o.now - o.started_at)}（启动于 ${fmtTime(o.started_at)}）`),
       h("dt", "24 小时刷新成功/总数"), h("dd", triggers),
-      //使用条件分支处理max_rss_mb为None的情况,防止undefined行为
-      h("dd", `PID ${o.pid}${o.max_rss_mb == null ? "" : ` · 峰值内存 ${o.max_rss_mb} MB`}`),
+      // Windows 上没有峰值内存（max_rss_mb 为 null），只显示 PID
+      h("dt", "进程"), h("dd", `PID ${o.pid}${o.max_rss_mb == null ? "" : ` · 峰值内存 ${o.max_rss_mb} MB`}`),
       h("dt", "数据库"), h("dd", `${o.db_mb} MB`),
       h("dt", "Python"), h("dd", `${o.python} · ${o.platform}`)));
 }
