@@ -766,6 +766,7 @@ def test_device_hint_tamper_and_delete(up):
     c = TestClient(app)
     _login(c, "2023001")
     trusted = up.devices[-1]
+    c.cookies.delete("kb_dev")   # 同名不同 domain 是两个桶：先删掉服务端那份，只留篡改值
     c.cookies.set("kb_dev", "garbage", path="/")
     _qr_start(c)
     assert up.devices[-1] != trusted          # 篡改过的提示被忽略
@@ -1505,6 +1506,7 @@ def test_classmate_covers_pre_class_check(up):
     """出门前检查点：同一节课的同学刚刷过，就不用再替我向学校要一次。"""
     import datetime as dt
     from zoneinfo import ZoneInfo
+
     from app import refresh_policy as P
     tz = ZoneInfo("Asia/Shanghai")
     up.course_override = "高数"
