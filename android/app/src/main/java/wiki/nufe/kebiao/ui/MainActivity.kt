@@ -75,6 +75,7 @@ import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.Sync
+import wiki.nufe.kebiao.widget.FullWeekReceiver
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.TomorrowReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
@@ -299,13 +300,14 @@ private fun WidgetCard() {
     val context = LocalContext.current
     val manager = AppWidgetManager.getInstance(context)
     Section("添加到桌面") {
-        Hint("今天：正在上课倒计时下课，下一节一小时内倒计时上课；课上完预告下次上课。明天：明天的全部课。本周：按真实时长铺满的周课表，建议用 4×3 以上。")
+        Hint("今天：正在上课倒计时下课、下一节倒计时上课；课上完预告下次上课。明天：明天的全部课。本周：学校课表的样子，每节课写准确的起止时间；本周（按时长）：课越长格子越高。都可以随意拉伸，本周建议 4×3 以上。")
         if (manager.isRequestPinAppWidgetSupported) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for ((label, receiver) in listOf(
                     "今天" to TodayReceiver::class.java,
                     "明天" to TomorrowReceiver::class.java,
                     "本周" to WeekReceiver::class.java,
+                    "本周（按时长）" to FullWeekReceiver::class.java,
                 )) {
                     OutlinedButton(onClick = {
                         manager.requestPinAppWidget(ComponentName(context, receiver), null, null)

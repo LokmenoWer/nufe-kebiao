@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.toMinutes
 import wiki.nufe.kebiao.sync.Sync
+import wiki.nufe.kebiao.widget.FullWeekReceiver
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.TomorrowReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
@@ -26,7 +27,8 @@ import wiki.nufe.kebiao.widget.WeekReceiver
  *     adb shell appwidget grantbind --package wiki.nufe.kebiao
  *     adb shell am start -n wiki.nufe.kebiao/.preview.WidgetPreviewActivity
  *
- * 加 `--es at 09:30` 把时钟拨到今天（北京时间）这个时刻，看上课中 / 课前倒计时等状态。
+ * 加 `--es at 09:30` 把时钟拨到今天（北京时间）这个时刻，看上课中 / 课前倒计时等状态；
+ * 加 `--es only 本周` 只画标题以它开头的几种（今天 / 明天 / 本周）。
  */
 class WidgetPreviewActivity : ComponentActivity() {
     private lateinit var host: AppWidgetHost
@@ -42,6 +44,8 @@ class WidgetPreviewActivity : ComponentActivity() {
         Triple("本周 · 4×5（拉高）", WeekReceiver::class.java, 340 to 480),
         Triple("本周 · 2×3（拉窄）", WeekReceiver::class.java, 170 to 260),
         Triple("本周 · 3×3", WeekReceiver::class.java, 250 to 260),
+        Triple("按时长 · 4×3", FullWeekReceiver::class.java, 340 to 260),
+        Triple("按时长 · 4×4", FullWeekReceiver::class.java, 340 to 360),
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,7 +62,8 @@ class WidgetPreviewActivity : ComponentActivity() {
             setPadding(dp(16), dp(48), dp(16), dp(48))
             setBackgroundColor(0xFF3A4A6B.toInt())
         }
-        for ((title, receiver, size) in cases) {
+        val only = intent.getStringExtra("only")
+        for ((title, receiver, size) in cases.filter { only == null || it.first.startsWith(only) }) {
             column.addView(TextView(this).apply {
                 text = title
                 setTextColor(0xFFFFFFFF.toInt())

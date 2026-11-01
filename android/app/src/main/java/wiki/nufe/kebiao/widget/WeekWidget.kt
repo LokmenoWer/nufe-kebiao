@@ -36,10 +36,10 @@ import wiki.nufe.kebiao.data.weekColumns
 import wiki.nufe.kebiao.data.weekToShow
 
 /**
- * 本周课表：纵轴按真实时间，按内容排（见 WeekLayout.kt）。小组件可以随意拉伸，版面全按当前尺寸算：
+ * 本周课表：和 iOS 的 week 模式一样按节次排、每节课写准确的起止时间，按内容排（见 WeekLayout.kt）。小组件可以随意拉伸，版面全按当前尺寸算：
  * 拉高了字变大、写上教师，拉矮了逐级少写；拉窄到一列不足 40dp 时只画从今天起放得下的几天。
  */
-class WeekWidget : GlanceAppWidget() {
+open class WeekWidget(private val byTime: Boolean = false) : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
@@ -47,7 +47,7 @@ class WeekWidget : GlanceAppWidget() {
         provideContent {
             GlanceTheme {
                 val message = placeholderMessage(data)
-                if (message != null) Placeholder(context, message) else WeekContent(context, data)
+                if (message != null) Placeholder(context, message) else WeekContent(context, data, byTime)
             }
         }
     }
@@ -57,11 +57,19 @@ class WeekReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = WeekWidget()
 }
 
+/** 本周（按时长）：和 iOS 的 full（铺满）模式一样，纵轴按真实时间，课越长格子越高。 */
+class FullWeekWidget : WeekWidget(byTime = true)
+
+class FullWeekReceiver : GlanceAppWidgetReceiver() {
+    override val glanceAppWidget: GlanceAppWidget = FullWeekWidget()
+}
+
 private const val COL_GAP = 3f
 private const val DAY_ROW_H = 16f
 private const val HEADER_H = 26f
 private const val MIN_COL_W = 40f   // 再窄连两个字都放不下：少画几天
 private const val AXIS_SP = 9f
+private const val UNIT_SP = 8f      // 时间轴上“第几节”
 
 /**
  * 放不下的时候先省掉没课的日子（今天除外），还放不下就只画从今天（或这周第一个还没过去的日子）起的几天。
@@ -76,13 +84,13 @@ private fun visibleColumns(columns: List<DayColumn>, maxCols: Int, today: String
 }
 
 @Composable
-private fun WeekContent(context: Context, data: WidgetData) {
+private fun WeekContent(context: Context, data: WidgetData, byTime: Boolean) {
     val snapshot = data.snapshot!!
     val now = Now.current()
     val (title, block) = weekToShow(snapshot.payload, now)
     val size = LocalSize.current
     val m = TextMeasure(context)
-    val axisW = m.width("00:00", AXIS_SP, false) + 4f
+    val axisW = maxOf(m.width("00:00", AXIS_SP, true), m.width("第10节", UNIT_SP, false)) + 4f
     val labelH = m.height("00:00", AXIS_SP, false, 100f, 1)
     val usableW = size.width.value - PADDING.value * 2 - axisW
     val maxCols = maxOf(1, (usableW / (MIN_COL_W + COL_GAP)).toInt())
@@ -102,7 +110,7 @@ private fun WeekContent(context: Context, data: WidgetData) {
             val cells = columns.map(::cellsOf)
             val gridH = size.height.value - PADDING.value * 2 - HEADER_H - DAY_ROW_H
             val colW = if (columns.isEmpty()) 0f else usableW / columns.size - COL_GAP
-            val layout = if (gridH > 0) layoutGrid(cells, gridH, colW - CHIP_PAD_H, m, labelH) else null
+            val layout = if (gridH > 0) layoutGrid(cells, gridH, colW - CHIP_PAD_H, m, labelH, byTime) else null
             if (layout == null) {
                 Label(if (block?.week == null) "假期中" else "这周没有课", size = 14.sp, bold = true)
                 return@Column
@@ -119,7 +127,7 @@ private fun WeekContent(context: Context, data: WidgetData) {
                 }
             }
             Row(modifier = GlanceModifier.fillMaxWidth().height(gridH.dp)) {
-                Axis(layout, axisW, gridH, labelH)
+                Axis(layout, axisW, gridH, labelH, m)
                 columns.forEachIndexed { i, c ->
                     DayCells(context, data, c, layout, i, colW, m)
                 }
@@ -128,18 +136,26 @@ private fun WeekContent(context: Context, data: WidgetData) {
     }
 }
 
-/** 左边时间轴：每张卡片顶边旁标它的开始时间（排版时已经保证标签之间放得下）。 */
+/**
+ * 左边时间轴：每节课顶边旁写它准确的开始时间；按节次排时，到下一个标签之间放得下就在下面注“第几节”。
+ * 排版时已经保证相邻标签之间至少一个标签高。
+ */
 @Composable
-private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float) {
+private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, m: TextMeasure) {
+    val unitH = m.height("第1节", UNIT_SP, false, 100f, 1)
     Column(modifier = GlanceModifier.width(axisW.dp).height(gridH.dp)) {
         var cursor = 0f
-        for (k in layout.labeled.sorted().take(9)) { // Column 最多 10 个子元素
+        val keys = layout.labels.keys.sorted().take(9) // Column 最多 10 个子元素
+        keys.forEachIndexed { i, k ->
             val y = layout.bounds[k]
-            val t = layout.minutes[k]
-            if (t < 0) continue
-            Label("%02d:%02d".format(t / 60, t % 60), size = AXIS_SP.sp, color = GlanceTheme.colors.onSurfaceVariant,
-                modifier = GlanceModifier.padding(top = (y - cursor).coerceAtLeast(0f).dp))
-            cursor = maxOf(cursor, y) + labelH
+            val label = layout.labels.getValue(k)
+            val room = (keys.getOrNull(i + 1)?.let { layout.bounds[it] } ?: gridH) - y
+            val showUnit = label.unit != null && room >= labelH + unitH
+            Column(modifier = GlanceModifier.padding(top = (y - cursor).coerceAtLeast(0f).dp)) {
+                Label(label.time, size = AXIS_SP.sp, bold = true, color = GlanceTheme.colors.onSurfaceVariant)
+                if (showUnit) Label("第${label.unit}节", size = UNIT_SP.sp, color = GlanceTheme.colors.outline)
+            }
+            cursor = maxOf(cursor, y) + labelH + if (showUnit) unitH else 0f
         }
     }
 }
@@ -155,7 +171,7 @@ private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layo
             val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)
             // 用上内边距代替 Spacer：每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限
             Box(modifier = GlanceModifier.padding(top = (top - cursor).coerceAtLeast(0f).dp)) {
-                CellChip(span.cell, h, width - CHIP_PAD_H, layout.fontScale, span.a in layout.labeled, m)
+                CellChip(span.cell, h, width - CHIP_PAD_H, layout.fontScale, m)
             }
             cursor = top + h + CHIP_GAP
         }
@@ -163,16 +179,26 @@ private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layo
 }
 
 @Composable
-private fun CellChip(cell: Cell, height: Float, innerW: Float, fs: Float, labeled: Boolean, m: TextMeasure) {
+private fun CellChip(cell: Cell, height: Float, innerW: Float, fs: Float, m: TextMeasure) {
     val dim = cell.cancelled != null || cell.state == State.PAST
     val live = cell.state == State.LIVE
-    Chip(cell.color, height.dp, strong = live, dim = dim) {
-        if (height < CHIP_PAD_V + 8f) return@Chip
-        val pieces = bestPieces(cell, height, m, innerW, fs, labeled)
+    // 按最省的一档（课名一行）都放不下上下边距的矮格子：去掉边距，课名缩到能放下为止（最小 7sp）
+    val nameOnly = variants(cell, m, innerW, fs).last().first()
+    val tight = piecesHeight(listOf(nameOnly), m, innerW, fs) > height + 0.5f
+    Chip(cell.color, height.dp, strong = live, dim = dim, tight = tight) {
+        if (tight) {
+            var sp = nameOnly.size(fs)
+            while (sp > 7f && m.height(nameOnly.text, sp, true, innerW, 1) > height) sp -= 0.5f
+            if (m.height(nameOnly.text, sp, true, innerW, 1) <= height + 0.5f) {
+                Label(nameOnly.text, size = sp.sp, bold = true, lines = 1, color = pieceColor(Kind.NAME, cell, live, dim))
+            }
+            return@Chip
+        }
+        val pieces = bestPieces(cell, height, m, innerW, fs)
         Column {
             var left = height - CHIP_PAD_V
             for (p in pieces) {
-                val sp = pieceSp(p.kind) * fs
+                val sp = p.size(fs)
                 val bold = pieceBold(p.kind)
                 // 最省的一档也放不下时（很矮的格子），能写几行写几行，别让半行字被切掉
                 var lines = p.maxLines
@@ -192,6 +218,8 @@ private fun pieceColor(kind: Kind, cell: Cell, live: Boolean, dim: Boolean): Col
     cell.cancelled != null -> solid(WARN)
     kind == Kind.WAS -> solid(WARN)
     dim -> GlanceTheme.colors.onSurfaceVariant
+    // 和 iOS 一样：调过的课课名、时间标橙色
+    cell.lesson?.changed == true && (kind == Kind.NAME || kind == Kind.TIME) -> solid(WARN)
     kind == Kind.NAME || kind == Kind.TIME -> chipText(cell.color)
     else -> GlanceTheme.colors.onSurfaceVariant
 }

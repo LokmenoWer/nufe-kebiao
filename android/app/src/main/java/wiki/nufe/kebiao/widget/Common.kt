@@ -208,7 +208,7 @@ fun Placeholder(context: Context, message: String) {
 /** 竖条 + 内容的课程卡片骨架。 */
 @Composable
 fun Chip(color: String, height: Dp?, modifier: GlanceModifier = GlanceModifier, strong: Boolean = false,
-         dim: Boolean = false, content: @Composable () -> Unit) {
+         dim: Boolean = false, tight: Boolean = false, content: @Composable () -> Unit) {
     val bg = when {
         strong -> solid(parseColor(color))
         dim -> GlanceTheme.colors.surfaceVariant
@@ -217,6 +217,7 @@ fun Chip(color: String, height: Dp?, modifier: GlanceModifier = GlanceModifier, 
     val sized = if (height != null) modifier.height(height) else modifier
     Row(modifier = sized.fillMaxWidth().cornerRadius(6.dp).background(bg)) {
         Spacer(GlanceModifier.width(3.dp).fillMaxHeight().background(if (dim) GlanceTheme.colors.outline else solid(parseColor(color))))
-        Box(modifier = GlanceModifier.padding(horizontal = 4.dp, vertical = 2.dp)) { content() }
+        // tight：格子矮得放不下上下边距时去掉它，至少写得下一行课名
+        Box(modifier = GlanceModifier.padding(horizontal = 4.dp, vertical = if (tight) 0.dp else 2.dp)) { content() }
     }
 }

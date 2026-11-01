@@ -14,11 +14,12 @@ import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.State
 
 /**
- * 本周小组件的版面：和 Scriptable 的 full 模式同一套规则，但字不用估——用画小组件的同一套系统字体
+ * 本周小组件的版面：和 Scriptable 的 week 模式同一套规则，但字不用估——用画小组件的同一套系统字体
  * （StaticLayout，行高、汉字回退字体、折行都和 TextView 一致）量出来。
  *
- * 纵轴按真实时间：一周里有课的时段合并成几块，块里每个上下课时刻是一条分界线，块之间压成 GAP；
- * 每张卡片先保证写得下它这一档的内容，剩下的高度再按分钟数分。依次试“写全”到“只写课名”几档、每档几种字号，
+ * 纵轴按节次（学校课表的样子）：用到的每一节一样高，课从起始节画到结束节，时间轴写每节课准确的开始时间和“第几节”；
+ * 有课没写节次又补不上时改按真实时间。每张卡片一定写出准确的起止时间（列窄就缩字或分两行）。
+ * 每张卡片先保证写得下它这一档的内容，剩下的高度再按节数分。依次试“写全”到“只写课名”几档、每档几种字号，
  * 取第一个摆得下的；小组件可以随便拉伸，所以拉大了字跟着变大、连教师都写上，拉小了逐级少写。
  */
 
@@ -54,7 +55,7 @@ fun cellsOf(column: DayColumn): List<Cell> {
 enum class Kind { NAME, TIME, ROOM, WAS, TEACHER }
 
 /** 卡片里的一段字：maxLines 行以内，放不下截成“…”。 */
-data class Piece(val text: String, val kind: Kind, val maxLines: Int)
+data class Piece(val text: String, val kind: Kind, val maxLines: Int, val sp: Float? = null)
 
 /** 字号基准（sp），乘上版面选中的 fontScale。 */
 fun pieceSp(kind: Kind) = when (kind) {
@@ -117,45 +118,53 @@ class TextMeasure(context: Context) {
 fun roomCode(room: String): String? = Regex("""^[一-鿿]+(?=[A-Za-z])""").find(room)
     ?.let { room.substring(it.range.last + 1) }?.takeIf { it.isNotEmpty() }
 
+/** 一段字实际用的字号：时间按列宽单独定了字号就用它的，否则按基准乘版面字号。 */
+fun Piece.size(fs: Float) = sp ?: (pieceSp(kind) * fs)
+
 /**
- * 一张卡片从写得最全到最省的几档内容（下标就是 level）：
+ * 卡片上的起止时间——和 iOS 一样一定写出准确的开始和下课时间：
+ * 一行写得下“10:00–12:15”就一行（列窄时字号按宽度缩，最多缩到 80%）；
+ * 再窄就分两行“10:00–”“12:15”；连“10:00–”都放不下（极窄）才只写开始时间。
+ */
+fun timePiece(l: Lesson, m: TextMeasure, innerW: Float, fs: Float): Piece {
+    val base = pieceSp(Kind.TIME) * fs
+    val one = "${l.start}–${l.end}"
+    val fitOne = base * innerW / m.width(one, base, true)
+    if (fitOne >= base * 0.8f) return Piece(one, Kind.TIME, 1, minOf(base, fitOne * 0.98f))
+    val head = "${l.start}–"
+    val fitTwo = base * innerW / maxOf(m.width(head, base, true), m.width(l.end, base, true))
+    if (fitTwo >= base * 0.7f) return Piece("$head\n${l.end}", Kind.TIME, 2, minOf(base, fitTwo * 0.98f))
+    return Piece(l.start, Kind.TIME, 1, minOf(base, base * innerW / m.width(l.start, base, true) * 0.98f))
+}
+
+/**
+ * 一张卡片从写得最全到最省的几档内容（下标就是 level）。起止时间是必写项，只有最后两档才省：
  *   0 课名写全、起止时间、教室带楼名、原安排、教师
  *   1 去掉教师
- *   2 教室只写编号
- *   3 去掉时间（开始时间在左边时间轴上，卡片的长短就是时长）
- *   4 课名最多两行 + 教室编号
- *   5 课名最多两行
- *   6 课名一行
- * 时间：一行写得下“10:00–11:35”就写全，否则写“–11:35”（开始时间已经标在时间轴上卡片顶边旁）。
+ *   2 教室只写编号（“Z4-118”）
+ *   3 去掉原安排
+ *   4 课名最多两行、起止时间、教室编号一行
+ *   5 课名最多两行、起止时间
+ *   6 课名一行、开始时间
+ *   7 课名一行
  */
-fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, labeled: Boolean = true): List<List<Piece>> {
+fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float): List<List<Piece>> {
     val more = if (cell.hidden > 0) " +${cell.hidden}" else ""
     val c = cell.cancelled
     if (c != null) {
         val text = "停 ${c.name}"
-        return listOf(listOf(Piece(text, Kind.NAME, 3)), listOf(Piece(text, Kind.NAME, 2)), listOf(Piece(text, Kind.NAME, 1)))
+        val time = Piece("${c.start}–${c.end}", Kind.TIME, 2)
+        return listOf(
+            listOf(Piece(text, Kind.NAME, 3), time),
+            listOf(Piece(text, Kind.NAME, 2), time.copy(maxLines = 1)),
+            listOf(Piece(text, Kind.NAME, 2)),
+            listOf(Piece(text, Kind.NAME, 1)),
+        )
     }
     val l = cell.lesson!!
     val name = (if (l.changed) "调 " else "") + l.name + more
-    val sp = pieceSp(Kind.TIME) * fs
-    val full = "${l.start}–${l.end}"
-    val time = Piece(when {
-        m.fits(full, sp, true, innerW) -> full
-        labeled -> "–${l.end}"
-        else -> l.start
-    }, Kind.TIME, 1)
-    // 时间轴上没标出这节课的开始时间（太挤被省掉）：时间排到最前，每一档都写
-    if (!labeled) {
-        val start = Piece(time.text, Kind.TIME, 1)
-        return listOf(
-            listOfNotNull(start, Piece(name, Kind.NAME, 6), roomFull(l, m, roomSp(fs), innerW), l.was?.let { Piece(it, Kind.WAS, 2) }),
-            listOfNotNull(start, Piece(name, Kind.NAME, 6), roomShort(l, m, roomSp(fs), innerW)),
-            listOfNotNull(start, Piece(name, Kind.NAME, 2), roomShort(l, m, roomSp(fs), innerW)?.copy(maxLines = 1)),
-            listOf(start, Piece(name, Kind.NAME, 2)),
-            listOf(start, Piece(name, Kind.NAME, 1)),
-            listOf(Piece(name, Kind.NAME, 1)),
-        )
-    }
+    val time = timePiece(l, m, innerW, fs)
+    val start = Piece(l.start, Kind.TIME, 1, time.sp)
     val roomFull = roomFull(l, m, roomSp(fs), innerW)
     val roomShort = roomShort(l, m, roomSp(fs), innerW)
     val was = l.was?.let { Piece(it, Kind.WAS, 2) }
@@ -165,9 +174,10 @@ fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, labeled: Bool
         listOfNotNull(fullName, time, roomFull, was, teacher),
         listOfNotNull(fullName, time, roomFull, was),
         listOfNotNull(fullName, time, roomShort, was),
-        listOfNotNull(fullName, roomShort),
-        listOfNotNull(Piece(name, Kind.NAME, 2), roomShort?.copy(maxLines = 1)),
-        listOf(Piece(name, Kind.NAME, 2)),
+        listOfNotNull(fullName, time, roomShort),
+        listOfNotNull(Piece(name, Kind.NAME, 2), time, roomShort?.copy(maxLines = 1)),
+        listOf(Piece(name, Kind.NAME, 2), time),
+        listOf(Piece(name, Kind.NAME, 1), start),
         listOf(Piece(name, Kind.NAME, 1)),
     )
 }
@@ -190,17 +200,17 @@ private fun roomShort(l: Lesson, m: TextMeasure, sp: Float, innerW: Float): Piec
     return Piece(code, Kind.ROOM, 2)
 }
 
-/** 课名必须写全的几档（0–3）里，课名真要几行就算几行；写不全就不算这一档。 */
 fun piecesHeight(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float): Float =
     CHIP_PAD_V + CHIP_SLACK + pieces.sumOf { p ->
-        m.height(p.text, pieceSp(p.kind) * fs, pieceBold(p.kind), innerW, p.maxLines).toDouble()
+        m.height(p.text, p.size(fs), pieceBold(p.kind), innerW, p.maxLines).toDouble()
     }.toFloat()
 
+/** 课名必须写全的几档（maxLines = 6）：课名真要几行就算几行，超过 6 行就不算这一档。 */
 fun fullyFits(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float): Boolean = pieces.all { p ->
-    p.maxLines < 6 || m.lines(p.text, pieceSp(p.kind) * fs, pieceBold(p.kind), innerW) <= p.maxLines
+    p.maxLines < 6 || m.lines(p.text, p.size(fs), pieceBold(p.kind), innerW) <= p.maxLines
 }
 
-/** 某张卡片在某档字号下写到 level 这一档要多高；这档写不全（课名超过 6 行）返回 null。 */
+/** 某张卡片在某档字号下写到 level 这一档要多高；这档写不全返回 null。 */
 fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float): Float? {
     val all = variants(cell, m, innerW, fs)
     val pieces = all[level.coerceAtMost(all.size - 1)]
@@ -209,8 +219,8 @@ fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float): Floa
 }
 
 /** 卡片实际拿到 height 高时，写得最全、又放得下的那一档。 */
-fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float, labeled: Boolean): List<Piece> {
-    val all = variants(cell, m, innerW, fs, labeled)
+fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float): List<Piece> {
+    val all = variants(cell, m, innerW, fs)
     for (pieces in all) {
         if (fullyFits(pieces, m, innerW, fs) && piecesHeight(pieces, m, innerW, fs) <= height + 0.5f) return pieces
     }
@@ -220,12 +230,15 @@ fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Flo
 /** 一节课从哪条分界线画到哪条。 */
 data class Span(val cell: Cell, val col: Int, val a: Int, val b: Int)
 
+/** 时间轴上的一个标签：准确的开始时间，按节次排时下面注“第几节”。 */
+data class AxisLabel(val time: String, val unit: Int?)
+
 class GridLayout(
     val bounds: FloatArray,           // 每条分界线的 y（dp）
-    val minutes: IntArray,            // 每条分界线的时刻（分钟），间隔处为 -1
+    val labels: Map<Int, AxisLabel>,  // 分界线下标 → 标签（只含画得下的）
     val spans: List<Span>,
     val fontScale: Float,
-    val labeled: Set<Int>,            // 时间轴上标了时间的分界线
+    val byUnit: Boolean,
 )
 
 const val GAP = 6f
@@ -250,7 +263,7 @@ private fun place(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, I
     return y
 }
 
-/** 摆得下就尽量按比例（t 越大越接近纯按时长）；t = 0 也摆不下返回 null。 */
+/** 摆得下就尽量按比例（t 越大越接近纯按节次 / 时长）；t = 0 也摆不下返回 null。 */
 private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, Int, Float>>, labels: List<Int>,
                   labelH: Float, height: Float): FloatArray? {
     val fits = { t: Float -> place(ideal, gap, cons, labels, labelH, height, t)[ideal.size] <= height + 0.01f }
@@ -267,12 +280,77 @@ private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, I
 
 /** 拉大了字也跟着放大；最多缩到 0.8 倍，再小就看不清。 */
 val FONT_SCALES = floatArrayOf(1.2f, 1.1f, 1f, 0.9f, 0.8f)
-const val LEVELS = 6  // 排版时只试 0–5 档；都摆不下就纯按时长，卡片自己能写多少写多少
+const val LEVELS = 6  // 排版时只试 0–5 档（都带起止时间）；都摆不下就纯按比例，卡片自己能写多少写多少
 
-fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float): GridLayout? {
-    val all = columns.flatten()
-    if (all.isEmpty()) return null
-    // 合并成块：块里每个上下课时刻一条分界线
+/** 纵轴：segs 是相邻两条分界线之间的一段（ideal 按比例分高度，gap 是固定的 GAP）；startIdx / endIdx 是每节课的上下分界线。 */
+private class Axis(
+    val ideal: FloatArray,
+    val gap: BooleanArray,
+    val startIdx: (Cell) -> Int,
+    val endIdx: (Cell) -> Int,
+    val unitAt: Map<Int, Int>,  // 按节次时：分界线 → 从它开始的那一节
+)
+
+/** 课的节次：“3–5” → 3..5，“6” → 6..6；没写返回 null。 */
+private fun unitRange(units: String): IntRange? {
+    val m = Regex("""^(\d+)(?:\D+(\d+))?$""").find(units.trim()) ?: return null
+    val a = m.groupValues[1].toInt()
+    val b = m.groupValues[2].ifEmpty { m.groupValues[1] }.toInt()
+    return if (b >= a) a..b else null
+}
+
+/**
+ * 按节次（学校课表的样子）：用到的每一节一样高，节号不连续或前后两节隔了半小时以上（午休、傍晚）的地方压成 GAP。
+ * 没写节次的课（停课也没有）按同一周别的课补：开始时间相同的取它的起始节、结束时间相同的取它的结束节；
+ * 有一节补不上就返回 null，整张表改按真实时间排，免得画错位置。
+ */
+private fun unitAxis(all: List<Cell>): Axis? {
+    val units = HashMap<Cell, IntRange>()
+    val first = HashMap<Int, Int>()
+    val last = HashMap<Int, Int>()
+    for (c in all) {
+        val r = c.lesson?.units?.let(::unitRange) ?: continue
+        units[c] = r
+        first[c.start] = r.first
+        last[c.end] = r.last
+    }
+    for (c in all) {
+        if (c in units) continue
+        val a = first[c.start] ?: return null
+        val b = last[c.end] ?: return null
+        if (b < a) return null
+        units[c] = a..b
+    }
+    val startOf = HashMap<Int, Int>()
+    val endOf = HashMap<Int, Int>()
+    for ((c, r) in units) {
+        startOf[r.first] = minOf(startOf[r.first] ?: Int.MAX_VALUE, c.start)
+        endOf[r.last] = maxOf(endOf[r.last] ?: Int.MIN_VALUE, c.end)
+    }
+    val used = units.values.flatMap { it.toList() }.toSortedSet().toList()
+    val ideal = mutableListOf<Float>()
+    val gap = mutableListOf<Boolean>()
+    val top = HashMap<Int, Int>()
+    val bottom = HashMap<Int, Int>()
+    used.forEachIndexed { i, u ->
+        val prev = used.getOrNull(i - 1)
+        val apart = prev != null && (u != prev + 1 ||
+            (startOf[u] != null && endOf[u - 1] != null && startOf.getValue(u) - endOf.getValue(u - 1) >= 30))
+        if (apart) {
+            ideal += 0f
+            gap += true
+        }
+        top[u] = ideal.size
+        ideal += 1f
+        gap += false
+        bottom[u] = ideal.size
+    }
+    return Axis(ideal.toFloatArray(), gap.toBooleanArray(), { top.getValue(units.getValue(it).first) },
+        { bottom.getValue(units.getValue(it).last) }, top.entries.associate { (u, k) -> k to u })
+}
+
+/** 按真实时间：有课的时段合并成几块，块里每个上下课时刻一条分界线，块之间压成 GAP。 */
+private fun timeAxis(all: List<Cell>): Axis {
     val spans = all.map { it.start to it.end }.sortedBy { it.first }
     val blocks = mutableListOf<IntArray>()
     for ((s, e) in spans) {
@@ -297,10 +375,24 @@ fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextM
             at[t] = ideal.size
         }
     }
-    val boundMinutes = IntArray(ideal.size + 1) { -1 }
-    for ((t, k) in at) boundMinutes[k] = t
-    val cellSpans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, at.getValue(it.start), at.getValue(it.end)) } }
-    val labels = cellSpans.map { it.a }.distinct().sorted()
+    return Axis(ideal.toFloatArray(), gap.toBooleanArray(), { at.getValue(it.start) }, { at.getValue(it.end) }, emptyMap())
+}
+
+private fun hm(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
+
+/** byTime = true：iOS 的 full（铺满）模式，纵轴按真实时间，课越长格子越高；否则按节次。 */
+fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float,
+               byTime: Boolean = false): GridLayout? {
+    val all = columns.flatten()
+    if (all.isEmpty()) return null
+    val unitAxis = if (byTime) null else unitAxis(all)
+    val axis = unitAxis ?: timeAxis(all)
+    val cellSpans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, axis.startIdx(it), axis.endIdx(it)) } }
+    // 每个开始位置标那里最早的开始时间（按节次时，同一节开始的课时间可能差几分钟，卡片上各自写准确时间）
+    val labelText = cellSpans.groupBy { it.a }.mapValues { (k, list) ->
+        AxisLabel(hm(list.minOf { it.cell.start }), axis.unitAt[k])
+    }
+    val labels = labelText.keys.sorted()
     for (level in 0 until LEVELS) {
         for (fs in FONT_SCALES) {
             // 教师、楼名不值得缩字：只有课名、时间、教室这些要紧的才往小里挤
@@ -310,21 +402,19 @@ fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextM
                 Triple(s.a, s.b, h + CHIP_GAP)
             }
             if (cons.any { it == null }) continue
-            val bounds = solve(ideal.toFloatArray(), gap.toBooleanArray(), cons.filterNotNull(), labels, labelH, height)
-                ?: continue
-            return GridLayout(bounds, boundMinutes, cellSpans, fs, labels.toSet())
+            val bounds = solve(axis.ideal, axis.gap, cons.filterNotNull(), labels, labelH, height) ?: continue
+            return GridLayout(bounds, labelText, cellSpans, fs, unitAxis != null)
         }
     }
-    // 全都摆不下（很矮的小组件）：纯按时长，时间轴标签挤不下的省掉
-    val bounds = solve(ideal.toFloatArray(), gap.toBooleanArray(), emptyList(), emptyList(), labelH, height)
-        ?: return null
-    val shown = mutableSetOf<Int>()
+    // 全都摆不下（很矮的小组件）：纯按比例，时间轴标签挤不下的省掉（卡片上的时间照样写）
+    val bounds = solve(axis.ideal, axis.gap, emptyList(), emptyList(), labelH, height) ?: return null
+    val shown = HashMap<Int, AxisLabel>()
     var lastY = -labelH
     for (k in labels) {
         if (bounds[k] >= lastY + labelH && bounds[k] + labelH <= height + 0.5f) {
-            shown += k
+            shown[k] = labelText.getValue(k)
             lastY = bounds[k]
         }
     }
-    return GridLayout(bounds, boundMinutes, cellSpans, FONT_SCALES.last(), shown)
+    return GridLayout(bounds, shown, cellSpans, FONT_SCALES.last(), unitAxis != null)
 }
