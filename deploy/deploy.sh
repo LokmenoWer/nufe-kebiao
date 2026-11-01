@@ -65,11 +65,23 @@ PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "import app.main" \
   && echo "import check: ok" \
   || { echo "import check failed; service not restarted" >&2; exit 1; }
 
+# 端口由 kebiao.socket 持有：平时只重启服务，重启期间的请求排队等新进程，不会被拒绝。
+# 只有第一次切到 socket 激活（旧进程自己占着端口）或 socket 配置变了，才需要先停再起，这一次会断几秒。
+SOCKET_CHANGED=0
+cmp -s "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket || SOCKET_CHANGED=1
+install -m 644 "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket
 install -m 644 "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service
 systemctl daemon-reload
-systemctl enable -q kebiao
+# 服务也要开机自启：后台刷新得在没人访问时照样跑，不能等第一个连接才把它拉起来
+systemctl enable -q kebiao.socket kebiao
+if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q kebiao.socket; then
+  systemctl stop kebiao kebiao.socket
+  systemctl start kebiao.socket
+fi
+START=$(date +%s%N)
 systemctl restart kebiao
-for _ in $(seq 10); do systemctl is-active -q kebiao && curl -sf -o /dev/null http://127.0.0.1:8010/ && break; sleep 1; done
+curl -s -o /dev/null --max-time 30 http://127.0.0.1:8010/healthz || true
+echo "restart: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
 systemctl is-active kebiao
 curl -s -o /dev/null -w "local / -> %{http_code}\n" http://127.0.0.1:8010/
 REMOTE

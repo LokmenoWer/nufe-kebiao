@@ -106,6 +106,7 @@ deploy/deploy.sh
 ```
 
 - 代码同步到 `/opt/nufe-kebiao`，systemd 服务 `kebiao`（用户 `kebiao`，只监听 `127.0.0.1:8010`，1 个 worker）。
+- 更新不停服：`127.0.0.1:8010` 由 `kebiao.socket` 持有，重启服务时新请求在队列里等新进程（一般 1 秒内），不会被拒绝；正在处理的请求最多再等 5 秒。反代里给 `ProxyPass` 加上 `retry=0`（示例配置已加），否则 Apache 一旦连不上后端会 60 秒内一律回 503。
 - 服务器上的 `.env`（含独立生成的 `APP_SECRET_KEY`）和 `data/` 只在首次部署时创建，之后不会被覆盖。
 - 反向代理示例（Apache）：推荐独立主机名，`deploy/apache-kebiao.conf` 是完整的 vhost（80 跳 443，整站反代到 8010，访问日志不记带 token 的路径）。也能挂在子路径下（`PUBLIC_BASE_URL=https://example.com/kebiao`，cookie path 随之变成 `/kebiao/`），前端全部使用相对路径；从子路径迁到独立主机名时，旧 vhost 改为 Include `deploy/apache-kebiao-legacy.conf`：页面 301 到新地址，已发出的日历订阅和小组件链接原地继续可用。
 - 查看日志：`journalctl -u kebiao -f`

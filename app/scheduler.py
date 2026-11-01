@@ -142,5 +142,7 @@ def stop() -> None:
     with _thread_lock:
         threads = list(_threads)
         _threads.clear()
+    # 两条线程共用 5 秒：都是 daemon，正卡在学校请求里的那条不等它，免得拖慢重启
+    deadline = time.monotonic() + 5
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=max(0.0, deadline - time.monotonic()))

@@ -1,16 +1,20 @@
 [Unit]
 Description=nufe-kebiao (南财课表, unofficial)
-After=network-online.target
+After=network-online.target kebiao.socket
 Wants=network-online.target
+Requires=kebiao.socket
 
 [Service]
 User=kebiao
 Group=kebiao
 WorkingDirectory=/opt/nufe-kebiao
-# 只监听本机，由反向代理（如 Apache / Nginx）把 https://kebiao.example.com/ 转发到这里。
+# 监听 127.0.0.1:8010 的是 kebiao.socket（fd 3 传进来），由反向代理（如 Apache / Nginx）把 https://kebiao.example.com/ 转发到这里。
 # 只能 1 个 worker：后台刷新线程跑在进程内。
-ExecStart=/opt/nufe-kebiao/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8010 \
-    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+# 重启时正在处理的请求最多再等 5 秒；TimeoutStopSec 兜底，绝不会像默认那样拖到 90 秒。
+ExecStart=/opt/nufe-kebiao/.venv/bin/uvicorn app.main:app --fd 3 \
+    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
+    --timeout-graceful-shutdown 5
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
 
