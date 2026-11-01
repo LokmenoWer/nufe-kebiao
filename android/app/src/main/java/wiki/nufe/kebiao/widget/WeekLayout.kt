@@ -18,7 +18,8 @@ import wiki.nufe.kebiao.data.State
  * （StaticLayout，行高、汉字回退字体、折行都和 TextView 一致）量出来。
  *
  * 纵轴按节次（学校课表的样子）：用到的每一节一样高，课从起始节画到结束节，时间轴写每节课准确的开始时间和“第几节”；
- * 有课没写节次又补不上时改按真实时间。每张卡片一定写出准确的起止时间（列窄就缩字或分两行）。
+ * 有课没写节次又补不上时改按真实时间。时间轴上还在每节课底边旁标下课时间，所以格子放不下时间和教室两样时，
+ * 优先写教室，起止时间看时间轴；放得下时卡片上也写“10:00–12:15”（列窄就缩字或分两行）。
  * 每张卡片先保证写得下它这一档的内容，剩下的高度再按节数分。依次试“写全”到“只写课名”几档、每档几种字号，
  * 取第一个摆得下的；小组件可以随便拉伸，所以拉大了字跟着变大、连教师都写上，拉小了逐级少写。
  */
@@ -122,7 +123,7 @@ fun roomCode(room: String): String? = Regex("""^[一-鿿]+(?=[A-Za-z])""").find(
 fun Piece.size(fs: Float) = sp ?: (pieceSp(kind) * fs)
 
 /**
- * 卡片上的起止时间——和 iOS 一样一定写出准确的开始和下课时间：
+ * 卡片上的起止时间（放得下时卡片也写，和 iOS 一样）：
  * 一行写得下“10:00–12:15”就一行（列窄时字号按宽度缩，最多缩到 80%）；
  * 再窄就分两行“10:00–”“12:15”；连“10:00–”都放不下（极窄）才只写开始时间。
  */
@@ -138,17 +139,21 @@ fun timePiece(l: Lesson, m: TextMeasure, innerW: Float, fs: Float): Piece {
 }
 
 /**
- * 一张卡片从写得最全到最省的几档内容（下标就是 level）。起止时间是必写项，只有最后两档才省：
+ * 一张卡片从写得最全到最省的几档内容（下标就是 level）。
+ * 时间和教室放不下两样时，**优先写教室**：起止时间这时由左边时间轴给出——开始时间标在卡片顶边旁、
+ * 下课时间（“–09:45”）标在卡片底边旁。onAxis：时间轴上正好标着这节课的开始和下课时间，卡片上可以省掉时间。
  *   0 课名写全、起止时间、教室带楼名、原安排、教师
  *   1 去掉教师
  *   2 教室只写编号（“Z4-118”）
- *   3 去掉原安排
- *   4 课名最多两行、起止时间、教室编号一行
- *   5 课名最多两行、起止时间
- *   6 课名一行、开始时间
+ *   3 去掉时间（在时间轴上）
+ *   4 去掉原安排
+ *   5 课名最多两行、教室编号一行
+ *   6 课名一行、教室编号一行
  *   7 课名一行
+ * 时间轴上没有这节课的准确时间（按节次排时同一节开始的课差几分钟、或者很矮的小组件里标签被省掉）时，
+ * 卡片自己保留时间，仍然是教室在前：放不下就只写开始时间。
  */
-fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float): List<List<Piece>> {
+fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean = true): List<List<Piece>> {
     val more = if (cell.hidden > 0) " +${cell.hidden}" else ""
     val c = cell.cancelled
     if (c != null) {
@@ -167,17 +172,30 @@ fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float): List<List<Pi
     val start = Piece(l.start, Kind.TIME, 1, time.sp)
     val roomFull = roomFull(l, m, roomSp(fs), innerW)
     val roomShort = roomShort(l, m, roomSp(fs), innerW)
+    val roomLine = roomShort?.copy(maxLines = 1)
     val was = l.was?.let { Piece(it, Kind.WAS, 2) }
     val teacher = l.teachers.takeIf { it.isNotEmpty() }?.let { Piece(it, Kind.TEACHER, 1) }
     val fullName = Piece(name, Kind.NAME, 6)
-    return listOf(
+    val rich = listOf(
         listOfNotNull(fullName, time, roomFull, was, teacher),
         listOfNotNull(fullName, time, roomFull, was),
         listOfNotNull(fullName, time, roomShort, was),
-        listOfNotNull(fullName, time, roomShort),
-        listOfNotNull(Piece(name, Kind.NAME, 2), time, roomShort?.copy(maxLines = 1)),
-        listOf(Piece(name, Kind.NAME, 2), time),
-        listOf(Piece(name, Kind.NAME, 1), start),
+    )
+    if (onAxis) {
+        return rich + listOf(
+            listOfNotNull(fullName, roomShort, was),
+            listOfNotNull(fullName, roomShort),
+            listOfNotNull(Piece(name, Kind.NAME, 2), roomLine),
+            listOfNotNull(Piece(name, Kind.NAME, 1), roomLine),
+            listOf(Piece(name, Kind.NAME, 1)),
+        )
+    }
+    return rich + listOf(
+        listOfNotNull(fullName, roomShort, time),
+        listOfNotNull(fullName, roomShort, start),
+        listOfNotNull(Piece(name, Kind.NAME, 2), roomLine, start),
+        listOfNotNull(Piece(name, Kind.NAME, 1), roomLine, start),
+        listOfNotNull(Piece(name, Kind.NAME, 1), roomLine),
         listOf(Piece(name, Kind.NAME, 1)),
     )
 }
@@ -211,31 +229,34 @@ fun fullyFits(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float): Bo
 }
 
 /** 某张卡片在某档字号下写到 level 这一档要多高；这档写不全返回 null。 */
-fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float): Float? {
-    val all = variants(cell, m, innerW, fs)
+fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean): Float? {
+    val all = variants(cell, m, innerW, fs, onAxis)
     val pieces = all[level.coerceAtMost(all.size - 1)]
     if (!fullyFits(pieces, m, innerW, fs)) return null
     return piecesHeight(pieces, m, innerW, fs)
 }
 
 /** 卡片实际拿到 height 高时，写得最全、又放得下的那一档。 */
-fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float): List<Piece> {
-    val all = variants(cell, m, innerW, fs)
+fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean): List<Piece> {
+    val all = variants(cell, m, innerW, fs, onAxis)
     for (pieces in all) {
         if (fullyFits(pieces, m, innerW, fs) && piecesHeight(pieces, m, innerW, fs) <= height + 0.5f) return pieces
     }
     return all.last()
 }
 
-/** 一节课从哪条分界线画到哪条。 */
-data class Span(val cell: Cell, val col: Int, val a: Int, val b: Int)
+/** 一节课从哪条分界线画到哪条；onAxis：时间轴上标着它准确的开始和下课时间。 */
+data class Span(val cell: Cell, val col: Int, val a: Int, val b: Int) {
+    var onAxis = false
+}
 
-/** 时间轴上的一个标签：准确的开始时间，按节次排时下面注“第几节”。 */
+/** 时间轴上的开始时间标签，按节次排时下面注“第几节”。 */
 data class AxisLabel(val time: String, val unit: Int?)
 
 class GridLayout(
     val bounds: FloatArray,           // 每条分界线的 y（dp）
-    val labels: Map<Int, AxisLabel>,  // 分界线下标 → 标签（只含画得下的）
+    val starts: Map<Int, AxisLabel>,  // 分界线下标 → 开始时间（标在线下方，只含画得下的）
+    val ends: Map<Int, String>,       // 分界线下标 → 下课时间（标在线上方，只含画得下的）
     val spans: List<Span>,
     val fontScale: Float,
     val byUnit: Boolean,
@@ -243,31 +264,44 @@ class GridLayout(
 
 const val GAP = 6f
 
-private fun place(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, Int, Float>>, labels: List<Int>,
-                  labelH: Float, height: Float, t: Float): FloatArray {
+/**
+ * 时间轴标签占的地方：above[k] 是分界线 k 上方的下课时间标签高，below[k] 是下方的开始时间标签高。
+ * 相邻两条有标签的分界线之间至少放得下“上一条下方的 + 这一条上方的”。
+ */
+private class Marks(val above: FloatArray, val below: FloatArray) {
+    companion object {
+        fun none(n: Int) = Marks(FloatArray(n), FloatArray(n))
+    }
+}
+
+private fun place(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, Int, Float>>, marks: Marks,
+                  height: Float, t: Float): FloatArray {
     val gaps = gap.count { it } * GAP
     val total = ideal.sum()
     val unit = if (total > 0) (height - gaps) / total else 0f
     val ending = Array(ideal.size) { mutableListOf<Triple<Int, Int, Float>>() }
     for (c in cons) ending[c.second - 1] += c
-    val prevLabel = HashMap<Int, Int>()
-    labels.forEachIndexed { i, k -> if (i > 0) prevLabel[k] = labels[i - 1] }
     val y = FloatArray(ideal.size + 1)
+    var prev = if (marks.below[0] > 0f) 0 else -1
     for (k in ideal.indices) {
         var v = y[k] + if (gap[k]) GAP else t * unit * ideal[k]
         for (c in ending[k]) v = maxOf(v, y[c.first] + c.third)
-        prevLabel[k + 1]?.let { v = maxOf(v, y[it] + labelH) }
-        y[k + 1] = v
+        val n = k + 1
+        if (marks.above[n] > 0f || marks.below[n] > 0f) {
+            v = maxOf(v, (if (prev >= 0) y[prev] + marks.below[prev] else 0f) + marks.above[n])
+            prev = n
+        }
+        y[n] = v
     }
-    labels.lastOrNull()?.let { y[ideal.size] = maxOf(y[ideal.size], y[it] + labelH) }
+    if (prev >= 0) y[ideal.size] = maxOf(y[ideal.size], y[prev] + marks.below[prev])
     return y
 }
 
 /** 摆得下就尽量按比例（t 越大越接近纯按节次 / 时长）；t = 0 也摆不下返回 null。 */
-private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, Int, Float>>, labels: List<Int>,
-                  labelH: Float, height: Float): FloatArray? {
-    val fits = { t: Float -> place(ideal, gap, cons, labels, labelH, height, t)[ideal.size] <= height + 0.01f }
-    if (fits(1f)) return place(ideal, gap, cons, labels, labelH, height, 1f)
+private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, Int, Float>>, marks: Marks,
+                  height: Float): FloatArray? {
+    val fits = { t: Float -> place(ideal, gap, cons, marks, height, t)[ideal.size] <= height + 0.01f }
+    if (fits(1f)) return place(ideal, gap, cons, marks, height, 1f)
     if (!fits(0f)) return null
     var lo = 0f
     var hi = 1f
@@ -275,12 +309,12 @@ private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, I
         val mid = (lo + hi) / 2
         if (fits(mid)) lo = mid else hi = mid
     }
-    return place(ideal, gap, cons, labels, labelH, height, lo)
+    return place(ideal, gap, cons, marks, height, lo)
 }
 
 /** 拉大了字也跟着放大；最多缩到 0.8 倍，再小就看不清。 */
 val FONT_SCALES = floatArrayOf(1.2f, 1.1f, 1f, 0.9f, 0.8f)
-const val LEVELS = 6  // 排版时只试 0–5 档（都带起止时间）；都摆不下就纯按比例，卡片自己能写多少写多少
+const val LEVELS = 7  // 排版时只试 0–6 档（课名、教室都在）；都摆不下就纯按比例，卡片自己能写多少写多少
 
 /** 纵轴：segs 是相邻两条分界线之间的一段（ideal 按比例分高度，gap 是固定的 GAP）；startIdx / endIdx 是每节课的上下分界线。 */
 private class Axis(
@@ -380,41 +414,53 @@ private fun timeAxis(all: List<Cell>): Axis {
 
 private fun hm(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
 
-/** byTime = true：iOS 的 full（铺满）模式，纵轴按真实时间，课越长格子越高；否则按节次。 */
-fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float,
+/**
+ * byTime = true：iOS 的 full（铺满）模式，纵轴按真实时间，课越长格子越高；否则按节次。
+ * labelH / endH：开始时间（含粗体）、下课时间标签的高度。
+ */
+fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float,
                byTime: Boolean = false): GridLayout? {
     val all = columns.flatten()
     if (all.isEmpty()) return null
     val unitAxis = if (byTime) null else unitAxis(all)
     val axis = unitAxis ?: timeAxis(all)
+    val n = axis.ideal.size + 1
     val cellSpans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, axis.startIdx(it), axis.endIdx(it)) } }
-    // 每个开始位置标那里最早的开始时间（按节次时，同一节开始的课时间可能差几分钟，卡片上各自写准确时间）
-    val labelText = cellSpans.groupBy { it.a }.mapValues { (k, list) ->
-        AxisLabel(hm(list.minOf { it.cell.start }), axis.unitAt[k])
+    // 每条线下方标从它开始的最早时间、上方标在它下课的最晚时间；按节次排时同一节的课可能差几分钟，
+    // 对不上的那几节课卡片上自己写时间
+    val starts = cellSpans.groupBy { it.a }.mapValues { (k, list) -> AxisLabel(hm(list.minOf { it.cell.start }), axis.unitAt[k]) }
+    val ends = cellSpans.groupBy { it.b }.mapValues { (_, list) -> hm(list.maxOf { it.cell.end }) }
+    fun markOnAxis(shownStarts: Map<Int, AxisLabel>, shownEnds: Map<Int, String>) {
+        for (s in cellSpans) {
+            s.onAxis = shownStarts[s.a]?.time == hm(s.cell.start) && shownEnds[s.b] == hm(s.cell.end)
+        }
     }
-    val labels = labelText.keys.sorted()
+    markOnAxis(starts, ends)
+    val marks = Marks(FloatArray(n) { if (it in ends) endH else 0f }, FloatArray(n) { if (it in starts) labelH else 0f })
     for (level in 0 until LEVELS) {
         for (fs in FONT_SCALES) {
             // 教师、楼名不值得缩字：只有课名、时间、教室这些要紧的才往小里挤
             if (level <= 1 && fs < 1f) continue
             val cons = cellSpans.map { s ->
-                val h = need(s.cell, level, m, innerW, fs) ?: return@map null
+                val h = need(s.cell, level, m, innerW, fs, s.onAxis) ?: return@map null
                 Triple(s.a, s.b, h + CHIP_GAP)
             }
             if (cons.any { it == null }) continue
-            val bounds = solve(axis.ideal, axis.gap, cons.filterNotNull(), labels, labelH, height) ?: continue
-            return GridLayout(bounds, labelText, cellSpans, fs, unitAxis != null)
+            val bounds = solve(axis.ideal, axis.gap, cons.filterNotNull(), marks, height) ?: continue
+            return GridLayout(bounds, starts, ends, cellSpans, fs, unitAxis != null)
         }
     }
-    // 全都摆不下（很矮的小组件）：纯按比例，时间轴标签挤不下的省掉（卡片上的时间照样写）
-    val bounds = solve(axis.ideal, axis.gap, emptyList(), emptyList(), labelH, height) ?: return null
-    val shown = HashMap<Int, AxisLabel>()
-    var lastY = -labelH
-    for (k in labels) {
-        if (bounds[k] >= lastY + labelH && bounds[k] + labelH <= height + 0.5f) {
-            shown[k] = labelText.getValue(k)
-            lastY = bounds[k]
-        }
+    // 全都摆不下（很矮的小组件）：纯按比例，时间轴标签从上往下能放几个放几个，被省掉时间的课卡片上自己写
+    val bounds = solve(axis.ideal, axis.gap, emptyList(), Marks.none(n), height) ?: return null
+    val items = starts.keys.map { Triple(bounds[it], labelH, it) } + ends.keys.map { Triple(bounds[it] - endH, endH, -1 - it) }
+    val shownStarts = HashMap<Int, AxisLabel>()
+    val shownEnds = HashMap<Int, String>()
+    var lastBottom = 0f
+    for ((top, h, key) in items.sortedBy { it.first }) {
+        if (top < lastBottom - 0.5f || top + h > height + 0.5f) continue
+        if (key >= 0) shownStarts[key] = starts.getValue(key) else shownEnds[-1 - key] = ends.getValue(-1 - key)
+        lastBottom = top + h
     }
-    return GridLayout(bounds, shown, cellSpans, FONT_SCALES.last(), unitAxis != null)
+    markOnAxis(shownStarts, shownEnds)
+    return GridLayout(bounds, shownStarts, shownEnds, cellSpans, FONT_SCALES.last(), unitAxis != null)
 }
