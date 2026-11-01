@@ -43,8 +43,8 @@ open class WeekWidget(private val byTime: Boolean = false) : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val data = loadData(context)
         provideContent {
+            val data = rememberWidgetData(context)
             GlanceTheme {
                 val message = placeholderMessage(data)
                 if (message != null) Placeholder(context, message) else WeekContent(context, data, byTime)

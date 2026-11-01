@@ -54,8 +54,8 @@ open class DayWidget(private val tomorrow: Boolean) : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val data = loadData(context)
         provideContent {
+            val data = rememberWidgetData(context)
             GlanceTheme {
                 val message = placeholderMessage(data)
                 if (message != null) Placeholder(context, message) else DayContent(context, data, tomorrow)
