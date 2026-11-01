@@ -27,8 +27,8 @@ function ssoKeepText(minutes) {
   return `你是扫码登录的。学校给扫码登录的登录态较短，本站每 ${minutes || 20} 分钟替你保持一次，一般能一直自动刷新，`
     + "但学校仍可能让它失效。用账号密码登录（可以不保存密码）最稳。";
 }
-const SSO_LOST_TEXT = "学校的统一身份认证已不再接受你的扫码登录。本站还在替你保持教务登录态，课表暂时照常刷新，"
-  + "但一旦中断就需要重新登录。建议现在退出，改用账号密码登录（可以不保存密码）。";
+const SSO_LOST_TEXT = "学校的统一身份认证已不再接受本站保存的登录态。本站还在替你保持教务登录态，课表暂时照常刷新，"
+  + "但一旦中断就需要重新登录。建议现在退出，用账号密码重新登录（可以不保存密码）。";
 const SSO_REBIND_HINT = "（扫码登录的登录态较短，建议改用账号密码登录，可以不保存密码）";
 const ssoTipKey = (studentId) => `kb_sso_tip_${studentId || ""}`;
 
@@ -618,9 +618,9 @@ class TimetableController {
     this.bannerClose.hidden = true;
     if (status === "ok") {
       const keep = this.me?.keepalive;
-      const lost = short && keep && !keep.sso_ok;
-      // 扫码提示可以关掉；认证中心已不认了的警告关不掉
-      if (!short || (!lost && readStorage(ssoTipKey(this.me?.student_id)) === "1")) {
+      // 认证中心不认了：存了密码的人过期后会自动重新登录，不用提醒；其他人提醒且关不掉。扫码说明可以关掉
+      const lost = Boolean(keep && !keep.sso_ok && this.me?.cred_mode !== "password");
+      if (!lost && (!short || readStorage(ssoTipKey(this.me?.student_id)) === "1")) {
         this.banner.hidden = true;
         return;
       }

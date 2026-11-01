@@ -1774,25 +1774,37 @@ def _age_keepalive(seconds=None):
         conn.execute("UPDATE users SET keepalive_at=keepalive_at-?", (seconds or service.KEEPALIVE_EVERY + 1,))
 
 
-def test_keepalive_only_for_session_only_tgc_without_password(up, monkeypatch):
-    _login(TestClient(app), "2023001")                 # 账号密码登录：长效 CASTGC，不用保活
-    _, uid = _qr_login("2023002")                       # 扫码、没存密码：要保活
+def test_keepalive_covers_all_logins_qr_first(up, monkeypatch):
+    c1 = TestClient(app)
+    _login(c1, "2023001", remember=True)               # 账号密码登录、存了密码：教务会话一样要保
+    _, qr_uid = _qr_login("2023002")                    # 扫码、没存密码：最不经放，排前面
+    pwd_uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023001'").fetchone()["id"]
     assert service.keepalive_candidates() == []         # 刚登录，不到间隔
     _age_keepalive()
-    assert service.keepalive_candidates() == [uid]
+    with db.tx() as conn:  # 账号密码用户更久没保活，也还是扫码用户先
+        conn.execute("UPDATE users SET keepalive_at=keepalive_at-600 WHERE id=?", (pwd_uid,))
+    assert service.keepalive_candidates() == [qr_uid, pwd_uid]
     monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
-    assert scheduler.keepalive_once(_budget()) == 1
+    assert scheduler.keepalive_once(_budget(tokens=1)) == 1   # 预算只够一个：保扫码的
     assert up.touches == [("jwxt", "2023002"), ("sso", "2023002")]
+    assert scheduler.keepalive_once(_budget()) == 1
+    assert up.touches[2:] == [("jwxt", "2023001"), ("sso", "2023001")]
+    for uid in (qr_uid, pwd_uid):
+        row = _keepalive_row(uid)
+        assert row["keepalive_at"] > db.now() - 5 and row["sso_touched_at"] > db.now() - 5 and row["sso_lost_at"] is None
+    assert service.keepalive_candidates() == []
+
+
+def test_password_relogin_restarts_sso_keepalive(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023001'").fetchone()["id"]
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET sso_lost_at=?, sso_touched_at=1 WHERE id=?", (db.now(), uid))
+    up.expired.add("2023001")  # 教务过期、CASTGC 也续不上：用保存的密码重新登录
+    assert service.refresh_user(uid, "scheduled")["ok"]
     row = _keepalive_row(uid)
-    assert row["keepalive_at"] > db.now() - 5 and row["sso_touched_at"] > db.now() - 5 and row["sso_lost_at"] is None
-    assert service.keepalive_candidates() == []
-
-
-def test_keepalive_skips_qr_user_with_saved_password(up):
-    _login(TestClient(app), "2023001", remember=True)
-    _qr_login("2023001")
-    _age_keepalive()
-    assert service.keepalive_candidates() == []
+    assert row["sso_lost_at"] is None and row["sso_touched_at"] > db.now() - 5
 
 
 def test_keepalive_records_lost_sso_and_keeps_jwxt_alive(up):
@@ -1876,10 +1888,11 @@ def test_keepalive_state_in_api(up):
     service.keepalive_user(uid)
     keep = c.post("/api/refresh", headers=_csrf(c), json={}).json()["account"]["keepalive"]
     assert keep["sso_ok"] is False and keep["sso_lost_at"]
-    # 账号密码登录（长效 CASTGC）的人没有保活状态
+    # 账号密码登录的人一样有保活状态，只是不算“扫码短效”
     c2 = TestClient(app)
     _login(c2, "2023001")
-    assert c2.get("/api/me").json()["keepalive"] is None
+    me = c2.get("/api/me").json()
+    assert me["keepalive"]["sso_ok"] is True and me["sso_short"] is False
 
 
 def test_keepalive_saves_cookies_when_only_sso_answers(up, monkeypatch):

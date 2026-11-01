@@ -232,7 +232,7 @@ function renderSchedule(s) {
       : i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停"),
     h("td", { class: "wrap" }, i.pending_reason ? `${i.reason}（${i.pending_reason}）` : i.reason,
       i.last_error && i.status !== "ok" ? h("div", `上次错误：${i.last_error}`) : null,
-      i.sso_short ? h("div", { class: "muted" }, keepaliveText(i)) : null),
+      i.keepalive_at || i.sso_lost_at ? h("div", { class: "muted" }, keepaliveText(i)) : null),
     h("td", { class: "num" }, `${i.target_minutes} 分钟`),
     h("td", { class: "num" }, fmtRel(i.last_success_at)),
     h("td", { class: "num" }, i.next_class_at ? fmtTime(i.next_class_at) : "—"),

@@ -39,14 +39,15 @@ function refreshPace(me) {
   return `约每 ${every}${me.refresh_reason ? `（${me.refresh_reason}）` : ""}`;
 }
 
-// 扫码登录（会话级登录态）的保活情况
+// 登录保活情况：本站定时碰一下统一身份认证和教务，免得登录态闲置过期
 function keepaliveRows(me) {
   const keep = me.keepalive;
   if (!keep || me.status === "needs_rebind" || me.status === "captcha") return [];
   const pace = keep.paused
     ? "已暂停（较长时间没打开本站），再次打开后恢复"
     : `每 ${keep.every_minutes} 分钟 · 上次 ${keep.last_at ? T.relativeTime(keep.last_at) : "还没有"}`;
-  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}发现），教务登录态仍在保持`;
+  const lostNote = me.cred_mode === "password" ? "过期时会用保存的密码自动重新登录" : "教务登录态仍在保持";
+  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}发现），${lostNote}`;
   return [["保持登录", pace], ["统一身份认证", sso]];
 }
 

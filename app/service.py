@@ -587,6 +587,8 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
                     return _save_failure(uid, trigger, "needs_rebind",
                                          "保存的密码已无法解密（可能更换过服务器密钥），请重新登录本站")
                 cas.login(s, user["student_id"], password, device)
+                with db.tx() as c:  # 新的 CASTGC：保活重新从认证中心开始
+                    c.execute("UPDATE users SET sso_touched_at=?, sso_lost_at=NULL WHERE id=?", (db.now(), uid))
             data = jwxt.fetch_timetable(s, semester_id)
     except cas.CaptchaRequired:
         return _save_failure(uid, trigger, "captcha",
@@ -1023,27 +1025,28 @@ KEEPALIVE_IDLE = SSO_KEEPALIVE_IDLE_DAYS * 86400
 
 
 def keepalive_candidates(now: float | None = None) -> list[int]:
-    """该保活的人：扫码登录（会话级 CASTGC）、没存密码、离上次保活已满间隔。最久没保活的在前。
+    """该保活的人：登录态还在、离上次保活已满间隔。
 
+    扫码登录（会话级 CASTGC）、没存密码的人排在前面：他们的登录态最不经放，预算紧时先保他们；
+    账号密码登录的 CASTGC 能用半年，但教务会话闲置半小时左右就过期，保着就省得每次刷新都重新走一遍 SSO。
     刷新失败正在退避（error）的人也保活：学校一时出错不该让登录态跟着闲置过期。
     很久没用本站（网站 / 小组件 / 日历订阅）的人不保活。
     """
     now = db.now() if now is None else now
     rows = db.connect().execute(
         """SELECT id FROM users
-           WHERE status IN ('ok', 'error') AND sso_session_only=1 AND cred_mode<>'password'
+           WHERE status IN ('ok', 'error') AND enc_cookies IS NOT NULL
              AND COALESCE(keepalive_at, 0) <= ? AND COALESCE(last_seen_at, last_success_at, 0) > ?
-           ORDER BY COALESCE(keepalive_at, 0)""", (now - KEEPALIVE_EVERY, now - KEEPALIVE_IDLE)).fetchall()
+           ORDER BY (sso_session_only=1 AND cred_mode<>'password') DESC, COALESCE(keepalive_at, 0)""",
+        (now - KEEPALIVE_EVERY, now - KEEPALIVE_IDLE)).fetchall()
     return [r["id"] for r in rows]
 
 
 def keepalive_state(row, now: float | None = None) -> dict | None:
-    """给前端看的保活状态（只对需要提醒的扫码用户）：
+    """给前端看的保活状态：
 
     {"every_minutes", "last_at": 上次保活, "sso_ok": 认证中心是否还认, "sso_lost_at", "paused": 太久没用、已停止保活}
     """
-    if not sso_short(row["cred_mode"], row["sso_session_only"]):
-        return None
     now = db.now() if now is None else now
     seen = row["last_seen_at"] or row["last_success_at"] or 0
     return {"every_minutes": SSO_KEEPALIVE_MINUTES, "last_at": row["keepalive_at"],
@@ -1052,10 +1055,10 @@ def keepalive_state(row, now: float | None = None) -> dict | None:
 
 
 def keepalive_user(uid: int) -> dict:
-    """碰一下认证中心和教务，让会话级登录态别因为闲置过期。
+    """碰一下认证中心和教务，让登录态别因为闲置过期。
 
     - 认证中心：签一张 ticket 不兑换（cas.touch_sso）。会话级 CASTGC 多半有闲置超时，常碰着能撑到它的绝对上限；
-      发现已经不认了就记下 sso_lost_at，之后不再碰。
+      发现已经不认了就记下 sso_lost_at，之后不再碰（存了密码的人下次刷新会用密码重新登录，再恢复）。
     - 教务：不跟随跳转地打开课表页（jwxt.touch）。教务会话常碰着就不会过期，认证中心不认了也还能接着刷课表；
       教务会话已过期就排一次刷新，交给正常流程（能续期就续期，续不上提示重新登录）。
     返回 {"jwxt": bool, "sso": bool | None}（sso 为 None：之前已发现失效，这次没碰）。

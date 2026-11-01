@@ -85,7 +85,7 @@ REFRESH_BUDGET_RPS = _float("REFRESH_BUDGET_RPS", 0.65, minimum=0.05)
 if REFRESH_BUDGET_RPS > 0.9:
     raise RuntimeError("REFRESH_BUDGET_RPS 不能超过 0.9（全站上限 1 次/秒，要给登录和手动刷新留余量）")
 SCHEDULER_TICK = _int("SCHEDULER_TICK", 30, minimum=5)
-# 扫码登录（会话级 CASTGC）且没存密码的人：每隔多少分钟碰一下认证中心和教务，让两边的登录态都别因为闲置过期
+# 登录保活：每隔多少分钟碰一下认证中心和教务，让两边的登录态都别因为闲置过期（扫码登录的人优先）
 SSO_KEEPALIVE_MINUTES = _int("SSO_KEEPALIVE_MINUTES", 20, minimum=5)
 # 超过这么多天没打开网站 / 小组件 / 日历订阅的人不再保活：不为没人用的账号持续打扰学校
 SSO_KEEPALIVE_IDLE_DAYS = _int("SSO_KEEPALIVE_IDLE_DAYS", 14, minimum=1)
