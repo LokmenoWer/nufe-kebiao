@@ -1,4 +1,5 @@
 import base64
+import contextlib
 
 import pytest
 from cryptography.hazmat.primitives import padding
@@ -440,7 +441,8 @@ def test_concurrent_redirects_do_not_deadlock(monkeypatch):
     for slots in (2, 1):  # 并发上限 1 时，单条重定向也不能自锁
         monkeypatch.setattr(polite, "_slots", threading.BoundedSemaphore(slots))
         done = []
-        threads = [threading.Thread(target=lambda: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
+        # lambda 的 done=done 显式绑定当轮列表：列表在循环内重赋值，B023 按晚绑定保守报警
+        threads = [threading.Thread(target=lambda done=done: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
                                     daemon=True) for _ in range(2)]
         for th in threads:
             th.start()
@@ -679,7 +681,7 @@ def test_widget_colors_match_frontend():
 def test_refresh_policy_targets():
     from app import refresh_policy as P
     now = 1_000_000_000.0  # 2001-09-09 09:46 北京时间
-    H, D, M = 3600, 86400, 60
+    H, D, _M = 3600, 86400, 60
     soon_class = now + 5 * D  # 一周内有课，但还远
 
     def t(**kw):
@@ -733,6 +735,7 @@ def test_refresh_policy_checkpoint_before_class():
 def test_refresh_policy_quiet_hours():
     import datetime as dt
     from zoneinfo import ZoneInfo
+
     from app import refresh_policy as P
     tz = ZoneInfo("Asia/Shanghai")
     at = lambda h, m=0: dt.datetime(2026, 10, 27, h, m, tzinfo=tz).timestamp()  # noqa: E731
@@ -847,10 +850,9 @@ def test_skip_tmp_reauth_only_sent_when_page_offers_trust():
     for sleep_account, expected in (("0", "true"), ("1", None)):
         flow, s = _sms_flow(sleep_account)
         s.replies.append(_FakeResp(payload={"code": "reAuth_failed", "msg": "x"}))
-        try:
-            flow.verify_sms("123456", trust_device=True)
-        except cas.CasError:
-            pass
+        with contextlib.suppress(cas.CasError):
+                flow.verify_sms("123456", trust_device=True)
+
         data = s.posts[-1][1]
         assert data.get("skipTmpReAuth") == expected
         assert data["dynamicCode"] == "123456" and data["otpCode"] == "" and data["reAuthType"] == "3"
