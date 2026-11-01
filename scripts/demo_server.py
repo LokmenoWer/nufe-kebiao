@@ -97,7 +97,9 @@ class DemoFlow:
         self.password = ""
 
     def _done(self):
-        self.session.cookies.set("CASTGC", "demo", domain=cas.AUTH_HOST, path="/authserver")
+        # 和学校一样：账号密码登录（rememberMe）的 CASTGC 能用半年，扫码登录只给会话级的
+        self.session.cookies.set("CASTGC", "demo", domain=cas.AUTH_HOST, path="/authserver",
+                                 expires=int(time.time()) + 180 * 86400 if self.username else None)
         self.stage = "done"
         return self.stage
 

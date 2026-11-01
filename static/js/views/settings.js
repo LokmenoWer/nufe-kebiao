@@ -39,6 +39,18 @@ function refreshPace(me) {
   return `约每 ${every}${me.refresh_reason ? `（${me.refresh_reason}）` : ""}`;
 }
 
+// 登录保活情况：本站定时碰一下统一身份认证和教务，免得登录态闲置过期
+function keepaliveRows(me) {
+  const keep = me.keepalive;
+  if (!keep || me.status === "needs_rebind" || me.status === "captcha") return [];
+  const pace = keep.paused
+    ? "已暂停（较长时间没打开本站），再次打开后恢复"
+    : `每 ${keep.every_minutes} 分钟 · 上次 ${keep.last_at ? T.relativeTime(keep.last_at) : "还没有"}`;
+  const lostNote = me.cred_mode === "password" ? "过期时会用保存的密码自动重新登录" : "教务登录态仍在保持";
+  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}发现），${lostNote}`;
+  return [["保持登录", pace], ["统一身份认证", sso]];
+}
+
 export function openSettings({
   me,
   onUpdated,
@@ -80,6 +92,21 @@ export function openSettings({
     onClick: () => disableIcs(),
   }, "停用订阅");
   const icsInfo = h("p", { class: "hint" });
+  // 上课提醒只是链接上的 ?alarm=N，不存服务器：同一个 token 可以给不同设备订不同提醒
+  const ICS_ALARM_KEY = "kebiao.icsAlarm";
+  const alarmOptions = [["0", "不提醒"], ["5", "提前 5 分钟"], ["10", "提前 10 分钟"],
+    ["15", "提前 15 分钟"], ["20", "提前 20 分钟"], ["30", "提前 30 分钟"]];
+  const alarmSelect = h("select", {
+    class: "select", "aria-label": "日历上课提醒",
+    onChange: () => {
+      try { localStorage.setItem(ICS_ALARM_KEY, alarmSelect.value); } catch { /* 隐私模式 */ }
+      renderIcs();
+    },
+  }, ...alarmOptions.map(([value, label]) => h("option", { value }, label)));
+  try {
+    const saved = localStorage.getItem(ICS_ALARM_KEY);
+    if (alarmOptions.some(([value]) => value === saved)) alarmSelect.value = saved;
+  } catch { /* 读不到就用默认：不提醒 */ }
 
   const themeButtons = h("div", { class: "seg seg-wide", role: "group", "aria-label": "外观" });
   const themeOptions = [["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
@@ -151,6 +178,9 @@ export function openSettings({
 
     section("日历订阅",
       h("p", { class: "hint" }, "在 iOS / macOS 日历、Google 日历或 Outlook 里“添加订阅”并填入链接。链接本身就是凭证，泄露后请重新生成。"),
+      h("p", { class: "hint" }, "安卓：装开源的 ICSx⁵ 添加这个链接，课表会同步进系统日历，用日历自带的桌面小组件就能看。"
+        + "需要上课提醒就先在下面选好再复制（iOS 日历订阅默认会去掉提醒，iPhone 用小组件的提醒即可）。"),
+      h("label", { class: "field-inline" }, h("span", {}, "上课提醒"), alarmSelect),
       h("div", { class: "copy-row" }, icsInput, copyBtn),
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
       icsInfo),
@@ -186,7 +216,10 @@ export function openSettings({
     statusPill.className = `pill pill-${meta.tone}`;
     credText.textContent = current.cred_mode === "password"
       ? "已保存加密的密码：登录态过期时会自动重新登录。"
-      : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
+      : current.sso_short
+        ? "只保存登录态，不保存密码。你是扫码登录的：学校给的登录态较短，本站会定时替你保持（见“自动刷新”）；"
+          + "改用账号密码登录（不保存密码也行）能稳定维持约半年。"
+        : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
     forgetBtn.hidden = current.cred_mode !== "password";
   }
 
@@ -196,11 +229,18 @@ export function openSettings({
       ["上次成功", T.formatDateTime(current.last_success_at)],
       ["下次计划", current.next_refresh_at ? T.formatDateTime(current.next_refresh_at) : "已暂停"],
       ["刷新频率", refreshPace(current)],
+      ...keepaliveRows(current),
     ].flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, String(value))]));
   }
 
+  function icsLink() {
+    if (!icsUrl) return "";
+    const alarm = alarmSelect.value;
+    return alarm && alarm !== "0" ? `${icsUrl}?alarm=${alarm}` : icsUrl;
+  }
+
   function renderIcs() {
-    icsInput.value = icsUrl || "";
+    icsInput.value = icsLink();
     copyBtn.disabled = !icsUrl;
     rotateBtn.textContent = icsUrl ? "重新生成链接" : "生成链接";
     disableBtn.hidden = !icsUrl;
@@ -242,7 +282,7 @@ export function openSettings({
   async function copyIcs() {
     if (!icsUrl) return;
     try {
-      await navigator.clipboard.writeText(icsUrl);
+      await navigator.clipboard.writeText(icsLink());
       showToast("订阅链接已复制", { type: "success" });
     } catch {
       icsInput.focus();

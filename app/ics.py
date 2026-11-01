@@ -62,8 +62,25 @@ def _refresh_interval() -> str:
     return "PT1H"
 
 
-def build(student_id: str, semesters: list[tuple[dict, str]]) -> str:
-    """semesters: [(timetable_view, week1_monday_iso)]"""
+ALARM_MAX = 120   # 订阅链接 ?alarm=分钟 的上限
+
+
+def parse_alarm(value) -> int:
+    """订阅链接里的 ?alarm=N：上课前 N 分钟提醒。缺省、非法或 0 都是不提醒。"""
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return n if 0 < n <= ALARM_MAX else 0
+
+
+def _alarm(minutes: int, summary: str) -> list[str]:
+    return ["BEGIN:VALARM", "ACTION:DISPLAY", f"TRIGGER:-PT{minutes}M",
+            f"DESCRIPTION:{_esc(summary)}", "END:VALARM"]
+
+
+def build(student_id: str, semesters: list[tuple[dict, str]], alarm_minutes: int = 0) -> str:
+    """semesters: [(timetable_view, week1_monday_iso)]；alarm_minutes > 0 时每节课带一条课前提醒（VALARM）。"""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//nufe-kebiao//CN", "CALSCALE:GREGORIAN",
              "METHOD:PUBLISH", "X-WR-CALNAME:南财课表", "X-WR-CALDESC:南京财经大学课表（非官方）",
@@ -101,7 +118,9 @@ def build(student_id: str, semesters: list[tuple[dict, str]]) -> str:
                     f"DTSTART;TZID={TIMEZONE}:{day:%Y%m%d}T{st[0]:02d}{st[1]:02d}00",
                     f"DTEND;TZID={TIMEZONE}:{day:%Y%m%d}T{et[0]:02d}{et[1]:02d}00",
                     f"SUMMARY:{_esc(a.get('courseName', ''))}", f"LOCATION:{_esc(loc)}",
-                    f"DESCRIPTION:{_esc(desc)}", "END:VEVENT",
+                    f"DESCRIPTION:{_esc(desc)}",
+                    *(_alarm(alarm_minutes, a.get("courseName", "")) if alarm_minutes > 0 else []),
+                    "END:VEVENT",
                 ]
     lines.append("END:VCALENDAR")
     return "\r\n".join(_fold(line) for line in lines) + "\r\n"

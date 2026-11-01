@@ -1,5 +1,7 @@
 import base64
+import contextlib
 
+import pytest
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -303,6 +305,19 @@ def test_cas_rejects_error_page_as_logged_in():
     assert "personId" in (flow.course_html or "")
 
 
+def test_ics_alarm():
+    tt = {"semester_id": 161, "activities": [
+        {"courseName": "高数", "teachers": [], "weekday": 3, "startUnit": 1, "endUnit": 2, "weeksStr": "1-2",
+         "weekIndexes": [1, 2], "room": "A101", "building": "", "campus": "", "startTime": "8:20", "endTime": "9:45"},
+    ]}
+    assert "VALARM" not in ics.build("2023001", [(tt, "2026-09-07")])
+    out = ics.build("2023001", [(tt, "2026-09-07")], 15)
+    assert out.count("BEGIN:VALARM") == 2 and out.count("TRIGGER:-PT15M") == 2
+    assert out.index("BEGIN:VALARM") < out.index("END:VEVENT")
+    assert [ics.parse_alarm(v) for v in (None, "", "abc", "0", "-5", "10", " 30 ", "120", "121")] == \
+        [0, 0, 0, 0, 0, 10, 30, 120, 0]
+
+
 def test_ics_skips_invalid_time_ranges():
     tt = {"semester_id": 1, "activities": [
         {"courseName": "倒序", "teachers": [], "weekday": 1, "startUnit": 1, "endUnit": 2,
@@ -439,7 +454,8 @@ def test_concurrent_redirects_do_not_deadlock(monkeypatch):
     for slots in (2, 1):  # 并发上限 1 时，单条重定向也不能自锁
         monkeypatch.setattr(polite, "_slots", threading.BoundedSemaphore(slots))
         done = []
-        threads = [threading.Thread(target=lambda: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
+        # lambda 的 done=done 显式绑定当轮列表：列表在循环内重赋值，B023 按晚绑定保守报警
+        threads = [threading.Thread(target=lambda done=done: done.append(polite.PoliteSession().get("https://jwxt.invalid/a")),
                                     daemon=True) for _ in range(2)]
         for th in threads:
             th.start()
@@ -453,6 +469,49 @@ def test_renew_with_tgc_needs_castgc():
     import requests
     # 没有 CASTGC 时直接返回 False，不发任何请求
     assert cas.renew_with_tgc(requests.Session()) is False
+
+
+class _OneResponse:
+    """只记下请求、按给定状态码 / 跳转 / 正文回应的 Session（不联网）。"""
+
+    def __init__(self, status=200, location=None, text=""):
+        import requests
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.cookies.set("CASTGC", "tgc", domain=cas.AUTH_HOST, path="/authserver")
+        self.calls = []
+        self._status, self._location, self._text = status, location, text
+
+    def get(self, url, **kw):
+        import requests
+        self.calls.append((url, kw))
+        r = requests.Response()
+        r.status_code, r.url, r._content = self._status, url, self._text.encode()
+        if self._location:
+            r.headers["Location"] = self._location
+        return r
+
+
+def test_touch_sso():
+    s = _OneResponse(302, cas.JW_SSO_URL + "?ticket=ST-1-abc")
+    assert cas.touch_sso(s) is True
+    (url, kw), = s.calls
+    assert url == f"{cas.AUTH_BASE}/login" and kw["params"] == {"service": cas.JW_SSO_URL}
+    assert kw["allow_redirects"] is False  # 只签 ticket，不去兑换
+    assert cas.touch_sso(_OneResponse(200, text="<form id=pwdFromId>")) is False  # 回到登录页 = 已失效
+    assert cas.touch_sso(_OneResponse(302, f"{cas.AUTH_BASE}/reAuthCheck/reAuthLoginView.do")) is False
+    with pytest.raises(cas.CasError):
+        cas.touch_sso(_OneResponse(503))
+    empty = _OneResponse()
+    empty.cookies.clear()
+    assert cas.touch_sso(empty) is False and empty.calls == []
+
+
+def test_jwxt_touch():
+    page = "var personId = 1; var currentSemester = {id: 161};"
+    s = _OneResponse(200, text=page)
+    assert jwxt.touch(s) is True and s.calls[0][1]["allow_redirects"] is False
+    assert jwxt.touch(_OneResponse(302, "https://jwxt.nufe.edu.cn/student/login")) is False
+    assert jwxt.touch(_OneResponse(200, text="<html>维护中</html>")) is False
 
 
 # ---------- 人机验证解析 ----------
@@ -635,7 +694,7 @@ def test_widget_colors_match_frontend():
 def test_refresh_policy_targets():
     from app import refresh_policy as P
     now = 1_000_000_000.0  # 2001-09-09 09:46 北京时间
-    H, D, M = 3600, 86400, 60
+    H, D, _M = 3600, 86400, 60
     soon_class = now + 5 * D  # 一周内有课，但还远
 
     def t(**kw):
@@ -689,6 +748,7 @@ def test_refresh_policy_checkpoint_before_class():
 def test_refresh_policy_quiet_hours():
     import datetime as dt
     from zoneinfo import ZoneInfo
+
     from app import refresh_policy as P
     tz = ZoneInfo("Asia/Shanghai")
     at = lambda h, m=0: dt.datetime(2026, 10, 27, h, m, tzinfo=tz).timestamp()  # noqa: E731
@@ -839,10 +899,9 @@ def test_skip_tmp_reauth_only_sent_when_page_offers_trust():
     for sleep_account, expected in (("0", "true"), ("1", None)):
         flow, s = _sms_flow(sleep_account)
         s.replies.append(_FakeResp(payload={"code": "reAuth_failed", "msg": "x"}))
-        try:
-            flow.verify_sms("123456", trust_device=True)
-        except cas.CasError:
-            pass
+        with contextlib.suppress(cas.CasError):
+                flow.verify_sms("123456", trust_device=True)
+
         data = s.posts[-1][1]
         assert data.get("skipTmpReAuth") == expected
         assert data["dynamicCode"] == "123456" and data["otpCode"] == "" and data["reAuthType"] == "3"

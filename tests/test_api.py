@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import cas, db, jwxt, scheduler, service
+from app import admin, cas, db, jwxt, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -38,6 +38,8 @@ class FakeUpstream:
         self.qr = "waiting"       # waiting | scanned | expired | <学号>（= 该学号已在手机上确认）
         self.qr_mfa = False
         self.tgc_alive = set()    # 教务会话过期但 CASTGC 仍有效：可以静默续期
+        self.sso_dead = set()     # 认证中心已不认这些人的 CASTGC（保活时发现）
+        self.touches = []         # 保活请求：("sso" | "jwxt", 学号)
         self.renewals = 0
         self.fetches = 0
         self.course_override = None
@@ -53,8 +55,19 @@ class FakeUpstream:
         if PASSWORDS.get(username) != password:
             raise cas.CasError("您提供的用户名或者密码有误")
         self.logins.append(username)
-        session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver")
+        session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver",
+                            expires=TGC_REMEMBER_UNTIL)
         self.expired.discard(username)
+
+    def touch_sso(self, session):
+        sid = (session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver") or "").removeprefix("tgc-")
+        self.touches.append(("sso", sid))
+        return bool(sid) and sid not in self.sso_dead
+
+    def touch_jwxt(self, session):
+        sid = (session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver") or "").removeprefix("tgc-")
+        self.touches.append(("jwxt", sid))
+        return bool(sid) and sid not in self.expired
 
     def renew(self, session):
         tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
@@ -79,6 +92,9 @@ class FakeUpstream:
         if not sid or sid in self.expired:
             raise jwxt.SessionExpired()
         return _timetable(sid, "高数" if sid == "2023001" else "英语")
+
+
+TGC_REMEMBER_UNTIL = 4_102_444_800  # 2100 年：账号密码登录（rememberMe）拿到的长效 CASTGC
 
 
 class FakeFlow:
@@ -172,7 +188,9 @@ class FakeFlow:
     def _done(self):
         who = self.username or getattr(self, "_qr_user", "")
         self.up.logins.append(who)
-        self.session.cookies.set("CASTGC", f"tgc-{who}", domain="authserver.nufe.edu.cn", path="/authserver")
+        # 和学校一样：账号密码登录带“记住我”，CASTGC 有过期时间；扫码登录只给会话级 CASTGC
+        self.session.cookies.set("CASTGC", f"tgc-{who}", domain="authserver.nufe.edu.cn", path="/authserver",
+                                 expires=None if not self.username else TGC_REMEMBER_UNTIL)
         self.up.expired.discard(who)
         self.stage = "done"
         self.wipe_password()
@@ -197,6 +215,8 @@ def up(monkeypatch):
     monkeypatch.setattr(cas, "LoginFlow", FakeFlow)
     monkeypatch.setattr(jwxt, "fetch_timetable", fake.fetch)
     monkeypatch.setattr(cas, "renew_with_tgc", fake.renew)
+    monkeypatch.setattr(cas, "touch_sso", fake.touch_sso)
+    monkeypatch.setattr(jwxt, "touch", fake.touch_jwxt)
     # 手动刷新的冷却 / 新鲜度闸门单独测；其余用例里连续刷新不应被它挡住
     monkeypatch.setattr(service, "MANUAL_REFRESH_MIN_GAP", 0)
     monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 0)
@@ -679,6 +699,19 @@ def test_qr_login(up):
     assert service._pending == {}
 
 
+def test_qr_poll_while_login_completes(up):
+    """手机已确认、调度线程还在读课表建号时，浏览器轮询看到的是“已确认”，接着轮询就拿到登录结果。"""
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    p = service._pending[fid]
+    p.flow.stage = "done"  # 调度线程拿着 p.lock 正在 _complete_login
+    r = c.post("/api/login/qr/poll", headers=ORIGIN, json={"flow_id": fid}).json()
+    assert r == {"ok": False, "need": "qr", "flow_id": fid, "error": None, "qr_status": "confirmed"}
+    p.flow.stage = "qr"
+    up.qr = "2023002"
+    assert _qr_poll(c, fid).json()["ok"] is True
+
+
 def test_qr_login_keeps_saved_password(up):
     c = TestClient(app)
     _login(c, "2023001", remember=True)
@@ -687,6 +720,40 @@ def test_qr_login_keeps_saved_password(up):
     up.qr = "2023001"
     assert _qr_poll(c2, fid).json()["ok"]
     assert c2.get("/api/me").json()["cred_mode"] == "password"
+
+
+def test_qr_login_warns_session_only_tgc(up):
+    """扫码登录只拿到会话级 CASTGC：提醒用户改用账号密码登录；账号密码登录后提醒消失。"""
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    up.qr = "2023002"
+    assert _qr_poll(c, fid).json()["ok"]
+    me = c.get("/api/me").json()
+    assert me["sso_short"] is True
+    assert c.post("/api/refresh", headers=_csrf(c), json={}).json()["account"]["sso_short"] is True
+    uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023002'").fetchone()["id"]
+    assert [i["sso_short"] for i in admin.schedule()["items"] if i["uid"] == uid] == [True]
+
+    c2 = TestClient(app)
+    _login(c2, "2023002")
+    assert c2.get("/api/me").json()["sso_short"] is False
+
+
+def test_password_login_has_long_tgc(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.get("/api/me").json()["sso_short"] is False
+
+
+def test_qr_login_with_saved_password_not_warned(up):
+    # 存了密码的人过期后会自动重新登录，不用提醒
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    c2 = TestClient(app)
+    fid = _qr_start(c2)["flow_id"]
+    up.qr = "2023001"
+    assert _qr_poll(c2, fid).json()["ok"]
+    assert c2.get("/api/me").json()["sso_short"] is False
 
 
 def test_qr_login_with_mfa_and_expiry(up):
@@ -766,6 +833,7 @@ def test_device_hint_tamper_and_delete(up):
     c = TestClient(app)
     _login(c, "2023001")
     trusted = up.devices[-1]
+    c.cookies.delete("kb_dev")   # 同名不同 domain 是两个桶：先删掉服务端那份，只留篡改值
     c.cookies.set("kb_dev", "garbage", path="/")
     _qr_start(c)
     assert up.devices[-1] != trusted          # 篡改过的提示被忽略
@@ -879,6 +947,13 @@ def test_ics_etag_and_log_trim(up):
     assert feed.status_code == 200 and "ETag" in feed.headers
     cached = TestClient(app).get(path, headers={"If-None-Match": feed.headers["etag"]})
     assert cached.status_code == 304
+    assert "VALARM" not in feed.text
+    alarmed = TestClient(app).get(path + "?alarm=10")
+    assert alarmed.status_code == 200 and alarmed.text.count("TRIGGER:-PT10M") == feed.text.count("BEGIN:VEVENT")
+    assert alarmed.headers["etag"] != feed.headers["etag"]
+    # 换了提醒分钟数，旧 ETag 不能命中 304
+    assert TestClient(app).get(path + "?alarm=10", headers={"If-None-Match": feed.headers["etag"]}).status_code == 200
+    assert "VALARM" not in TestClient(app).get(path + "?alarm=bad").text
     uid = c.get("/api/me").json()["student_id"]
     assert uid == "2023001"
     with db.tx() as conn:
@@ -1333,6 +1408,33 @@ def test_widget_script_self_update_by_token(up):
     assert anon.get("/widget/nope.js").status_code == 404
 
 
+def test_widget_calendar_subscription(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    cal = path.removesuffix(".json") + "/calendar"
+    anon = TestClient(app)
+    # 还没生成 ICS 链接：顺手生成一个，网站设置里也能看到同一个
+    r = anon.post(cal)
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    url = r.json()["ics_url"]
+    assert url.startswith("http://testserver/ics/") and url.endswith(".ics")
+    assert c.get("/api/me").json()["ics_url"] == url
+    assert anon.get(url.removeprefix("http://testserver")).status_code == 200
+    # 已有链接原样返回，不让别处的订阅失效
+    assert anon.post(cal).json()["ics_url"] == url
+    rotated = c.post("/api/ics/rotate", headers=_csrf(c)).json()["ics_url"]
+    assert anon.post(cal).json()["ics_url"] == rotated
+    assert anon.get(cal).status_code == 405
+    assert anon.post("/widget/nope/calendar").status_code == 404
+    # 浏览器从别站发起仍按非法来源拒绝
+    assert anon.post(cal, headers={"Origin": "https://evil.example"}).status_code == 403
+    # 停用后再点：重新生成一个新的
+    c.post("/api/ics/disable", headers=_csrf(c))
+    again = anon.post(cal).json()["ics_url"]
+    assert again != rotated and c.get("/api/me").json()["ics_url"] == again
+
+
 def test_widget_requires_login_and_reports_status(up):
     anon = TestClient(app)
     assert anon.get("/api/widget/script").status_code == 401
@@ -1505,6 +1607,7 @@ def test_classmate_covers_pre_class_check(up):
     """出门前检查点：同一节课的同学刚刷过，就不用再替我向学校要一次。"""
     import datetime as dt
     from zoneinfo import ZoneInfo
+
     from app import refresh_policy as P
     tz = ZoneInfo("Asia/Shanghai")
     up.course_override = "高数"
@@ -1858,3 +1961,160 @@ def test_widget_no_task_without_jwxt_session(up):
     with db.tx() as conn:
         conn.execute("UPDATE users SET last_success_at=? WHERE student_id='2023001'", (db.now() - 30 * 86400,))
     assert "fetch" not in TestClient(app).get(path).json()
+
+
+def _qr_login(sid):
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    FakeFlow.up.qr = sid
+    assert _qr_poll(c, fid).json()["ok"]
+    return c, db.connect().execute("SELECT id FROM users WHERE student_id=?", (sid,)).fetchone()["id"]
+
+
+def _keepalive_row(uid):
+    return db.connect().execute(
+        "SELECT keepalive_at, sso_touched_at, sso_lost_at, refresh_requested_at FROM users WHERE id=?", (uid,)).fetchone()
+
+
+def _age_keepalive(seconds=None):
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET keepalive_at=keepalive_at-?", (seconds or service.KEEPALIVE_EVERY + 1,))
+
+
+def test_keepalive_covers_all_logins_qr_first(up, monkeypatch):
+    c1 = TestClient(app)
+    _login(c1, "2023001", remember=True)               # 账号密码登录、存了密码：教务会话一样要保
+    _, qr_uid = _qr_login("2023002")                    # 扫码、没存密码：最不经放，排前面
+    pwd_uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023001'").fetchone()["id"]
+    assert service.keepalive_candidates() == []         # 刚登录，不到间隔
+    _age_keepalive()
+    with db.tx() as conn:  # 账号密码用户更久没保活，也还是扫码用户先
+        conn.execute("UPDATE users SET keepalive_at=keepalive_at-600 WHERE id=?", (pwd_uid,))
+    assert service.keepalive_candidates() == [qr_uid, pwd_uid]
+    monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
+    assert scheduler.keepalive_once(_budget(tokens=1)) == 1   # 预算只够一个：保扫码的
+    assert up.touches == [("jwxt", "2023002"), ("sso", "2023002")]
+    assert scheduler.keepalive_once(_budget()) == 1
+    assert up.touches[2:] == [("jwxt", "2023001"), ("sso", "2023001")]
+    for uid in (qr_uid, pwd_uid):
+        row = _keepalive_row(uid)
+        assert row["keepalive_at"] > db.now() - 5 and row["sso_touched_at"] > db.now() - 5 and row["sso_lost_at"] is None
+    assert service.keepalive_candidates() == []
+
+
+def test_password_relogin_restarts_sso_keepalive(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023001'").fetchone()["id"]
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET sso_lost_at=?, sso_touched_at=1 WHERE id=?", (db.now(), uid))
+    up.expired.add("2023001")  # 教务过期、CASTGC 也续不上：用保存的密码重新登录
+    assert service.refresh_user(uid, "scheduled")["ok"]
+    row = _keepalive_row(uid)
+    assert row["sso_lost_at"] is None and row["sso_touched_at"] > db.now() - 5
+
+
+def test_keepalive_records_lost_sso_and_keeps_jwxt_alive(up):
+    _, uid = _qr_login("2023002")
+    up.sso_dead.add("2023002")
+    _age_keepalive()
+    assert service.keepalive_user(uid) == {"jwxt": True, "sso": False}
+    assert _keepalive_row(uid)["sso_lost_at"] is not None
+    # 认证中心不认了：之后只保教务会话
+    up.touches.clear()
+    _age_keepalive()
+    assert service.keepalive_user(uid) == {"jwxt": True, "sso": None}
+    assert up.touches == [("jwxt", "2023002")]
+    # 重新登录后重新开始保活认证中心
+    up.sso_dead.clear()
+    _qr_login("2023002")
+    assert _keepalive_row(uid)["sso_lost_at"] is None
+
+
+def test_keepalive_requests_refresh_when_jwxt_expired(up):
+    _, uid = _qr_login("2023002")
+    up.expired.add("2023002")
+    _age_keepalive()
+    assert service.keepalive_user(uid)["jwxt"] is False
+    assert _keepalive_row(uid)["refresh_requested_at"] is not None
+    assert uid in _queued()
+
+
+def test_keepalive_upstream_error_waits_for_next_interval(up, monkeypatch):
+    _, uid = _qr_login("2023002")
+    _age_keepalive()
+    monkeypatch.setattr(jwxt, "touch", lambda s: (_ for _ in ()).throw(ConnectionError("boom")))
+    assert service.keepalive_user(uid) == {"jwxt": None, "sso": None}
+    row = _keepalive_row(uid)
+    assert row["sso_lost_at"] is None and row["refresh_requested_at"] is None
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_uses_leftover_budget(up, monkeypatch):
+    _qr_login("2023002")
+    _age_keepalive()
+    monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
+    assert scheduler.keepalive_once(_budget(tokens=0.5)) == 0
+    assert up.touches == []
+    b = _budget(tokens=1)
+    assert scheduler.keepalive_once(b) == 1 and b.tokens == 1 - scheduler.KEEPALIVE_COST
+
+
+def test_renewal_marks_sso_touched(up):
+    _, uid = _qr_login("2023002")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET sso_touched_at=1 WHERE id=?", (uid,))
+    up.expired.add("2023002")
+    up.tgc_alive.add("2023002")
+    assert service.refresh_user(uid, "scheduled")["ok"]
+    assert _keepalive_row(uid)["sso_touched_at"] > db.now() - 5
+
+
+def test_keepalive_covers_error_backoff_and_skips_idle_users(up):
+    _, uid = _qr_login("2023002")
+    _age_keepalive()
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='error', next_refresh_at=? WHERE id=?", (db.now() + 3600, uid))
+    assert service.keepalive_candidates() == [uid]  # 学校一时出错，登录态照样要保
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='ok', last_seen_at=?, last_success_at=? WHERE id=?",
+                     (db.now() - service.KEEPALIVE_IDLE - 60, db.now() - service.KEEPALIVE_IDLE - 60, uid))
+    assert service.keepalive_candidates() == []     # 太久没用：不再打扰学校
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='needs_rebind', last_seen_at=? WHERE id=?", (db.now(), uid))
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_state_in_api(up):
+    c, uid = _qr_login("2023002")
+    keep = c.get("/api/me").json()["keepalive"]
+    assert keep["every_minutes"] == service.SSO_KEEPALIVE_MINUTES and keep["sso_ok"] is True
+    assert keep["last_at"] and keep["paused"] is False
+    up.sso_dead.add("2023002")
+    _age_keepalive()
+    service.keepalive_user(uid)
+    keep = c.post("/api/refresh", headers=_csrf(c), json={}).json()["account"]["keepalive"]
+    assert keep["sso_ok"] is False and keep["sso_lost_at"]
+    # 账号密码登录的人一样有保活状态，只是不算“扫码短效”
+    c2 = TestClient(app)
+    _login(c2, "2023001")
+    me = c2.get("/api/me").json()
+    assert me["keepalive"]["sso_ok"] is True and me["sso_short"] is False
+
+
+def test_keepalive_saves_cookies_when_only_sso_answers(up, monkeypatch):
+    _, uid = _qr_login("2023002")
+    up.expired.add("2023002")
+    _age_keepalive()
+    before = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0]
+
+    def touch_sso(session):
+        session.cookies.set("route", "new", domain="authserver.nufe.edu.cn", path="/")
+        return True
+    monkeypatch.setattr(cas, "touch_sso", touch_sso)
+    assert service.keepalive_user(uid) == {"jwxt": False, "sso": True}
+    after = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0]
+    assert after != before
+    from app import crypto
+    assert any(ck["name"] == "route" and ck["value"] == "new"
+               for ck in crypto.decrypt_json(after, "cookies", uid))

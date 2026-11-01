@@ -9,7 +9,9 @@ import * as T from "../time.js";
 import { lessonsOfWeek, maxWeekOf, formatUnits, formatTimeRange, formatUnitsWithTime, initialOf } from "../courses.js";
 import { layoutItems } from "../overlap.js";
 import { parseHash, buildHash } from "../hash.js";
-import { readViewPreference, writeViewPreference, readSemesterPreference, writeSemesterPreference } from "../store.js";
+import {
+  readViewPreference, writeViewPreference, readSemesterPreference, writeSemesterPreference, readStorage, writeStorage,
+} from "../store.js";
 import { getResolvedTheme, toggleTheme } from "../theme.js";
 import { openSettings } from "./settings.js";
 
@@ -19,6 +21,16 @@ const STATUS_TEXT = {
   captcha: { label: "等待验证码", tone: "warn" },
   needs_rebind: { label: "需要重新登录", tone: "danger" },
 };
+
+// 扫码登录只拿到会话级的认证中心登录态：本站定时替他保持，但学校仍可能让它失效
+function ssoKeepText(minutes) {
+  return `你是扫码登录的。学校给扫码登录的登录态较短，本站每 ${minutes || 20} 分钟替你保持一次，一般能一直自动刷新，`
+    + "但学校仍可能让它失效。用账号密码登录（可以不保存密码）最稳。";
+}
+const SSO_LOST_TEXT = "学校的统一身份认证已不再接受本站保存的登录态。本站还在替你保持教务登录态，课表暂时照常刷新，"
+  + "但一旦中断就需要重新登录。建议现在退出，用账号密码重新登录（可以不保存密码）。";
+const SSO_REBIND_HINT = "（扫码登录的登录态较短，建议改用账号密码登录，可以不保存密码）";
+const ssoTipKey = (studentId) => `kb_sso_tip_${studentId || ""}`;
 
 function actionButton(label, iconName, onClick, { className = "btn btn-ghost btn-sm" } = {}) {
   return h("button", { type: "button", class: className, onClick },
@@ -255,10 +267,15 @@ class TimetableController {
   buildBanner() {
     this.bannerText = h("span", { class: "banner-text" });
     this.bannerAction = h("button", { type: "button", class: "btn btn-sm", onClick: () => this.onBannerAction() });
+    this.bannerClose = h("button", {
+      type: "button", class: "btn btn-icon btn-ghost banner-close", "aria-label": "知道了，不再提示", title: "知道了",
+      hidden: true, onClick: () => this.dismissSsoTip(),
+    }, icon("x"));
     return h("div", { class: "status-banner", role: "status", hidden: true },
       h("span", { class: "banner-icon", "aria-hidden": "true" }, icon("alert")),
       this.bannerText,
-      this.bannerAction);
+      this.bannerAction,
+      this.bannerClose);
   }
 
   bindGlobalEvents() {
@@ -597,8 +614,24 @@ class TimetableController {
 
   renderBanner() {
     const status = this.me?.status || "ok";
+    const short = Boolean(this.me?.sso_short);
+    this.bannerClose.hidden = true;
     if (status === "ok") {
-      this.banner.hidden = true;
+      const keep = this.me?.keepalive;
+      // 认证中心不认了：存了密码的人过期后会自动重新登录，不用提醒；其他人提醒且关不掉。扫码说明可以关掉
+      const lost = Boolean(keep && !keep.sso_ok && this.me?.cred_mode !== "password");
+      if (!lost && (!short || readStorage(ssoTipKey(this.me?.student_id)) === "1")) {
+        this.banner.hidden = true;
+        return;
+      }
+      this.banner.hidden = false;
+      this.banner.className = `status-banner ${lost ? "status-warn" : "status-info"}`;
+      this.bannerText.textContent = lost ? SSO_LOST_TEXT : ssoKeepText(keep?.every_minutes);
+      this.bannerAction.hidden = false;
+      this.bannerAction.textContent = "改用密码登录";
+      this.bannerAction.dataset.action = "reauth";
+      this.bannerClose.hidden = lost;
+      replace(this.banner.querySelector(".banner-icon"), icon(lost ? "alert" : "key"));
       return;
     }
     const meta = STATUS_TEXT[status] || { label: "状态异常", tone: "warn" };
@@ -609,12 +642,18 @@ class TimetableController {
     };
     this.banner.hidden = false;
     this.banner.className = `status-banner status-${meta.tone}`;
-    this.bannerText.textContent = `${meta.label}：${messages[status] || status}`;
+    this.bannerText.textContent = `${meta.label}：${messages[status] || status}`
+      + (status === "needs_rebind" && short ? SSO_REBIND_HINT : "");
     const action = status === "error" ? "retry" : "reauth";
     this.bannerAction.hidden = false;
     this.bannerAction.textContent = action === "retry" ? "重试刷新" : "重新登录";
     this.bannerAction.dataset.action = action;
     replace(this.banner.querySelector(".banner-icon"), icon(status === "error" ? "alert" : "key"));
+  }
+
+  dismissSsoTip() {
+    writeStorage(ssoTipKey(this.me?.student_id), "1");
+    this.renderBanner();
   }
 
   async onBannerAction() {

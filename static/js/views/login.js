@@ -7,7 +7,8 @@ import { createSliderCaptcha } from "../components/slider-captcha.js";
 
 const INTRO = {
   pwd: "服务器代你登录统一身份认证，只读取课表。密码不会明文落库。",
-  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。",
+  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。"
+    + "扫码登录的登录态比账号密码短，本站会定时替你保持；想最稳定地自动刷新，推荐账号密码登录。",
 };
 
 function field(id, labelText, input) {
@@ -591,6 +592,9 @@ export function mountLogin(root, { onSuccess } = {}) {
     if (status === "scanned") {
       qrOverlay.textContent = "已扫描，请在手机上确认";
       qrStatus.textContent = "等待手机确认…";
+    } else if (status === "confirmed") {
+      qrOverlay.textContent = "已确认，正在登录…";
+      qrStatus.textContent = "正在读取课表，请稍候…";
     } else if (status === "expired") {
       qrOverlay.textContent = "二维码已失效";
       qrStatus.textContent = "点击“刷新二维码”重新获取。";
@@ -598,8 +602,8 @@ export function mountLogin(root, { onSuccess } = {}) {
       qrStatus.textContent = "请用学校官方 App 扫描二维码";
     }
     renderVisibility();
-    if (status !== "expired" && status !== "scanned") schedulePoll(2000);
-    else if (status === "scanned") schedulePoll(2000);
+    if (status === "confirmed") schedulePoll(1000);
+    else if (status !== "expired") schedulePoll(2000);
   }
 
   function stopPolling() {

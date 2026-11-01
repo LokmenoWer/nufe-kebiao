@@ -1,5 +1,11 @@
 # 南财课表（非官方）
 
+官方网站: [https://kebiao.nufe.wiki](https://kebiao.nufe.wiki)
+
+**南财课表**是给南京财经大学同学用的非官方`课表工具`。你可以用学校统一登录账号登录，自动把教务系统里的课表同步过来，方便查看,不用手动录入课表工具。
+
+本项目使用 `FastAPI` 搭建后端，前端采用原生 `ES Modules`，无需打包构建、无前端框架依赖，提供周视图/日视图课表展示、实时上课进度、ics 日历订阅、邮件变动通知、iOS Scriptable 桌面小组件等能力。
+
 用南京财经大学统一身份认证登录，后端代登录 CAS → 抓取教务课表 → 存库 → 后台定时刷新；前端按真实时间渲染周/日视图，可导出 `.ics` 订阅。
 
 > 本项目为非官方第三方工具，与南京财经大学无隶属关系。代登录可能受学校信息系统使用条款约束，部署和使用前请自行评估。
@@ -9,10 +15,11 @@
 - **两种登录方式**：账号密码 / 学校统一身份认证扫码。学校的人机验证（图形验证码、滑块拼图）和二次认证（短信、动态口令）只转交给真人完成，程序不识别、不代拖、不绕过。
 - **周视图 + 日视图**：当前时间线、正在上课进度、下一节提示、今天跳转、按周/日深链接；手机上周视图可横向滚动，时间轴固定在左侧。
 - **现代前端**：无构建步骤的 ES modules，原生 `dialog` / `popover` / `color-mix`，浅色/深色/跟随系统，移动端底部抽屉设置页。
-- **动态后台刷新**：不设固定时段和间隔，按活跃度、近期变动决定基础间隔，每节课出门前（课前半小时）再向学校确认一次；同班有人发现调课（含补课 / 加课），其他人立刻优先刷新，同一节课有同学刚确认过就不再重复请求；全站预算随学校的反应自动伸缩。失败指数退避；登录态过期、验证码、二次认证会在界面顶部提示并暂停自动重试。
+- **动态后台刷新**：不设固定时段和间隔，按活跃度、近期变动决定基础间隔，每节课出门前（课前半小时）再向学校确认一次；同班有人发现调课（含补课 / 加课），其他人立刻优先刷新，同一节课有同学刚确认过就不再重复请求；全站预算随学校的反应自动伸缩。失败指数退避；登录态过期、验证码、二次认证会在界面顶部提示并暂停自动重试。登录保活：教务会话闲置半小时左右就过期，扫码登录的认证中心登录态也是会话级的（没有“记住我”），所以每 20 分钟（`SSO_KEEPALIVE_MINUTES`）给每个人碰一下认证中心和教务，免得闲置过期；预算紧时扫码、没存密码的人优先（刷新失败退避期间也保，超过 14 天没用本站的不保，`SSO_KEEPALIVE_IDLE_DAYS`）；只用刷新剩下的预算。扫码用户在课表页顶部看到可关闭的说明、认证中心不认了时看到关不掉的提醒，设置页显示保持登录的状态。
 - **邮件通知**（可选）：绑定邮箱后，后台自动刷新暂停（需要重新登录 / 验证码）、连续失败或发现课表变动时发邮件提醒；两类提醒可分别关闭。
 - **iOS 桌面小组件**（Scriptable）：桌面和锁屏显示今天 / 明天 / 本周的课，正在上课和下一节高亮，周末预告下次上课。
-- **日历订阅**：生成可撤销的 `.ics` 链接，iOS / macOS 日历、Google 日历、Outlook 均可添加。
+- **日历订阅**：生成可撤销的 `.ics` 链接，iOS / macOS 日历、Google 日历、Outlook 均可添加；可选课前提醒（链接加 `?alarm=分钟`）。
+- **安卓桌面**：用 ICSx⁵ 订阅后，课表进系统日历，用日历自带的桌面小组件显示，并按订阅链接里的分钟数提醒上课。
 - **数据自主**：可删除已保存密码，也可一键删除账号与全部数据。
 
 ## 快速开始
@@ -21,13 +28,14 @@
 
 ```bash
 uv venv .venv && uv pip install -p .venv -r requirements.txt
-cp .env.example .env    # 然后填 APP_SECRET_KEY
+cp .env.example .env    # 然后填 APP_SECRET_KEY(生成密钥的命令见.env)
 ```
 
 ### 1. 先用命令行验证登录 + 抓课表
 
 ```bash
 .venv/bin/python -m app.cli 你的学号 -o my.json
+# Windows: .venv\Scripts\python.exe -m app.cli 你的学号 -o my.json
 ```
 
 密码通过交互输入，不回显，不落盘。成功会打印 `登录成功` 和本学期课程列表，并把规范化后的 JSON 写到 `my.json`。
@@ -40,6 +48,7 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY
 
 ```bash
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+# Windows: .venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
 ```
 
 生产环境放在 Caddy/Nginx/Apache 后面做 HTTPS，把 `PUBLIC_BASE_URL` 设成 `https://...`，系统会自动开启 Secure cookie、HSTS 和 http→https 跳转。后台刷新线程跑在进程内，**只启动一个 worker**（不要用 `--workers N`）。
@@ -48,6 +57,7 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY
 
 ```bash
 .venv/bin/python scripts/demo_server.py   # http://localhost:8765
+# Windows: .venv\Scripts\python.exe scripts/demo_server.py   # http://localhost:8765
 ```
 
 用 `examples/sample_timetable.json`（脱敏示例数据）跑完整前端：账号密码登录填**任意学号 + 密码 `demo`**；扫码登录点“显示二维码”，几秒后自动“确认”。密码填 `captcha` / `slider` / `sms` / `otp` 可分别演示图形验证码（填 abcd）、滑块拼图、短信和动态口令二次认证。适合改前端时使用。演示模式的登录限速已放宽，不会误挡反复调试。
@@ -56,9 +66,11 @@ cp .env.example .env    # 然后填 APP_SECRET_KEY
 
 ```bash
 .venv/bin/python -m pytest -q        # 后端 / API（上游全部打桩）
-node --test tests/js/*.test.js       # 前端纯逻辑（Node 20+，无需 npm install）
+node --test tests/js/*.test.js       # 前端纯逻辑（Node 20+，无需安装 npm 依赖；Windows 同款）
 uv pip install -p .venv ruff         # 可选：Python 静态检查
 .venv/bin/ruff check app tests scripts
+# Windows: .venv\Scripts\python.exe -m pytest -q
+#          .venv\Scripts\ruff.exe check app tests scripts
 ```
 
 测试会给上游（CAS/教务）打桩，不访问学校服务器。前端测试覆盖日期/周次、重叠课程分道、课程颜色与节次兜底、URL hash；浏览器端的登录/课表交互可用演示服务器手工验证。
@@ -186,6 +198,7 @@ MAIL_FROM_NAME=南财课表
 
 - 数据来自 `GET /widget/<token>.json`：服务端按北京时间算好今天、明天、本周（以及两周内下一个有课的日子），周次、缺失时间的兜底、课程颜色都和网页 / ICS 用同一套规则，脚本只负责排版。
 - token 与日历订阅分开，可单独重新生成 / 停用；库里只存 SHA-256，访问日志对 `/widget/` 脱敏；删号即失效。
+- **订阅到日历**：在 Scriptable 里运行脚本 →“订阅到日历”，脚本 `POST /widget/<token>/calendar` 拿到本人的 ICS 链接（还没有就生成一个，已有的原样返回、不让别处的订阅失效），再用 `webcal://` 打开，iOS 弹出“订阅日历”确认。小组件链接本就能读到完整课表，ICS 链接是同等的只读权限；这个接口和 `/upload` 一样凭路径 token 认人，不带 Origin 才放行。
 - 脚本源码在 `scriptable/nufe-kebiao-widget.js`，支持小 / 中 / 大 / 超大号和三种锁屏样式，覆盖这些场景：
   - **上课中 / 课间**：正在上的课显示距下课计时（系统每秒自己走，不依赖刷新），下一节显示“X 分钟后”；
   - **当天课上完、周末、假期**：预告下次上课；**开学前**显示“距开学还有 N 天”，**结课后**显示“本学期课程已结束”；
@@ -204,6 +217,20 @@ MAIL_FROM_NAME=南财课表
   - 平时在下一次上下课、课前 37 分钟（开了手机代抓时，自己去学校确认这节课）、课前 25 分钟（服务器刚确认完这节课）、零点或最多 30 分钟后请求重画（实际时机由 iOS 决定）。
 - 版本号不用手改：模板里写的是 `__SCRIPT_VERSION__`，服务器下发脚本（设置页复制 / 自我更新）时填入模板内容的哈希 `sha-<12 位>`，小组件 JSON 的 `script_version` 也是它。脚本只看两者是否相同，改了脚本、部署后用户就会看到“脚本可更新”。哈希以字母开头，按字符串比较大于旧的日期版本（`2026.11.04` 之类），所以还在用旧脚本的人同样会被提示。
 - 测试：`tests/js/scriptable-shim.js` 是一个极简的 Scriptable 运行时替身，`npm test` 会在 Node 里把整个脚本按各尺寸 / 模式跑一遍。
+
+### 日历订阅与安卓桌面
+
+设置 → “日历订阅”：生成链接（`/ics/<token>.ics`）后复制，在日历 App 里“添加订阅”。
+
+- **上课提醒**：链接后加 `?alarm=N`（1–120 分钟），每节课带一条课前 N 分钟的 `VALARM`。设置页“上课提醒”下拉框只是改复制出来的链接，服务器不存这个选择，所以同一个 token 可以给不同设备订不同的提醒；不加参数、参数不合法或为 0 时和以前一样不带提醒。正文缓存和 ETag 都按分钟数区分。
+  - iOS / macOS 订阅日历默认会“移除提醒”，iPhone 用户请用小组件的上课提醒，避免重复。
+  - Google 日历网页版订阅 URL 时会忽略日历里的提醒，而且通常要半天以上才刷新一次，安卓不建议直接订进 Google 日历。
+- **安卓桌面（不写代码的方案）**：
+  1. 安装开源的 [ICSx⁵](https://icsx5.bitfire.at/)（F-Droid / Google Play，不依赖谷歌服务，国产 ROM 也能用）。
+  2. 设置页选好“上课提醒”后复制链接，在 ICSx⁵ 里“+”添加订阅，同步间隔建议选“每小时”（链接里的 `REFRESH-INTERVAL` 也是 1 小时）。
+  3. 课表会写进系统日历（ICSx⁵ 会把 `VALARM` 一起写进去，系统日历按它提醒），桌面添加系统日历 / Google 日历 / Etar 等任意日历 App 的“日程”小组件即可。
+  4. 国产系统请在电池设置里给 ICSx⁵ 允许自启动 / 不限制后台，否则后台同步可能不准时。
+- 安卓上还没有像 Scriptable 那样的原生小组件；以后如果做，会直接读现成的 `/widget/<token>.json`。
 
 ### 会话与设备
 
@@ -278,7 +305,7 @@ examples/       脱敏示例课表
 scripts/        离线演示服务器
 deploy/         systemd / Apache 示例与部署脚本
 package.json    前端测试脚本（无依赖）
-pyproject.toml  ruff / pytest 配置
+pyproject.toml  依赖与 uv 配置、ruff / pytest 配置
 ```
 
 ## 开发约定

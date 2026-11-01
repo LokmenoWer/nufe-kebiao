@@ -53,7 +53,12 @@ CREATE TABLE IF NOT EXISTS users (
     widget_fetch     INTEGER NOT NULL DEFAULT 1,   -- 用户是否允许
     widget_fetch_ok_at REAL,           -- 最近一次代抓成功
     widget_fetch_fails INTEGER NOT NULL DEFAULT 0, -- 连续失败次数
-    widget_fetch_pending_until REAL    -- 刚把任务交给手机：这之前服务器不抢着刷
+    widget_fetch_pending_until REAL,   -- 刚把任务交给手机：这之前服务器不抢着刷
+    sso_session_only INTEGER NOT NULL DEFAULT 0,   -- 认证中心只发了会话级 CASTGC（扫码登录没有“记住我”），几小时后就续不上
+    -- 会话级 CASTGC 的保活（见 service.keepalive_user）
+    keepalive_at     REAL,             -- 最近一次保活（成败都记，免得反复打扰学校）
+    sso_touched_at   REAL,             -- 认证中心最近一次还认这个 CASTGC（登录 / 续期 / 保活）
+    sso_lost_at      REAL              -- 保活发现认证中心不认了：之后只保教务会话
 );
 -- 谁上同一节课：一个人发现调课，同班其他人立刻排到队首
 CREATE TABLE IF NOT EXISTS lesson_slots (
@@ -171,7 +176,9 @@ def init() -> None:
                      ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT"),
                      ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT"),
                      ("widget_fetch", "INTEGER NOT NULL DEFAULT 1"), ("widget_fetch_ok_at", "REAL"),
-                     ("widget_fetch_fails", "INTEGER NOT NULL DEFAULT 0"), ("widget_fetch_pending_until", "REAL")):
+                     ("widget_fetch_fails", "INTEGER NOT NULL DEFAULT 0"), ("widget_fetch_pending_until", "REAL"),
+                     ("sso_session_only", "INTEGER NOT NULL DEFAULT 0"), ("keepalive_at", "REAL"),
+                     ("sso_touched_at", "REAL"), ("sso_lost_at", "REAL")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
     if "course_key" not in {r["name"] for r in conn.execute("PRAGMA table_info(lesson_slots)")}:

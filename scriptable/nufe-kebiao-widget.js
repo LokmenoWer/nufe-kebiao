@@ -16,7 +16,8 @@
  *      也可以在 Scriptable 里运行脚本 → “提醒时间”直接选（Parameter 里写了数字的话以 Parameter 为准）。
  *      几块小组件请写同一个数字，后刷新的那块说了算。
  *   锁屏小组件同样可用：显示下一节课和倒计时。
- *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站。
+ *   在 Scriptable 里直接运行这个脚本：可以预览各种尺寸、刷新课表、更新脚本、打开网站，
+ *   以及“订阅到日历”——把课表作为订阅日历加进苹果“日历”App，之后系统自己定时更新。
  *
  * 调课：服务器每节课出门前（上课前半小时）会替你向学校确认一次课表，小组件在那之后重画。
  *   改了教室 / 时间的课标“调”（附原来的安排），当天停掉的课列在“停课”里，标题栏提示“有调课”。
@@ -169,6 +170,15 @@ function siteLink(base, payload, day, view = "day") {
 
 function refreshUrl(url) {
   return `${url}${String(url).includes("?") ? "&" : "?"}refresh=1`;
+}
+
+function calendarUrl(url) {
+  return String(url).replace(/\.json(\?.*)?$/, "/calendar");
+}
+
+/** webcal:// 交给 iOS 会直接弹“订阅日历”，订阅后由系统日历定时自己去拉，课表变了也会跟着变。 */
+function webcalUrl(icsUrl) {
+  return String(icsUrl).replace(/^https?:\/\//i, "webcal://");
 }
 
 // ---- 要画什么 ----
@@ -1723,6 +1733,33 @@ async function refreshNow() {
   }
 }
 
+/** 菜单 → 订阅到日历：向服务器要 ICS 订阅链接，用 webcal:// 打开，iOS 弹出“订阅”确认。 */
+async function subscribeCalendar() {
+  const req = new Request(calendarUrl(WIDGET_URL));
+  req.method = "POST";
+  req.timeoutInterval = 15;
+  let body = null;
+  try {
+    body = await req.loadJSON();
+  } catch (_) {
+    throw new Error("网络错误，稍后再试");
+  }
+  const status = req.response && req.response.statusCode;
+  if (status === 404) throw new Error("链接已失效，请到网站重新复制脚本");
+  if (status !== 200 || !body || !/^https?:\/\/\S+\.ics$/.test(String(body.ics_url || ""))) {
+    throw new Error(`没拿到订阅链接（${status || "网络错误"}）`);
+  }
+  const confirm = new Alert();
+  confirm.title = "订阅到日历";
+  confirm.message = "接下来系统会询问是否订阅，点“订阅”→“添加”。\n"
+    + "订阅后课表会出现在“日历”App 里并自动更新；不要的话在日历 App 里删掉这个订阅即可。\n"
+    + "已经订阅过就不用再订，否则会出现两份。";
+  confirm.addAction("去订阅");
+  confirm.addCancelAction("取消");
+  if ((await confirm.present()) !== 0) return;
+  Safari.open(webcalUrl(body.ics_url));
+}
+
 const LEAD_CHOICES = [0, 5, 10, 15, 20, 30, 45, 60];
 
 /** 菜单 → 提醒时间：选好记到本机，马上按新的分钟数重排。 */
@@ -1757,6 +1794,7 @@ async function inAppMenu(result, mode, remindNote, lead, fromParam) {
     ["预览小号", () => preview("small", mode).presentSmall()],
     ["提醒时间", () => chooseLead(result, lead, fromParam)],
     ["刷新课表", refreshNow],
+    ["订阅到日历", subscribeCalendar],
     ["更新脚本", async () => {
       const version = await updateScript();
       await say("已更新", `脚本已更新到 ${version}，小组件下次刷新时生效。`);
@@ -1817,7 +1855,7 @@ if (typeof ListWidget === "undefined") {
     SCRIPT_VERSION, parseMode, parseParam, remindLead, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
-    uploadUrl, isLoginUrl, jwxtUrl, resolveLocation, delegatedFetch,
+    uploadUrl, calendarUrl, webcalUrl, isLoginUrl, jwxtUrl, resolveLocation, delegatedFetch,
   };
 } else {
   main().catch((e) => {

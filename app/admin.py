@@ -15,7 +15,6 @@ import hmac
 import logging
 import os
 import platform
-import resource
 import secrets
 import sys
 import threading
@@ -121,13 +120,18 @@ class RingHandler(logging.Handler):
             self.records.append({"seq": self.seq, "at": record.created, "level": record.levelname,
                                  "logger": record.name, "message": msg[:2000]})
 
+    # 不用 getLevelName：它对没注册的级别名返回 "Level XXX" 这类字符串，筛选两侧都得兜底；
+    # 也不用 getLevelNamesMapping：3.11 才有，服务器是 3.10。这张表只有真实级别，查不到当 0
+    _LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING,
+               "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL}
+
     def since(self, after: int, level: str | None, query: str | None, limit: int) -> list[dict]:
-        floor = logging.getLevelName(level) if level else 0
-        floor = floor if isinstance(floor, int) else 0
+        mapping = self._LEVELS
+        floor = mapping.get(level, 0) if level else 0
         q = (query or "").lower()
         with self._ring_lock:
             rows = list(self.records)
-        out = [r for r in rows if r["seq"] > after and logging.getLevelName(r["level"]) >= floor
+        out = [r for r in rows if r["seq"] > after and mapping.get(r["level"], 0) >= floor
                and (not q or q in r["message"].lower() or q in r["logger"].lower())]
         return out[-limit:]
 
@@ -161,8 +165,9 @@ def schedule(now: float | None = None) -> dict:
     now = db.now() if now is None else now
     conn = db.connect()
     rows = conn.execute(
-        f"""SELECT id, student_id, name, status, fail_count, last_error, last_refresh_at, next_refresh_at,
-                   refresh_request_reason, {service._SIGNAL_COLS} FROM users""").fetchall()
+        f"""SELECT id, student_id, name, cred_mode, status, fail_count, last_error, last_refresh_at, next_refresh_at,
+                   refresh_request_reason, sso_session_only, keepalive_at, sso_touched_at, sso_lost_at,
+                   {service._SIGNAL_COLS} FROM users""").fetchall()
     queue = {uid: score for score, uid in service.candidates(now=now, limit=1_000_000)}
     items = []
     for r in rows:
@@ -178,6 +183,8 @@ def schedule(now: float | None = None) -> dict:
         items.append({
             "uid": r["id"], "student": mask_id(r["student_id"]), "name": mask_name(r["name"]),
             "status": r["status"], "fail_count": r["fail_count"], "last_error": r["last_error"],
+            "sso_short": service.sso_short(r["cred_mode"], r["sso_session_only"]),
+            "keepalive_at": r["keepalive_at"], "sso_touched_at": r["sso_touched_at"], "sso_lost_at": r["sso_lost_at"],
             "next_refresh_at": nxt, "target_minutes": round(tgt.seconds / 60),
             "reason": refresh_policy.reason(sig, now),
             "pending": pending, "pending_reason": r["refresh_request_reason"] if pending else None,
@@ -220,11 +227,18 @@ def overview() -> dict:
     refresh_24h = {f"{r['trigger']}_{'ok' if r['ok'] else 'fail'}": r["n"] for r in conn.execute(
         "SELECT trigger, ok, COUNT(*) AS n FROM refresh_log WHERE at >= ? GROUP BY trigger, ok", (since,))}
     db_bytes = sum(os.path.getsize(p) for p in (DB_PATH, DB_PATH + "-wal") if os.path.exists(p))
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform != "win32":     # Windows 没有 resource 模块，概况里省略峰值内存的数据返回
+        import resource
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss   # macOS 是字节，Linux 是 KB
+    else:
+        rss = None
     return {
         "started_at": STARTED_AT, "now": time.time(),
         "python": sys.version.split()[0], "platform": platform.platform(terse=True),
-        "pid": os.getpid(), "max_rss_mb": round(rss / (1024 * 1024 if sys.platform == "darwin" else 1024), 1),
+        "pid": os.getpid(),
+        # resource 为 None 时内存探测一并置空
+        "max_rss_mb": (round(rss / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+                       if rss is not None else None),
         "db_mb": round(db_bytes / 1024 / 1024, 2),
         "users": sum(status.values()), "user_status": status,
         "ics_subscribers": conn.execute("SELECT COUNT(*) FROM users WHERE ics_token_hash IS NOT NULL").fetchone()[0],

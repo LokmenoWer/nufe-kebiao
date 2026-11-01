@@ -29,6 +29,8 @@ from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
     REFRESH_MAX_FAILS,
+    SSO_KEEPALIVE_IDLE_DAYS,
+    SSO_KEEPALIVE_MINUTES,
     TIMEZONE,
     semester_overrides,
 )
@@ -197,6 +199,9 @@ def login_qr_poll(flow_id: str) -> dict:
     if done:
         return done[1]
     p = _get_pending(flow_id)
+    if p.flow.stage not in _USER_STEPS:
+        # 手机已确认，调度线程正拿着流程读课表、建号（这里不等 p.lock）：让浏览器接着轮询，几秒后就能拿到结果
+        return {"need": "qr", "flow_id": p.flow_id, "error": None, "qr_status": "confirmed"}
     with p.poll_lock:
         p.qr_polls += 1
         over = p.qr_polls > MAX_QR_POLLS
@@ -548,6 +553,8 @@ def _renew_with_tgc(s: PoliteSession, uid: int) -> bool:
         raise UpstreamDown() from None
     if renewed:
         log.info("user %s: jwxt session renewed via CASTGC", uid)
+        with db.tx() as c:
+            c.execute("UPDATE users SET sso_touched_at=? WHERE id=?", (db.now(), uid))
     return renewed
 
 
@@ -583,6 +590,8 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
                     return _save_failure(uid, trigger, "needs_rebind",
                                          "保存的密码已无法解密（可能更换过服务器密钥），请重新登录本站")
                 cas.login(s, user["student_id"], password, device)
+                with db.tx() as c:  # 新的 CASTGC：保活重新从认证中心开始
+                    c.execute("UPDATE users SET sso_touched_at=?, sso_lost_at=NULL WHERE id=?", (db.now(), uid))
             data = jwxt.fetch_timetable(s, semester_id)
     except cas.CaptchaRequired:
         return _save_failure(uid, trigger, "captcha",
@@ -1203,10 +1212,14 @@ def _save_success(c, uid: int, cookies: list[dict], data: dict, trigger: str) ->
     c.execute(
         """UPDATE users SET name=?, enc_cookies=?, status='ok', fail_count=0, last_error=NULL,
            last_refresh_at=?, last_success_at=?, current_semester_id=?, semesters_json=?,
-           refresh_requested_at=NULL, refresh_request_reason=NULL
+           refresh_requested_at=NULL, refresh_request_reason=NULL, sso_session_only=?
            WHERE id=?""",
         (data["student"].get("name"), crypto.encrypt_json(cookies, "cookies", uid), now, now,
-         data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False), uid))
+         data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False),
+         int(sso_session_only(cookies)), uid))
+    if trigger == "login":
+        # 刚登录：认证中心和教务的登录态都是新的，保活从现在算起
+        c.execute("UPDATE users SET keepalive_at=?, sso_touched_at=?, sso_lost_at=NULL WHERE id=?", (now, now, uid))
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
@@ -1225,6 +1238,107 @@ def _save_success(c, uid: int, cookies: list[dict], data: dict, trigger: str) ->
     row = c.execute(f"SELECT {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
     c.execute("UPDATE users SET next_refresh_at=? WHERE id=?", (refresh_policy.next_due(signals_of(row), now), uid))
     return changes
+
+
+def sso_session_only(cookies: list[dict]) -> bool:
+    """认证中心的 CASTGC 是不是会话级的（没有过期时间）。
+
+    账号密码登录带 rememberMe，CASTGC 能用半年；扫码登录的表单没有“记住我”，只发会话级 CASTGC，
+    认证中心几个小时后就不认了，教务会话一过期就只能本人重新登录。
+    """
+    return not any(c.get("name") == "CASTGC" and isinstance(c.get("expires"), int | float) for c in cookies)
+
+
+KEEPALIVE_EVERY = SSO_KEEPALIVE_MINUTES * 60
+KEEPALIVE_IDLE = SSO_KEEPALIVE_IDLE_DAYS * 86400
+
+
+def keepalive_candidates(now: float | None = None) -> list[int]:
+    """该保活的人：登录态还在、离上次保活已满间隔。
+
+    扫码登录（会话级 CASTGC）、没存密码的人排在前面：他们的登录态最不经放，预算紧时先保他们；
+    账号密码登录的 CASTGC 能用半年，但教务会话闲置半小时左右就过期，保着就省得每次刷新都重新走一遍 SSO。
+    刷新失败正在退避（error）的人也保活：学校一时出错不该让登录态跟着闲置过期。
+    很久没用本站（网站 / 小组件 / 日历订阅）的人不保活。
+    """
+    now = db.now() if now is None else now
+    rows = db.connect().execute(
+        """SELECT id FROM users
+           WHERE status IN ('ok', 'error') AND enc_cookies IS NOT NULL
+             AND COALESCE(keepalive_at, 0) <= ? AND COALESCE(last_seen_at, last_success_at, 0) > ?
+           ORDER BY (sso_session_only=1 AND cred_mode<>'password') DESC, COALESCE(keepalive_at, 0)""",
+        (now - KEEPALIVE_EVERY, now - KEEPALIVE_IDLE)).fetchall()
+    return [r["id"] for r in rows]
+
+
+def keepalive_state(row, now: float | None = None) -> dict | None:
+    """给前端看的保活状态：
+
+    {"every_minutes", "last_at": 上次保活, "sso_ok": 认证中心是否还认, "sso_lost_at", "paused": 太久没用、已停止保活}
+    """
+    now = db.now() if now is None else now
+    seen = row["last_seen_at"] or row["last_success_at"] or 0
+    return {"every_minutes": SSO_KEEPALIVE_MINUTES, "last_at": row["keepalive_at"],
+            "sso_ok": row["sso_lost_at"] is None, "sso_lost_at": row["sso_lost_at"],
+            "paused": now - seen > KEEPALIVE_IDLE}
+
+
+def keepalive_user(uid: int) -> dict:
+    """碰一下认证中心和教务，让登录态别因为闲置过期。
+
+    - 认证中心：签一张 ticket 不兑换（cas.touch_sso）。会话级 CASTGC 多半有闲置超时，常碰着能撑到它的绝对上限；
+      发现已经不认了就记下 sso_lost_at，之后不再碰（存了密码的人下次刷新会用密码重新登录，再恢复）。
+    - 教务：不跟随跳转地打开课表页（jwxt.touch）。教务会话常碰着就不会过期，认证中心不认了也还能接着刷课表；
+      教务会话已过期就排一次刷新，交给正常流程（能续期就续期，续不上提示重新登录）。
+    返回 {"jwxt": bool, "sso": bool | None}（sso 为 None：之前已发现失效，这次没碰）。
+    """
+    lock = _locks[uid]
+    if not lock.acquire(blocking=False):
+        raise Busy()
+    try:
+        row = db.connect().execute(
+            "SELECT enc_cookies, sso_touched_at, sso_lost_at FROM users WHERE id=?", (uid,)).fetchone()
+        if not row or not row["enc_cookies"]:
+            raise KeyError(uid)
+        s = PoliteSession()
+        load_cookies(s, crypto.decrypt_json(row["enc_cookies"], "cookies", uid))
+        now = db.now()
+        try:
+            jw_ok = jwxt.touch(s)
+            sso_ok = None if row["sso_lost_at"] else cas.touch_sso(s)
+        except UpstreamYield:
+            raise
+        except Exception as e:  # 学校一时出错：这一轮算碰过，下个间隔再来，不改状态
+            log.warning("user %s: keepalive failed: %s", uid, type(e).__name__)
+            with db.tx() as c:
+                c.execute("UPDATE users SET keepalive_at=? WHERE id=?", (now, uid))
+            return {"jwxt": None, "sso": None}
+        with db.tx() as c:
+            c.execute("UPDATE users SET keepalive_at=? WHERE id=?", (now, uid))
+            if jw_ok or sso_ok:  # 学校可能顺手换了 cookie：还有效就存回去
+                c.execute("UPDATE users SET enc_cookies=? WHERE id=?",
+                          (crypto.encrypt_json(dump_cookies(s), "cookies", uid), uid))
+            if sso_ok:
+                c.execute("UPDATE users SET sso_touched_at=? WHERE id=?", (now, uid))
+            elif sso_ok is False:
+                c.execute("UPDATE users SET sso_lost_at=? WHERE id=?", (now, uid))
+            if not jw_ok:
+                request_refresh(uid, "教务登录态已过期", now, conn=c)  # 只对状态正常的人生效；退避中的按原计划重试
+        if sso_ok is False:
+            # 记下会话级 CASTGC 实际能撑多久，用来调保活间隔
+            idle = (now - row["sso_touched_at"]) / 3600 if row["sso_touched_at"] else None
+            log.info("user %s: session-only CASTGC no longer accepted (%s since last accepted)", uid,
+                     f"{idle:.1f}h" if idle is not None else "unknown")
+        if not jw_ok:
+            log.info("user %s: keepalive found jwxt session expired, refresh requested", uid)
+        return {"jwxt": jw_ok, "sso": sso_ok}
+    finally:
+        lock.release()
+
+
+def sso_short(cred_mode: str | None, session_only) -> bool:
+    """自动刷新撑不了多久、需要提醒用户的情况。存了密码的人过期后会自动重新登录，不用提醒。"""
+    return bool(session_only) and cred_mode != "password"
 
 
 def _record_change(c, uid: int, now: float, changes: dict) -> None:
@@ -1346,7 +1460,8 @@ def account_snapshot(uid: int) -> dict | None:
     """刷新接口带回的账号状态，前端不必再请求 /api/me。"""
     row = db.connect().execute(
         """SELECT student_id, name, cred_mode, status, last_error, fail_count, last_refresh_at,
-                  last_success_at, next_refresh_at, current_semester_id, semesters_json
+                  last_success_at, next_refresh_at, current_semester_id, semesters_json, sso_session_only,
+                  keepalive_at, sso_lost_at, last_seen_at
            FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return None
@@ -1362,6 +1477,8 @@ def account_snapshot(uid: int) -> dict | None:
         "next_refresh_at": row["next_refresh_at"],
         "current_semester_id": row["current_semester_id"],
         "semesters": _json_list(row["semesters_json"]),
+        "sso_short": sso_short(row["cred_mode"], row["sso_session_only"]),
+        "keepalive": keepalive_state(row),
         **_outlook_fields(uid),
     }
 
@@ -1392,7 +1509,7 @@ def housekeeping() -> None:
             _locks.pop(uid, None)
 
 
-def ics_body(uid: int, student_id: str) -> tuple[str, str]:
+def ics_body(uid: int, student_id: str, alarm_minutes: int = 0) -> tuple[str, str]:
     """一次查出全部学期。按影响正文的全部输入缓存，返回 (正文哈希/ETag, 正文)。"""
     rows = db.connect().execute(
         """SELECT t.semester_id, t.semester_name, t.data_json, t.fetched_at, s.week1_monday AS db_week1
@@ -1405,6 +1522,7 @@ def ics_body(uid: int, student_id: str) -> tuple[str, str]:
         len(rows),
         tuple((r["semester_id"], r["semester_name"], r["db_week1"]) for r in rows),
         tuple(sorted(ov.items())),
+        alarm_minutes,
     )
     cached = _ics_cache.get(uid)
     if cached and cached[0] == key:
@@ -1434,7 +1552,7 @@ def ics_body(uid: int, student_id: str) -> tuple[str, str]:
             **payload,
         }
         sems.append((view, week1))
-    body = ics.build(student_id, sems)
+    body = ics.build(student_id, sems, alarm_minutes)
     # ETag 必须跟随正文（校历/学期数据变化时正文会变），不能只看 fetched_at
     version = hashlib.sha256(body.encode()).hexdigest()[:24]
     _ics_cache[uid] = (key, version, body)

@@ -76,6 +76,14 @@ def _check(r: requests.Response) -> requests.Response:
     return r
 
 
+def touch(session: requests.Session) -> bool:
+    """教务会话保活：不跟随跳转地打开一次课表页。True = 教务会话还在。"""
+    r = session.get(cas.COURSE_TABLE_URL, allow_redirects=False)
+    if r.status_code >= 500:
+        r.raise_for_status()
+    return r.status_code == 200 and cas.looks_like_course_page(r.text)
+
+
 def get_course_page(session: requests.Session) -> CoursePage:
     return parse_course_page(_check(session.get(cas.COURSE_TABLE_URL)).text)
 

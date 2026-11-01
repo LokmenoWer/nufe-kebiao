@@ -23,6 +23,7 @@ _threads: list[threading.Thread] = []
 _thread_lock = threading.Lock()
 
 REQUESTS_PER_REFRESH = 2.5      # 一次刷新平均打学校几次（课表页 + 打印数据，偶尔加校历 / 续期）
+KEEPALIVE_COST = 2 / REQUESTS_PER_REFRESH  # 一次保活（教务课表页 + 认证中心各一次）折合多少次刷新
 MIN_RATE = 0.05                 # 预算下限：学校再不稳也保持极低频地探一探
 RECOVER_STEP = 0.1              # 每个正常 tick 加回上限的 10%
 USER_GAP = (0.3, 1.0)           # 两个人之间的小抖动（秒）
@@ -85,14 +86,40 @@ def run_once(budget: Budget | None = None) -> int:
         done += 1
         if _stop.wait(random.uniform(*USER_GAP)):
             break
+    kept = keepalive_once(budget)
     global last_tick
-    last_tick = {"at": time.time(), "due": len(due), "refreshed": done, "budget_rps": round(budget.rate, 3)}
+    last_tick = {"at": time.time(), "due": len(due), "refreshed": done, "kept_alive": kept,
+                 "budget_rps": round(budget.rate, 3)}
     # 有人到期、刷了人、或预算变了才记一行：平时安静，需要时能看出调度器在干什么
-    if due or done or budget.rate != before:
-        log.info("tick: due=%d refreshed=%d budget=%.2f/s (max %.2f)%s",
-                 len(due), done, budget.rate, budget.max_rate,
+    if due or done or kept or budget.rate != before:
+        log.info("tick: due=%d refreshed=%d kept_alive=%d budget=%.2f/s (max %.2f)%s",
+                 len(due), done, kept, budget.rate, budget.max_rate,
                  "" if budget.rate >= before else " ↓ 学校报错或要求暂停，预算减半")
     return done
+
+
+def keepalive_once(budget: Budget) -> int:
+    """刷新排完后用剩下的预算给扫码登录的人保活。返回保活了几个人。"""
+    kept = 0
+    for uid in service.keepalive_candidates():
+        if _stop.is_set() or budget.tokens < KEEPALIVE_COST:
+            break
+        try:
+            with background_upstream():
+                service.keepalive_user(uid)
+        except service.Busy:
+            continue  # 正在刷新，本身就碰到了教务
+        except UpstreamYield:
+            break
+        except KeyError:
+            continue
+        except Exception as e:
+            log.error("keepalive crashed user=%s: %s", uid, type(e).__name__)
+        budget.tokens -= KEEPALIVE_COST
+        kept += 1
+        if _stop.wait(random.uniform(*USER_GAP)):
+            break
+    return kept
 
 
 def _loop() -> None:

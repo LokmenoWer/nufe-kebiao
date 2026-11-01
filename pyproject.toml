@@ -1,3 +1,24 @@
+[project]
+name = "nufe-kebiao"
+version = "0.1.0"
+description = "南财课表（非官方）：统一身份认证代登录、教务课表周视图、定时刷新与 .ics 订阅"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "cryptography>=42",
+    "fastapi>=0.110",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "uvicorn[standard]>=0.29",
+    "tzdata>=2024.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx2>=0.27", "ruff"]
+
+[tool.uv]
+package = false
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

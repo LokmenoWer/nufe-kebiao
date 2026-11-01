@@ -993,3 +993,8 @@ test("开了代抓：课前 37 分钟也重画一次，落在出门前的检查�
   assert.equal(W.nextRefreshMs({ ...PAYLOAD, delegate: true }, at1330), at1330.ms + 8 * 60000); // 13:38
   assert.equal(W.nextRefreshMs(PAYLOAD, at1330), at1330.ms + 20 * 60000); // 13:50
 });
+
+test("订阅到日历：链接换成 /calendar，ICS 地址换成 webcal://", () => {
+  assert.equal(W.calendarUrl("https://k.example/widget/abc.json"), "https://k.example/widget/abc/calendar");
+  assert.equal(W.webcalUrl("https://k.example/ics/xyz.ics"), "webcal://k.example/ics/xyz.ics");
+});

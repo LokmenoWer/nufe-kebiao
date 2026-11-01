@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin, cas, crypto, db, mailer, notify, presence, scheduler, service, widget
+from . import admin, cas, crypto, db, ics, mailer, notify, presence, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -125,11 +125,11 @@ async def validation_exception(_request: Request, _exc: RequestValidationError):
     return JSONResponse({"detail": "请求参数不正确"}, status_code=422)
 
 
-def _widget_upload(request: Request) -> bool:
-    """小组件交回代抓结果：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，没有 CSRF 的问题。
-    浏览器带了别站的 Origin 仍然拒绝。"""
+def _widget_post(request: Request) -> bool:
+    """小组件交回代抓结果 / 要日历订阅链接：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，
+    没有 CSRF 的问题。浏览器带了别站的 Origin 仍然拒绝。"""
     return (request.method == "POST" and request.url.path.startswith("/widget/")
-            and request.url.path.endswith("/upload") and not request.headers.get("origin"))
+            and request.url.path.endswith(("/upload", "/calendar")) and not request.headers.get("origin"))
 
 
 @app.middleware("http")
@@ -143,7 +143,7 @@ async def security_mw(request: Request, call_next):
         if request.url.query:
             target += "?" + request.url.query
         return RedirectResponse(target, 308)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_upload(request):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
         return JSONResponse({"detail": "非法来源"}, 403)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
                                    and not request.url.path.startswith("/api/admin/")):
@@ -468,6 +468,8 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "refresh_pending": outlook.get("pending", False),
         "current_semester_id": sess["current_semester_id"],
         "semesters": _json_list(sess["semesters_json"]),
+        "sso_short": service.sso_short(sess["cred_mode"], sess["sso_session_only"]),
+        "keepalive": service.keepalive_state(sess),
         "ics_url": _ics_url(sess["id"]),
         "mail": notify.snapshot(sess["id"]),
         "widget_url": _widget_url(sess["id"]),
@@ -776,6 +778,25 @@ async def widget_upload(token: str, request: Request):
     return JSONResponse(out, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
+@app.post("/widget/{token}/calendar")
+def widget_calendar(token: str):
+    """小组件“订阅到日历”：给出本人的 ICS 订阅链接，还没生成就顺手生成一个。
+    小组件链接已经能读到完整课表，ICS 链接是同等的只读权限；已有的链接原样返回，不会让别处的订阅失效。"""
+    user = _widget_user(token)
+    url = _ics_url(user["id"])
+    if not url:
+        new = secrets.token_urlsafe(24)
+        # 事务里再看一眼（BEGIN IMMEDIATE 已串行）：两次点击同时到达，后到的那次不能把先发出去的链接顶掉
+        with db.tx() as c:
+            if _ics_url(user["id"]) is None:
+                c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=?",
+                          (crypto.token_hash(new), crypto.encrypt(new.encode(), "ics", user["id"]), user["id"]))
+        url = _ics_url(user["id"])
+        if not url:
+            raise HTTPException(404)
+    return JSONResponse({"ics_url": url}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
 @app.post("/api/account/delete")
 def delete_account(response: Response, sess=Depends(csrf_protected)):
     service.delete_user(sess["id"])
@@ -794,7 +815,9 @@ def ics_feed(token: str, request: Request):
         raise HTTPException(404)
     presence.mark_user(user["id"], "ics")
     _record_use(user["id"])
-    version, body = service.ics_body(user["id"], user["student_id"])
+    # ?alarm=N：每节课带课前 N 分钟的提醒（安卓 ICSx⁵、Outlook 等会照着响）；不写就和以前一样不带
+    version, body = service.ics_body(user["id"], user["student_id"],
+                                     ics.parse_alarm(request.query_params.get("alarm")))
     etag = f'W/"{version}"'
     headers = {
         "Cache-Control": "private, max-age=3600",
