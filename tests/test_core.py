@@ -1,5 +1,6 @@
 import base64
 
+import pytest
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -453,6 +454,49 @@ def test_renew_with_tgc_needs_castgc():
     import requests
     # 没有 CASTGC 时直接返回 False，不发任何请求
     assert cas.renew_with_tgc(requests.Session()) is False
+
+
+class _OneResponse:
+    """只记下请求、按给定状态码 / 跳转 / 正文回应的 Session（不联网）。"""
+
+    def __init__(self, status=200, location=None, text=""):
+        import requests
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.cookies.set("CASTGC", "tgc", domain=cas.AUTH_HOST, path="/authserver")
+        self.calls = []
+        self._status, self._location, self._text = status, location, text
+
+    def get(self, url, **kw):
+        import requests
+        self.calls.append((url, kw))
+        r = requests.Response()
+        r.status_code, r.url, r._content = self._status, url, self._text.encode()
+        if self._location:
+            r.headers["Location"] = self._location
+        return r
+
+
+def test_touch_sso():
+    s = _OneResponse(302, cas.JW_SSO_URL + "?ticket=ST-1-abc")
+    assert cas.touch_sso(s) is True
+    (url, kw), = s.calls
+    assert url == f"{cas.AUTH_BASE}/login" and kw["params"] == {"service": cas.JW_SSO_URL}
+    assert kw["allow_redirects"] is False  # 只签 ticket，不去兑换
+    assert cas.touch_sso(_OneResponse(200, text="<form id=pwdFromId>")) is False  # 回到登录页 = 已失效
+    assert cas.touch_sso(_OneResponse(302, f"{cas.AUTH_BASE}/reAuthCheck/reAuthLoginView.do")) is False
+    with pytest.raises(cas.CasError):
+        cas.touch_sso(_OneResponse(503))
+    empty = _OneResponse()
+    empty.cookies.clear()
+    assert cas.touch_sso(empty) is False and empty.calls == []
+
+
+def test_jwxt_touch():
+    page = "var personId = 1; var currentSemester = {id: 161};"
+    s = _OneResponse(200, text=page)
+    assert jwxt.touch(s) is True and s.calls[0][1]["allow_redirects"] is False
+    assert jwxt.touch(_OneResponse(302, "https://jwxt.nufe.edu.cn/student/login")) is False
+    assert jwxt.touch(_OneResponse(200, text="<html>维护中</html>")) is False
 
 
 # ---------- 人机验证解析 ----------

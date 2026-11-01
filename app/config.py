@@ -85,6 +85,8 @@ REFRESH_BUDGET_RPS = _float("REFRESH_BUDGET_RPS", 0.65, minimum=0.05)
 if REFRESH_BUDGET_RPS > 0.9:
     raise RuntimeError("REFRESH_BUDGET_RPS 不能超过 0.9（全站上限 1 次/秒，要给登录和手动刷新留余量）")
 SCHEDULER_TICK = _int("SCHEDULER_TICK", 30, minimum=5)
+# 扫码登录（会话级 CASTGC）且没存密码的人：每隔多少分钟碰一下认证中心和教务，让两边的登录态都别因为闲置过期
+SSO_KEEPALIVE_MINUTES = _int("SSO_KEEPALIVE_MINUTES", 20, minimum=5)
 # 手动刷新：两次之间至少隔几秒（无论成败）；课表在多少秒内刚抓过就直接用已存的，不再打扰学校
 MANUAL_REFRESH_MIN_GAP = _int("MANUAL_REFRESH_MIN_GAP", 20)
 MANUAL_REFRESH_FRESH_SECONDS = _int("MANUAL_REFRESH_FRESH_SECONDS", 120)

@@ -26,6 +26,7 @@ from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
     REFRESH_MAX_FAILS,
+    SSO_KEEPALIVE_MINUTES,
     TIMEZONE,
     semester_overrides,
 )
@@ -548,6 +549,8 @@ def _renew_with_tgc(s: PoliteSession, uid: int) -> bool:
         raise UpstreamDown() from None
     if renewed:
         log.info("user %s: jwxt session renewed via CASTGC", uid)
+        with db.tx() as c:
+            c.execute("UPDATE users SET sso_touched_at=? WHERE id=?", (db.now(), uid))
     return renewed
 
 
@@ -982,6 +985,9 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
         (data["student"].get("name"), crypto.encrypt_json(cookies, "cookies", uid), now, now,
          data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False),
          int(sso_session_only(cookies)), uid))
+    if trigger == "login":
+        # 刚登录：认证中心和教务的登录态都是新的，保活从现在算起
+        c.execute("UPDATE users SET keepalive_at=?, sso_touched_at=?, sso_lost_at=NULL WHERE id=?", (now, now, uid))
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
@@ -1009,6 +1015,72 @@ def sso_session_only(cookies: list[dict]) -> bool:
     认证中心几个小时后就不认了，教务会话一过期就只能本人重新登录。
     """
     return not any(c.get("name") == "CASTGC" and isinstance(c.get("expires"), int | float) for c in cookies)
+
+
+KEEPALIVE_EVERY = SSO_KEEPALIVE_MINUTES * 60
+
+
+def keepalive_candidates(now: float | None = None) -> list[int]:
+    """该保活的人：扫码登录（会话级 CASTGC）、没存密码、状态正常，且离上次保活已满间隔。最久没保活的在前。"""
+    now = db.now() if now is None else now
+    rows = db.connect().execute(
+        """SELECT id FROM users
+           WHERE status='ok' AND sso_session_only=1 AND cred_mode<>'password' AND COALESCE(keepalive_at, 0) <= ?
+           ORDER BY COALESCE(keepalive_at, 0)""", (now - KEEPALIVE_EVERY,)).fetchall()
+    return [r["id"] for r in rows]
+
+
+def keepalive_user(uid: int) -> dict:
+    """碰一下认证中心和教务，让会话级登录态别因为闲置过期。
+
+    - 认证中心：签一张 ticket 不兑换（cas.touch_sso）。会话级 CASTGC 多半有闲置超时，常碰着能撑到它的绝对上限；
+      发现已经不认了就记下 sso_lost_at，之后不再碰。
+    - 教务：不跟随跳转地打开课表页（jwxt.touch）。教务会话常碰着就不会过期，认证中心不认了也还能接着刷课表；
+      教务会话已过期就排一次刷新，交给正常流程（能续期就续期，续不上提示重新登录）。
+    返回 {"jwxt": bool, "sso": bool | None}（sso 为 None：之前已发现失效，这次没碰）。
+    """
+    lock = _locks[uid]
+    if not lock.acquire(blocking=False):
+        raise Busy()
+    try:
+        row = db.connect().execute(
+            "SELECT enc_cookies, sso_touched_at, sso_lost_at FROM users WHERE id=?", (uid,)).fetchone()
+        if not row or not row["enc_cookies"]:
+            raise KeyError(uid)
+        s = PoliteSession()
+        load_cookies(s, crypto.decrypt_json(row["enc_cookies"], "cookies", uid))
+        now = db.now()
+        try:
+            jw_ok = jwxt.touch(s)
+            sso_ok = None if row["sso_lost_at"] else cas.touch_sso(s)
+        except UpstreamYield:
+            raise
+        except Exception as e:  # 学校一时出错：这一轮算碰过，下个间隔再来，不改状态
+            log.warning("user %s: keepalive failed: %s", uid, type(e).__name__)
+            with db.tx() as c:
+                c.execute("UPDATE users SET keepalive_at=? WHERE id=?", (now, uid))
+            return {"jwxt": None, "sso": None}
+        with db.tx() as c:
+            c.execute("UPDATE users SET keepalive_at=? WHERE id=?", (now, uid))
+            if jw_ok:
+                c.execute("UPDATE users SET enc_cookies=? WHERE id=?",
+                          (crypto.encrypt_json(dump_cookies(s), "cookies", uid), uid))
+            if sso_ok:
+                c.execute("UPDATE users SET sso_touched_at=? WHERE id=?", (now, uid))
+            elif sso_ok is False:
+                c.execute("UPDATE users SET sso_lost_at=? WHERE id=?", (now, uid))
+            if not jw_ok:
+                request_refresh(uid, "教务登录态已过期", now, conn=c)
+        if sso_ok is False:
+            # 记下会话级 CASTGC 实际能撑多久，用来调保活间隔
+            idle = (now - row["sso_touched_at"]) / 3600 if row["sso_touched_at"] else None
+            log.info("user %s: session-only CASTGC no longer accepted (%s since last accepted)", uid,
+                     f"{idle:.1f}h" if idle is not None else "unknown")
+        if not jw_ok:
+            log.info("user %s: keepalive found jwxt session expired, refresh requested", uid)
+        return {"jwxt": jw_ok, "sso": sso_ok}
+    finally:
+        lock.release()
 
 
 def sso_short(cred_mode: str | None, session_only) -> bool:

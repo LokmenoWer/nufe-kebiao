@@ -73,6 +73,13 @@ const STATUS_PILL = {
   needs_rebind: ["需重新登录", "pill-danger"],
 };
 
+function keepaliveText(i) {
+  const sso = i.sso_lost_at
+    ? `认证中心已不认（${fmtRel(i.sso_lost_at)}发现，最后一次认是 ${fmtRel(i.sso_touched_at)}）`
+    : i.sso_touched_at ? `认证中心最后确认 ${fmtRel(i.sso_touched_at)}` : "认证中心未确认";
+  return `保活：${i.keepalive_at ? `上次 ${fmtRel(i.keepalive_at)}` : "还没保活过"} · ${sso}`;
+}
+
 function statusPill(status) {
   const [label, cls] = STATUS_PILL[status] || [status, ""];
   return h("span", { class: `pill ${cls}` }, label);
@@ -224,7 +231,8 @@ function renderSchedule(s) {
     h("td", { class: "num" }, i.score !== null ? h("span", { class: "pill pill-warn" }, `排队中 ${i.score}`)
       : i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停"),
     h("td", { class: "wrap" }, i.pending_reason ? `${i.reason}（${i.pending_reason}）` : i.reason,
-      i.last_error && i.status !== "ok" ? h("div", `上次错误：${i.last_error}`) : null),
+      i.last_error && i.status !== "ok" ? h("div", `上次错误：${i.last_error}`) : null,
+      i.sso_short ? h("div", { class: "muted" }, keepaliveText(i)) : null),
     h("td", { class: "num" }, `${i.target_minutes} 分钟`),
     h("td", { class: "num" }, fmtRel(i.last_success_at)),
     h("td", { class: "num" }, i.next_class_at ? fmtTime(i.next_class_at) : "—"),
@@ -240,7 +248,7 @@ function renderSchedule(s) {
       h("dt", "预算"), h("dd", `${sc.budget_rps} 次/秒（上限 ${sc.max_rps}）· 令牌 ${sc.tokens} · 每 ${sc.tick_seconds} 秒一轮`),
       h("dt", "学校健康"), h("dd", sc.upstream_cooldown > 0 ? `暂停中，还剩 ${sc.upstream_cooldown} 秒`
         : sc.upstream_penalty > 0 ? `额外间隔 ${sc.upstream_penalty} 秒` : "正常"),
-      h("dt", "上一轮"), h("dd", lt ? `${fmtTime(lt.at)}：到期 ${lt.due} 人，刷新 ${lt.refreshed} 人` : "还没跑过"),
+      h("dt", "上一轮"), h("dd", lt ? `${fmtTime(lt.at)}：到期 ${lt.due} 人，刷新 ${lt.refreshed} 人，保活 ${lt.kept_alive ?? 0} 人` : "还没跑过"),
       h("dt", "当前排队"), h("dd", `${s.due} 人`)),
     h("div", { class: "adm-section-title" }, `每个人的下次刷新（共 ${s.items.length} 人）`),
     table(["用户", "状态", "下次刷新", "原因", "目标间隔", "上次成功", "下一节课", "最近使用", ""], rows, "还没有用户"));

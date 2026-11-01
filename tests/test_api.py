@@ -38,6 +38,8 @@ class FakeUpstream:
         self.qr = "waiting"       # waiting | scanned | expired | <学号>（= 该学号已在手机上确认）
         self.qr_mfa = False
         self.tgc_alive = set()    # 教务会话过期但 CASTGC 仍有效：可以静默续期
+        self.sso_dead = set()     # 认证中心已不认这些人的 CASTGC（保活时发现）
+        self.touches = []         # 保活请求：("sso" | "jwxt", 学号)
         self.renewals = 0
         self.fetches = 0
         self.course_override = None
@@ -56,6 +58,16 @@ class FakeUpstream:
         session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver",
                             expires=TGC_REMEMBER_UNTIL)
         self.expired.discard(username)
+
+    def touch_sso(self, session):
+        sid = (session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver") or "").removeprefix("tgc-")
+        self.touches.append(("sso", sid))
+        return bool(sid) and sid not in self.sso_dead
+
+    def touch_jwxt(self, session):
+        sid = (session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver") or "").removeprefix("tgc-")
+        self.touches.append(("jwxt", sid))
+        return bool(sid) and sid not in self.expired
 
     def renew(self, session):
         tgc = session.cookies.get("CASTGC", domain="authserver.nufe.edu.cn", path="/authserver")
@@ -203,6 +215,8 @@ def up(monkeypatch):
     monkeypatch.setattr(cas, "LoginFlow", FakeFlow)
     monkeypatch.setattr(jwxt, "fetch_timetable", fake.fetch)
     monkeypatch.setattr(cas, "renew_with_tgc", fake.renew)
+    monkeypatch.setattr(cas, "touch_sso", fake.touch_sso)
+    monkeypatch.setattr(jwxt, "touch", fake.touch_jwxt)
     # 手动刷新的冷却 / 新鲜度闸门单独测；其余用例里连续刷新不应被它挡住
     monkeypatch.setattr(service, "MANUAL_REFRESH_MIN_GAP", 0)
     monkeypatch.setattr(service, "MANUAL_REFRESH_FRESH_SECONDS", 0)
@@ -1740,3 +1754,98 @@ def test_admin_password_hash_roundtrip():
     assert not admin.verify_password("wrong", stored)
     assert not admin.verify_password("x", "garbage")
     assert admin.mask_id("2023012345") == "2023****45"
+
+
+def _qr_login(sid):
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    FakeFlow.up.qr = sid
+    assert _qr_poll(c, fid).json()["ok"]
+    return c, db.connect().execute("SELECT id FROM users WHERE student_id=?", (sid,)).fetchone()["id"]
+
+
+def _keepalive_row(uid):
+    return db.connect().execute(
+        "SELECT keepalive_at, sso_touched_at, sso_lost_at, refresh_requested_at FROM users WHERE id=?", (uid,)).fetchone()
+
+
+def _age_keepalive(seconds=None):
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET keepalive_at=keepalive_at-?", (seconds or service.KEEPALIVE_EVERY + 1,))
+
+
+def test_keepalive_only_for_session_only_tgc_without_password(up, monkeypatch):
+    _login(TestClient(app), "2023001")                 # 账号密码登录：长效 CASTGC，不用保活
+    _, uid = _qr_login("2023002")                       # 扫码、没存密码：要保活
+    assert service.keepalive_candidates() == []         # 刚登录，不到间隔
+    _age_keepalive()
+    assert service.keepalive_candidates() == [uid]
+    monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
+    assert scheduler.keepalive_once(_budget()) == 1
+    assert up.touches == [("jwxt", "2023002"), ("sso", "2023002")]
+    row = _keepalive_row(uid)
+    assert row["keepalive_at"] > db.now() - 5 and row["sso_touched_at"] > db.now() - 5 and row["sso_lost_at"] is None
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_skips_qr_user_with_saved_password(up):
+    _login(TestClient(app), "2023001", remember=True)
+    _qr_login("2023001")
+    _age_keepalive()
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_records_lost_sso_and_keeps_jwxt_alive(up):
+    _, uid = _qr_login("2023002")
+    up.sso_dead.add("2023002")
+    _age_keepalive()
+    assert service.keepalive_user(uid) == {"jwxt": True, "sso": False}
+    assert _keepalive_row(uid)["sso_lost_at"] is not None
+    # 认证中心不认了：之后只保教务会话
+    up.touches.clear()
+    _age_keepalive()
+    assert service.keepalive_user(uid) == {"jwxt": True, "sso": None}
+    assert up.touches == [("jwxt", "2023002")]
+    # 重新登录后重新开始保活认证中心
+    up.sso_dead.clear()
+    _qr_login("2023002")
+    assert _keepalive_row(uid)["sso_lost_at"] is None
+
+
+def test_keepalive_requests_refresh_when_jwxt_expired(up):
+    _, uid = _qr_login("2023002")
+    up.expired.add("2023002")
+    _age_keepalive()
+    assert service.keepalive_user(uid)["jwxt"] is False
+    assert _keepalive_row(uid)["refresh_requested_at"] is not None
+    assert uid in _queued()
+
+
+def test_keepalive_upstream_error_waits_for_next_interval(up, monkeypatch):
+    _, uid = _qr_login("2023002")
+    _age_keepalive()
+    monkeypatch.setattr(jwxt, "touch", lambda s: (_ for _ in ()).throw(ConnectionError("boom")))
+    assert service.keepalive_user(uid) == {"jwxt": None, "sso": None}
+    row = _keepalive_row(uid)
+    assert row["sso_lost_at"] is None and row["refresh_requested_at"] is None
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_uses_leftover_budget(up, monkeypatch):
+    _qr_login("2023002")
+    _age_keepalive()
+    monkeypatch.setattr(scheduler._stop, "wait", lambda t: False)
+    assert scheduler.keepalive_once(_budget(tokens=0.5)) == 0
+    assert up.touches == []
+    b = _budget(tokens=1)
+    assert scheduler.keepalive_once(b) == 1 and b.tokens == 1 - scheduler.KEEPALIVE_COST
+
+
+def test_renewal_marks_sso_touched(up):
+    _, uid = _qr_login("2023002")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET sso_touched_at=1 WHERE id=?", (uid,))
+    up.expired.add("2023002")
+    up.tgc_alive.add("2023002")
+    assert service.refresh_user(uid, "scheduled")["ok"]
+    assert _keepalive_row(uid)["sso_touched_at"] > db.now() - 5

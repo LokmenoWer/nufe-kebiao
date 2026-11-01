@@ -728,6 +728,21 @@ def renew_with_tgc(session: requests.Session) -> bool:
     return True
 
 
+def touch_sso(session: requests.Session) -> bool:
+    """会话级 CASTGC 保活：请认证中心为教务签一张 ticket 但不去兑换，刷新它的闲置计时。
+
+    只发一个请求、不跟随跳转，教务那边的会话不受影响。
+    返回 True：认证中心仍认这个 CASTGC；False：已失效（或要求二次认证，同样续不上）。
+    """
+    if not any(c.name == "CASTGC" for c in session.cookies):
+        return False
+    r = session.get(f"{AUTH_BASE}/login", params={"service": JW_SSO_URL}, allow_redirects=False)
+    if r.status_code >= 500:
+        raise CasError("统一身份认证服务暂时不可用")
+    location = r.headers.get("Location", "")
+    return r.is_redirect and location.startswith(JW_SSO_URL) and "ticket=" in location
+
+
 def login(session: requests.Session, username: str, password: str, device_id: str | None = None) -> None:
     """非交互登录（后台刷新用）：需要真人参与的步骤直接抛异常。"""
     flow = LoginFlow(session, username, password, device_id=device_id or new_device_id())
