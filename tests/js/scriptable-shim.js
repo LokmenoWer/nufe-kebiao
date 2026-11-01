@@ -155,8 +155,9 @@ export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
   inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [], version = "sha-000000000001",
   screen = { width: 393, height: 852 },
-  // 手机代抓：jwxt(url) → { status, body, url, cookies, redirect }；upload(body) → 服务器回的 JSON
-  jwxt, upload,
+  // 手机代抓：jwxt(url) → { status, body, url, cookies, redirect, hang }；upload(body) → 服务器回的 JSON
+  // budgetMs：Timer 到点前的真实等待（默认按脚本给的毫秒数）
+  jwxt, upload, budgetMs,
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -188,10 +189,14 @@ export async function runWidgetScript({
         school.push({ url: this.url, headers: this.headers });
         const got = jwxt ? jwxt(this.url) : { status: 200, body: "" };
         if (got.throws) throw new Error(got.throws);
-        if (got.redirect && this.onRedirect) {
-          const next = this.onRedirect({ url: got.redirect, headers: {} });
+        if (got.hang) return new Promise(() => {});
+        if (got.redirect) {
+          // 和真机一样：onRedirect 返回 null 就停在这次 3xx 上，Location 在响应头里
+          const next = this.onRedirect ? this.onRedirect({ url: got.redirect, headers: {} }) : null;
           if (!next) {
-            this.response = { statusCode: 302, url: this.url, cookies: [] };
+            this.response = {
+              statusCode: got.status || 302, url: this.url, headers: { Location: got.redirect }, cookies: got.cookies || [],
+            };
             return "";
           }
         }
@@ -311,6 +316,12 @@ export async function runWidgetScript({
 
   const context = {
     ListWidget, Color, Font, Size, Request, Notification,
+    Timer: {
+      schedule: (ms, _repeats, cb) => {
+        const h = setTimeout(cb, budgetMs ?? ms);
+        return { invalidate: () => clearTimeout(h) };
+      },
+    },
     FileManager: { local: () => fm, iCloud: () => { throw new Error("iCloud disabled"); } },
     Alert,
     Device: { screenSize: () => ({ ...screen }) },

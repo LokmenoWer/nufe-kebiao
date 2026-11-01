@@ -912,6 +912,73 @@ test("代抓：没有任务时不碰学校；工具函数", async () => {
   assert.ok(!W.isLoginUrl("https://jwxt.nufe.edu.cn/student/for-std/course-table", ["authserver.nufe.edu.cn"]));
 });
 
+test("代抓：跳转自己跟，每一跳都带上最新的 cookie；跳出教务就停", async () => {
+  const run = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch: TASK, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+    jwxt: (u) => {
+      if (u.endsWith("/course-table")) {
+        return { status: 302, redirect: "/student/for-std/course-table/semester/161", cookies: [{ name: "SESSION", value: "jw-2", domain: "jwxt.nufe.edu.cn" }] };
+      }
+      return u.includes("print-data") ? { body: "{}" } : { body: "<html>page</html>" };
+    },
+    upload: () => ({ ok: true }),
+  });
+  assert.deepEqual(run.school.map((r) => r.url), [
+    "https://jwxt.nufe.edu.cn/student/for-std/course-table",
+    "https://jwxt.nufe.edu.cn/student/for-std/course-table/semester/161",
+    TASK.steps[1].url,
+  ]);
+  assert.deepEqual(run.school.map((r) => r.headers.Cookie), ["SESSION=jw-1", "SESSION=jw-2", "SESSION=jw-2"]);
+  const { body } = run.uploads[0];
+  assert.equal(body.course_html, "<html>page</html>");
+  assert.deepEqual(body.final_urls, ["https://jwxt.nufe.edu.cn/student/for-std/course-table/semester/161", TASK.steps[1].url]);
+
+  for (const [redirect, error] of [["https://evil.example/steal", "blocked"], ["http://jwxt.nufe.edu.cn/x", "blocked"]]) {
+    const out = await runWidgetScript({
+      payload: { ...PAYLOAD, fetch: TASK, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+      jwxt: () => ({ redirect }), upload: () => ({ ok: false }),
+    });
+    assert.equal(out.school.length, 1, redirect);
+    assert.deepEqual(out.uploads[0].body, { id: "task-1", error });
+  }
+  const loop = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch: TASK, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+    jwxt: (u) => ({ redirect: u.endsWith("/a") ? "/b" : "/a" }), upload: () => ({ ok: false }),
+  });
+  assert.deepEqual(loop.uploads[0].body, { id: "task-1", error: "redirect" });
+  // 服务器下发的任务地址也要过白名单
+  const bad = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch: { ...TASK, steps: [{ kind: "course", url: "https://evil.example/", cookie: "SESSION=jw-1" }] }, refresh: { pending: true } },
+    url: URL_FEED, nowMs: NOW, upload: () => ({ ok: false }),
+  });
+  assert.equal(bad.school.length, 0);
+  assert.deepEqual(bad.uploads[0].body, { id: "task-1", error: "blocked" });
+});
+
+test("代抓：学校迟迟不回完，按剩余预算截断，交回 timeout 并照常画图", async () => {
+  const run = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch: TASK, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+    jwxt: () => ({ hang: true }), upload: () => ({ ok: false }), budgetMs: 5,
+  });
+  assert.deepEqual(run.uploads[0].body, { id: "task-1", error: "timeout" });
+  assert.ok(run.widget.texts().includes("概率论"));
+});
+
+test("代抓工具：白名单与相对跳转", () => {
+  assert.ok(W.jwxtUrl("https://jwxt.nufe.edu.cn/student/for-std/course-table"));
+  assert.ok(W.jwxtUrl("https://jwxt.nufe.edu.cn"));
+  for (const u of ["http://jwxt.nufe.edu.cn/", "https://jwxt.nufe.edu.cn.evil.example/", "https://jwxt.nufe.edu.cn:8443/",
+    "https://user@jwxt.nufe.edu.cn/", "https://authserver.nufe.edu.cn/", "https://jwxt.nufe.edu.cn\\@evil.example/"]) {
+    assert.ok(!W.jwxtUrl(u), u);
+  }
+  const base = "https://jwxt.nufe.edu.cn/student/for-std/course-table?x=1";
+  assert.equal(W.resolveLocation(base, "/student/login"), "https://jwxt.nufe.edu.cn/student/login");
+  assert.equal(W.resolveLocation(base, "semester/161"), "https://jwxt.nufe.edu.cn/student/for-std/semester/161");
+  assert.equal(W.resolveLocation(base, "?y=2"), "https://jwxt.nufe.edu.cn/student/for-std/course-table?y=2");
+  assert.equal(W.resolveLocation(base, "//evil.example/a"), "https://evil.example/a");
+  assert.equal(W.resolveLocation(base, "https://authserver.nufe.edu.cn/authserver/login"), "https://authserver.nufe.edu.cn/authserver/login");
+});
+
 test("代抓：超过时长上限就不再请求下一步", async () => {
   let t = 0;
   const ctxNet = { console, Request: class { async loadString() { t += 30000; this.response = { statusCode: 200, url: this.url }; return ""; } constructor(u) { this.url = u; } } };

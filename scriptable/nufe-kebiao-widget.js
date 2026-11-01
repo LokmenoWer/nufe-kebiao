@@ -41,6 +41,7 @@ const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两�
 const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
 const DELEGATE_CHECK_MINUTES = 37;     // 手机代抓：在出门前的检查窗口（课前 40–30 分钟）里自己向学校确认一次
 const DELEGATE_BUDGET_MS = 20000;      // 代抓总时长上限：小组件进程活不了太久，超时就交回服务器
+const DELEGATE_MAX_HOPS = 5;           // 代抓时一步最多跟几次跳转
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const FULL_GAP = 6;                    // 周视图 / 铺满：午休、傍晚这些没课的时段压成这么高的间隔
 const LABEL_H = 13;                    // 周视图 / 铺满：时间轴一个标签占的高度
@@ -1481,41 +1482,112 @@ function isLoginUrl(url, hosts) {
   return (hosts || []).includes(host) || (host === "jwxt.nufe.edu.cn" && path === "/student/login");
 }
 
+/** 只往教务发：任务地址和每一跳都得是 https://jwxt.nufe.edu.cn，cookie 不会被带到别处。 */
+function jwxtUrl(url) {
+  return /^https:\/\/jwxt\.nufe\.edu\.cn(?:[/?][^\s\\#]*)?$/i.test(String(url || ""));
+}
+
+/** 把 Location 解析成绝对地址（学校常回相对路径）。 */
+function resolveLocation(base, loc) {
+  const s = String(loc || "").trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;
+  if (s.startsWith("//")) return `https:${s}`;
+  const origin = (/^https?:\/\/[^/?#]+/i.exec(String(base)) || [""])[0];
+  const path = String(base).slice(origin.length).split(/[?#]/)[0] || "/";
+  if (s.startsWith("/")) return origin + s;
+  if (s.startsWith("?")) return origin + path + s;
+  return origin + path.replace(/[^/]*$/, "") + s;
+}
+
+function cookieMap(header) {
+  const jar = new Map();
+  for (const part of String(header || "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0) jar.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
+  return jar;
+}
+
+function headerValue(headers, name) {
+  const key = Object.keys(headers || {}).find((k) => k.toLowerCase() === name);
+  return key ? headers[key] : null;
+}
+
+/**
+ * Request 的 timeoutInterval 只管网络空闲，学校慢慢吐数据时能一直拖下去，
+ * 拖过小组件进程的时限就整个被系统杀掉；这里按剩余预算硬性截断。
+ */
+function bounded(promise, ms) {
+  if (typeof Timer === "undefined" || !Timer || !Timer.schedule) return promise;
+  let timer = null;
+  const alarm = new Promise((_, reject) => {
+    timer = Timer.schedule(Math.max(0, ms), false, () => {
+      const e = new Error("budget");
+      e.budget = true;
+      reject(e);
+    });
+  });
+  promise.catch(() => {}); // 被截断后迟到的失败不再有人等
+  return Promise.race([promise, alarm]).finally(() => {
+    if (timer && typeof timer.invalidate === "function") timer.invalidate();
+  });
+}
+
 async function delegatedFetch(task, clock = () => Date.now()) {
   const started = clock();
   const out = { id: task.id, final_urls: [], set_cookies: [] };
+  const fresh = new Map(); // 这次学校新发的 cookie，后面的请求接着带
+  const fail = (error) => ({ id: task.id, error });
   try {
     for (const step of task.steps || []) {
-      if (clock() - started > DELEGATE_BUDGET_MS) return { id: task.id, error: "timeout" };
-      const req = new Request(step.url);
-      req.timeoutInterval = 8;
-      req.headers = { ...(task.headers || {}), Cookie: step.cookie };
-      let loggedOut = false;
-      req.onRedirect = (next) => {
-        if (isLoginUrl(next.url, task.login_hosts)) {
-          loggedOut = true;
+      let url = step.url;
+      let res = {};
+      let text = "";
+      // 跳转自己跟：每一跳先查目的地、再带上最新的 cookie，不依赖 Scriptable 改写跳转请求
+      for (let hop = 0; ; hop++) {
+        if (isLoginUrl(url, task.login_hosts)) return fail("expired");
+        if (!jwxtUrl(url)) return fail("blocked");
+        if (hop > DELEGATE_MAX_HOPS) return fail("redirect");
+        const left = DELEGATE_BUDGET_MS - (clock() - started);
+        if (left <= 0) return fail("timeout");
+        const jar = cookieMap(step.cookie);
+        for (const [k, v] of fresh) jar.set(k, v);
+        const req = new Request(url);
+        req.timeoutInterval = 8;
+        req.headers = { ...(task.headers || {}), Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") };
+        let target = null;
+        req.onRedirect = (next) => {
+          target = next && next.url;
           return null;
+        };
+        text = await bounded(req.loadString(), left);
+        res = req.response || {};
+        for (const c of res.cookies || []) {
+          if (!c || !c.name) continue;
+          const domain = String(c.domain || "").replace(/^\./, "").toLowerCase();
+          if (domain && domain !== "jwxt.nufe.edu.cn") continue;
+          const value = String(c.value == null ? "" : c.value);
+          fresh.set(String(c.name), value);
+          out.set_cookies.push({ name: String(c.name), value });
         }
-        next.headers = { ...(next.headers || {}), Cookie: step.cookie };
-        return next;
-      };
-      const text = await req.loadString();
-      const res = req.response || {};
-      if (loggedOut || isLoginUrl(res.url, task.login_hosts)) return { id: task.id, error: "expired" };
+        const code = res.statusCode || 200;
+        if (code < 300 || code >= 400) break;
+        const loc = target || headerValue(res.headers, "location");
+        if (!loc) return fail(`http_${code}`);
+        url = resolveLocation(url, loc);
+      }
+      if (isLoginUrl(res.url, task.login_hosts)) return fail("expired");
       if (res.statusCode >= 400) {
         if (step.kind === "detail") continue; // 学期详情只是校历兜底，拿不到不要紧
-        return { id: task.id, error: `http_${res.statusCode}` };
+        return fail(`http_${res.statusCode}`);
       }
-      out.final_urls.push(res.url || step.url);
-      for (const c of res.cookies || []) {
-        if (c && c.name) out.set_cookies.push({ name: String(c.name), value: String(c.value == null ? "" : c.value) });
-      }
+      out.final_urls.push(res.url || url);
       if (step.kind === "course") out.course_html = text;
       else if (step.kind === "print") out.print_data = text;
       else if (step.kind === "detail") out.detail = text;
     }
-  } catch (_) {
-    return { id: task.id, error: "network" };
+  } catch (e) {
+    return fail(e && e.budget ? "timeout" : "network");
   }
   return out;
 }
@@ -1745,7 +1817,7 @@ if (typeof ListWidget === "undefined") {
     SCRIPT_VERSION, parseMode, parseParam, remindLead, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
-    uploadUrl, isLoginUrl, delegatedFetch,
+    uploadUrl, isLoginUrl, jwxtUrl, resolveLocation, delegatedFetch,
   };
 } else {
   main().catch((e) => {
