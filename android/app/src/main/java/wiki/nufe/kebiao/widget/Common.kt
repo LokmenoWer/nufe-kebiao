@@ -6,6 +6,9 @@ import android.net.Uri
 import android.os.SystemClock
 import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -44,6 +47,8 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Day
 import wiki.nufe.kebiao.data.Now
@@ -62,6 +67,22 @@ data class WidgetData(val snapshot: Snapshot?, val site: String?, val hasLink: B
 fun loadData(context: Context): WidgetData {
     val repo = Repository(context)
     return WidgetData(repo.cached(), repo.siteUrl(), repo.widgetUrl != null, LinkState.isInvalid(context))
+}
+
+/**
+ * Glance 会把小组件的会话留着一阵子，期间 updateAll 只让已有会话重组、不会重跑 provideGlance。
+ * 所以数据不能在 provideGlance 里读一次就攥着（换了链接也还画旧课表）：[Sync.redraw] 先把版本号加一，
+ * 会话里按版本号重读缓存。
+ */
+object WidgetVersion {
+    val flow = MutableStateFlow(0)
+    fun bump() = flow.update { it + 1 }
+}
+
+@Composable
+fun rememberWidgetData(context: Context): WidgetData {
+    val version by WidgetVersion.flow.collectAsState()
+    return remember(version) { loadData(context) }
 }
 
 val PADDING = 12.dp

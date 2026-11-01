@@ -25,6 +25,7 @@ import wiki.nufe.kebiao.widget.FullWeekWidget
 import wiki.nufe.kebiao.widget.TodayWidget
 import wiki.nufe.kebiao.widget.TomorrowWidget
 import wiki.nufe.kebiao.widget.WeekWidget
+import wiki.nufe.kebiao.widget.WidgetVersion
 
 /**
  * 什么时候拉数据、什么时候重画：
@@ -87,6 +88,7 @@ object Sync {
 
     /** 只按缓存重画所有小组件（不联网）。 */
     suspend fun redraw(context: Context) {
+        WidgetVersion.bump()
         TodayWidget().updateAll(context)
         TomorrowWidget().updateAll(context)
         WeekWidget().updateAll(context)
