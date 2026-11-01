@@ -185,7 +185,7 @@ export function openSettings({
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
       icsInfo),
 
-    section("桌面小组件（iOS）", widgetSection.el),
+    section("桌面小组件（iOS / 安卓）", widgetSection.el),
 
     section("外观", themeButtons),
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只在 debug 包里：把三种小组件按几种尺寸画在一页上，改版面时不用反复往桌面上拖 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".preview.WidgetPreviewActivity"
+            android:exported="true"
+            android:label="小组件预览" />
+    </application>
+</manifest>
