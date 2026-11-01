@@ -845,3 +845,84 @@ test("在 Scriptable 里可以选择刷新课表", async () => {
   });
   assert.equal(relogin.alerts[1].title, "需要重新登录");
 });
+
+// ---- 手机代抓 ----
+
+const TASK = {
+  id: "task-1",
+  headers: { Accept: "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest" },
+  login_hosts: ["authserver.nufe.edu.cn"],
+  steps: [
+    { kind: "course", url: "https://jwxt.nufe.edu.cn/student/for-std/course-table", cookie: "SESSION=jw-1" },
+    { kind: "print", url: "https://jwxt.nufe.edu.cn/student/for-std/course-table/semester/161/print-data?semesterId=161&hasExperiment=true", cookie: "SESSION=jw-1" },
+  ],
+};
+const URL_FEED = "https://kebiao.example/widget/tok.json";
+
+test("代抓：用手机的网络取课表页和 print-data，交回服务器，画服务器回的新数据", async () => {
+  const fresh = { ...PAYLOAD, today: day("2026-10-26", 1, [L("调过的课", "14:15", "16:35", "C303")]) };
+  const run = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch: TASK, delegate: true, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+    jwxt: (u) => (u.includes("print-data")
+      ? { body: '{"studentTableVms":[]}', cookies: [{ name: "SESSION", value: "jw-2" }] }
+      : { body: "<html>personId = 1</html>" }),
+    upload: () => ({ ok: true, widget: fresh }),
+  });
+  assert.equal(run.school.length, 2);
+  assert.ok(run.school.every((r) => r.headers.Cookie === "SESSION=jw-1" && r.headers["X-Requested-With"]));
+  assert.equal(run.uploads.length, 1);
+  const { body } = run.uploads[0];
+  assert.equal(run.uploads[0].method, "POST");
+  assert.equal(body.id, "task-1");
+  assert.equal(body.course_html, "<html>personId = 1</html>");
+  assert.equal(body.print_data, '{"studentTableVms":[]}');
+  assert.deepEqual(body.set_cookies, [{ name: "SESSION", value: "jw-2" }]);
+  assert.ok(run.requests.includes("https://kebiao.example/widget/tok/upload"));
+  assert.ok(run.widget.texts().includes("调过的课"));
+  // 任务里有 cookie：绝不写进缓存
+  for (const text of run.files.values()) assert.ok(!String(text).includes("jw-1"));
+});
+
+test("代抓：被踢回登录页、学校报错、断网都如实上报，照常画原来的数据", async () => {
+  const cases = [
+    [{ redirect: "https://authserver.nufe.edu.cn/authserver/login?service=x" }, "expired"],
+    [{ url: "https://jwxt.nufe.edu.cn/student/login" }, "expired"],
+    [{ status: 503 }, "http_503"],
+    [{ throws: "timed out" }, "network"],
+  ];
+  for (const [reply, error] of cases) {
+    const run = await runWidgetScript({
+      payload: { ...PAYLOAD, fetch: TASK, refresh: { pending: true } }, url: URL_FEED, nowMs: NOW,
+      jwxt: () => reply, upload: () => ({ ok: false, status: "fallback" }),
+    });
+    assert.equal(run.school.length, 1, error);
+    assert.deepEqual(run.uploads[0].body, { id: "task-1", error });
+    assert.ok(run.widget.texts().includes("概率论"), error);
+  }
+});
+
+test("代抓：没有任务时不碰学校；工具函数", async () => {
+  const run = await runWidgetScript({ payload: PAYLOAD, url: URL_FEED, nowMs: NOW });
+  assert.equal(run.school.length, 0);
+  assert.equal(run.uploads.length, 0);
+  assert.equal(W.uploadUrl("https://k.example/widget/abc.json"), "https://k.example/widget/abc/upload");
+  assert.equal(W.uploadUrl("https://k.example/widget/abc.json?refresh=1"), "https://k.example/widget/abc/upload");
+  assert.ok(W.isLoginUrl("https://authserver.nufe.edu.cn/authserver/login", ["authserver.nufe.edu.cn"]));
+  assert.ok(W.isLoginUrl("https://jwxt.nufe.edu.cn/student/login/", []));
+  assert.ok(!W.isLoginUrl("https://jwxt.nufe.edu.cn/student/for-std/course-table", ["authserver.nufe.edu.cn"]));
+});
+
+test("代抓：超过时长上限就不再请求下一步", async () => {
+  let t = 0;
+  const ctxNet = { console, Request: class { async loadString() { t += 30000; this.response = { statusCode: 200, url: this.url }; return ""; } constructor(u) { this.url = u; } } };
+  ctxNet.globalThis = ctxNet;
+  vm.runInNewContext(SOURCE.replace("__SCRIPT_VERSION__", "sha-000000000001"), ctxNet);
+  const out = await ctxNet.__nufeWidget.delegatedFetch(TASK, () => t);
+  assert.deepEqual(JSON.parse(JSON.stringify(out)), { id: "task-1", error: "timeout" });
+});
+
+test("开了代抓：课前 37 分钟也重画一次，落在出门前的检查窗口里", () => {
+  const at1330 = W.shanghaiNow(Date.UTC(2026, 9, 26, 5, 30)); // 13:30，14:15 上课
+  assert.equal(W.nextRefreshMs({ ...PAYLOAD, delegate: true }, at1330), at1330.ms + 8 * 60000); // 13:38
+  assert.equal(W.nextRefreshMs(PAYLOAD, at1330), at1330.ms + 20 * 60000); // 13:50
+});

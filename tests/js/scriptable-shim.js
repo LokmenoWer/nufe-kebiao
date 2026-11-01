@@ -155,6 +155,8 @@ export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
   inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [], version = "sha-000000000001",
   screen = { width: 393, height: 852 },
+  // 手机代抓：jwxt(url) → { status, body, url, cookies, redirect }；upload(body) → 服务器回的 JSON
+  jwxt, upload,
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -165,14 +167,37 @@ export async function runWidgetScript({
   const finished = new Promise((resolve) => { done = resolve; });
 
   const requests = [];
+  const uploads = [];
+  const school = [];
   class Request {
     constructor(u) {
       this.url = u;
+      this.method = "GET";
       requests.push(u);
     }
 
     async loadString() {
       if (fail) throw new Error("offline");
+      if (String(this.url).endsWith("/upload")) {
+        const body = JSON.parse(this.body);
+        uploads.push({ body, headers: this.headers, method: this.method });
+        this.response = { statusCode: 200 };
+        return JSON.stringify(upload ? upload(body) : { ok: true });
+      }
+      if (String(this.url).includes("nufe.edu.cn")) {
+        school.push({ url: this.url, headers: this.headers });
+        const got = jwxt ? jwxt(this.url) : { status: 200, body: "" };
+        if (got.throws) throw new Error(got.throws);
+        if (got.redirect && this.onRedirect) {
+          const next = this.onRedirect({ url: got.redirect, headers: {} });
+          if (!next) {
+            this.response = { statusCode: 302, url: this.url, cookies: [] };
+            return "";
+          }
+        }
+        this.response = { statusCode: got.status || 200, url: got.url || this.url, cookies: got.cookies || [] };
+        return got.body || "";
+      }
       if (String(this.url).endsWith(".js")) {
         this.response = { statusCode: scriptStatus };
         return scriptBody;
@@ -305,5 +330,5 @@ export async function runWidgetScript({
   context.globalThis = context;
   vm.runInNewContext(source, context);
   await finished;
-  return { widget: result, files, alerts, presented, requests, notifications: bucket };
+  return { widget: result, files, alerts, presented, requests, uploads, school, notifications: bucket };
 }

@@ -716,6 +716,42 @@ def test_refresh_policy_overdue_and_requests():
     assert P.overdue(P.Signals(), now) >= P.REQUESTED_BOOST  # 从没成功过
 
 
+def test_refresh_policy_widget_grace():
+    from app import refresh_policy as P
+    now = 1_000_000_000.0
+    H, M = 3600, 60
+    # 基础间隔：到期之前不用等；到期后最多等手机 45 分钟
+    sig = P.Signals(last_seen_at=now, last_success_at=now - 5 * H, next_class_at=now + 5 * 86400)
+    due = sig.last_success_at + 4 * H
+    assert P.widget_grace_until(P.Signals(**{**sig.__dict__, "last_success_at": now - H}), now) is None
+    assert P.widget_grace_until(sig, now) == due + P.WIDGET_GRACE_BASE
+    # 主动请求：请求后 10 分钟
+    req = P.Signals(**{**sig.__dict__, "refresh_requested_at": now - M})
+    assert P.widget_grace_until(req, now) == now - M + P.WIDGET_GRACE_REQUESTED
+    # 检查点：等到检查点前 2 分钟
+    cls = now + 35 * M
+    cp = P.Signals(last_seen_at=now, last_success_at=now - H, next_class_at=cls)
+    assert P.widget_grace_until(cp, now) == cls - P.CHECK_LEAD - P.WIDGET_GRACE_CHECKPOINT_MARGIN
+    # 从没成功过：不等
+    assert P.widget_grace_until(P.Signals(), now) is None
+
+
+def test_build_timetable_from_uploaded_parts():
+    html = ('<script>var personId = 77; var currentSemester = {"id": 161, "calendarAssoc": {"id": 1}};</script>'
+            '<select id="allSemesters"><option value="161">2026-2027-1</option></select>')
+    page = jwxt.parse_course_page(html)
+    raw = '{"studentTableVms": [{"name": "甲", "code": "1", "activities": [{"courseName": "高数", "weekday": 1, "startUnit": 1}]}]}'
+    data = jwxt.build_timetable(page, jwxt.requested_semester(page, None), jwxt.parse_print_data(raw), None)
+    assert data["semester_id"] == 161 and data["semester_name"] == "2026-2027-1" and data["person_id"] == 77
+    assert data["activities"][0]["courseName"] == "高数"
+    for bad in ("[]", "x" * (jwxt.PRINT_DATA_MAX_BYTES + 1)):
+        try:
+            jwxt.parse_print_data(bad)
+        except ValueError:
+            continue
+        raise AssertionError("bad print-data must be rejected")
+
+
 def test_scheduler_budget_aimd():
     from app import scheduler
     b = scheduler.Budget(max_rps=0.6, tick=30)

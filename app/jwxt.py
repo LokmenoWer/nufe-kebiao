@@ -93,23 +93,34 @@ def _read_capped(r: requests.Response, limit: int) -> bytes:
     return bytes(buf)
 
 
-def get_print_data(session: requests.Session, semester_id: int) -> dict:
-    r = _check(session.get(
-        f"{JW_BASE}/student/for-std/course-table/semester/{semester_id}/print-data",
-        params={"semesterId": semester_id, "hasExperiment": "true"},
-        headers={"Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest"},
-        stream=True,
-    ))
-    data = json.loads(_read_capped(r, PRINT_DATA_MAX_BYTES))
+def parse_print_data(raw: bytes | str) -> dict:
+    if len(raw) > PRINT_DATA_MAX_BYTES:
+        raise ValueError("课表数据过大")
+    data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("课表数据格式异常")
     return data
 
 
+def print_data_url(semester_id: int) -> str:
+    return f"{JW_BASE}/student/for-std/course-table/semester/{semester_id}/print-data?semesterId={semester_id}&hasExperiment=true"
+
+
+def semester_detail_url(semester_id: int) -> str:
+    return f"{JW_BASE}/student/ws/semester/get/{semester_id}"
+
+
+PRINT_DATA_HEADERS = {"Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest"}
+
+
+def get_print_data(session: requests.Session, semester_id: int) -> dict:
+    r = _check(session.get(print_data_url(semester_id), headers=PRINT_DATA_HEADERS, stream=True))
+    return parse_print_data(_read_capped(r, PRINT_DATA_MAX_BYTES))
+
+
 def get_semester_detail(session: requests.Session, semester_id: int) -> dict | None:
     try:
-        r = _check(session.get(f"{JW_BASE}/student/ws/semester/get/{semester_id}",
-                               headers={"Accept": "application/json"}))
+        r = _check(session.get(semester_detail_url(semester_id), headers={"Accept": "application/json"}))
         return r.json()
     except (ValueError, requests.HTTPError):
         return None
@@ -184,6 +195,32 @@ def _week1_known(semester_id: int, name: str) -> bool:
     return bool(row and row["week1_monday"])
 
 
+def requested_semester(page: CoursePage, semester_id) -> int:
+    requested = _as_int(semester_id)
+    if requested is not None and requested < 1:
+        raise ValueError("学期 id 不正确")
+    return requested or page.current_semester_id
+
+
+def build_timetable(page: CoursePage, semester_id: int, print_data: dict, detail: dict | None) -> dict:
+    """课表页 + print-data（+ 学期详情）→ 存库用的结构。服务器自己抓的和小组件代抓上传的都走这里。"""
+    name = next((s["name"] for s in page.semesters if s["id"] == semester_id), str(semester_id))
+    return {
+        "person_id": page.person_id,
+        "semester_id": semester_id,
+        "semester_name": name,
+        "current_semester_id": page.current_semester_id,
+        "semesters": page.semesters,
+        "semester_detail": detail if isinstance(detail, dict) else None,
+        **normalize(print_data),
+    }
+
+
+def week1_known(semester_id: int, semesters: list[dict]) -> bool:
+    name = next((s["name"] for s in semesters if s["id"] == semester_id), str(semester_id))
+    return _week1_known(semester_id, name)
+
+
 def fetch_timetable(session: requests.Session, semester_id: int | None = None,
                     page_html: str | None = None) -> dict:
     if page_html is None:
@@ -192,19 +229,7 @@ def fetch_timetable(session: requests.Session, semester_id: int | None = None,
             with contextlib.suppress(AttributeError):
                 del session.kebiao_course_html
     page = parse_course_page(page_html) if page_html else get_course_page(session)
-    requested = _as_int(semester_id)
-    if requested is not None and requested < 1:
-        raise ValueError("学期 id 不正确")
-    sid = requested or page.current_semester_id
-    data = normalize(get_print_data(session, sid))
-    name = next((s["name"] for s in page.semesters if s["id"] == sid), str(sid))
-    detail = None if _week1_known(sid, name) else get_semester_detail(session, sid)
-    return {
-        "person_id": page.person_id,
-        "semester_id": sid,
-        "semester_name": name,
-        "current_semester_id": page.current_semester_id,
-        "semesters": page.semesters,
-        "semester_detail": detail,
-        **data,
-    }
+    sid = requested_semester(page, semester_id)
+    print_data = get_print_data(session, sid)
+    detail = None if week1_known(sid, page.semesters) else get_semester_detail(session, sid)
+    return build_timetable(page, sid, print_data, detail)

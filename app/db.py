@@ -48,7 +48,12 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_requested_at  REAL,        -- 有人请求尽快刷新（打开了过期的页面 / 同班同学课表有变动）
     refresh_request_reason TEXT,
     next_class_slots TEXT,             -- 下一节课的 slot_key 列表（JSON）：同班同学刚刷过就算检查过
-    recent_changes_json TEXT           -- 最近 7 天发现的调课（改动前后的排课），小组件据此标出“调”和“停”
+    recent_changes_json TEXT,          -- 最近 7 天发现的调课（改动前后的排课），小组件据此标出“调”和“停”
+    -- 小组件代抓：手机用自己的网络向教务要课表，再上传给本站（见 service.widget_fetch_task）
+    widget_fetch     INTEGER NOT NULL DEFAULT 1,   -- 用户是否允许
+    widget_fetch_ok_at REAL,           -- 最近一次代抓成功
+    widget_fetch_fails INTEGER NOT NULL DEFAULT 0, -- 连续失败次数
+    widget_fetch_pending_until REAL    -- 刚把任务交给手机：这之前服务器不抢着刷
 );
 -- 谁上同一节课：一个人发现调课，同班其他人立刻排到队首
 CREATE TABLE IF NOT EXISTS lesson_slots (
@@ -91,7 +96,7 @@ CREATE TABLE IF NOT EXISTS refresh_log (
     id       INTEGER PRIMARY KEY,
     user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     at       REAL NOT NULL,
-    trigger  TEXT NOT NULL,     -- login | manual | scheduled
+    trigger  TEXT NOT NULL,     -- login | manual | scheduled | widget（手机代抓）
     ok       INTEGER NOT NULL,
     message  TEXT
 );
@@ -164,7 +169,9 @@ def init() -> None:
                      ("enc_widget_token", "BLOB"), ("last_seen_at", "REAL"), ("last_change_at", "REAL"),
                      ("next_class_at", "REAL"), ("next_class_checked_at", "REAL"),
                      ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT"),
-                     ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT")):
+                     ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT"),
+                     ("widget_fetch", "INTEGER NOT NULL DEFAULT 1"), ("widget_fetch_ok_at", "REAL"),
+                     ("widget_fetch_fails", "INTEGER NOT NULL DEFAULT 0"), ("widget_fetch_pending_until", "REAL")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
     if "course_key" not in {r["name"] for r in conn.execute("PRAGMA table_info(lesson_slots)")}:

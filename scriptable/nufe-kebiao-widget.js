@@ -39,6 +39,8 @@ const REMIND_MIN_GAP_MS = 60 * 1000;
 const MAX_REDRAW_MS = 30 * 60000;      // 最长 30 分钟重画一次
 const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两分钟后再看
 const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
+const DELEGATE_CHECK_MINUTES = 37;     // 手机代抓：在出门前的检查窗口（课前 40–30 分钟）里自己向学校确认一次
+const DELEGATE_BUDGET_MS = 20000;      // 代抓总时长上限：小组件进程活不了太久，超时就交回服务器
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const FULL_GAP = 6;                    // 周视图 / 铺满：午休、傍晚这些没课的时段压成这么高的间隔
 const LABEL_H = 13;                    // 周视图 / 铺满：时间轴一个标签占的高度
@@ -583,6 +585,7 @@ function headerNote(payload, offline, day, family, extra = {}) {
 /**
  * 下次重画：最近的上下课时刻、服务器确认完下一节课之后（课前 25 分钟）、北京时间零点后一分钟、
  * 最多 30 分钟，取最早（至少 1 分钟后）。课表正在向学校拉取时改为大约 2 分钟后再看一眼。
+ * 开了手机代抓（payload.delegate）时再加课前 37 分钟：落在检查窗口里，由手机自己去学校确认。
  */
 function nextRefreshMs(payload, now) {
   const candidates = [now.ms + MAX_REDRAW_MS];
@@ -591,7 +594,9 @@ function nextRefreshMs(payload, now) {
   const { today } = resolveDays(payload, now);
   for (const lesson of (today && today.lessons) || []) {
     const start = toMinutes(lesson.start);
-    for (const t of [start - AFTER_CHECK_MINUTES, start, toMinutes(lesson.end)]) {
+    const marks = [start - AFTER_CHECK_MINUTES, start, toMinutes(lesson.end)];
+    if (payload.delegate) marks.push(start - DELEGATE_CHECK_MINUTES);
+    for (const t of marks) {
       if (t > now.minutes) candidates.push(now.ms + (t - now.minutes) * 60000);
     }
   }
@@ -1458,10 +1463,97 @@ async function readFeed(url) {
   return { data };
 }
 
+// ---- 手机代抓：用这台手机的网络向教务要课表，交给服务器解析 ----
+//
+// 服务器到期时在 JSON 里带一个 fetch 任务（只有教务域名的 cookie，统一身份认证的凭据不下发）。
+// 这样学校看到的是你自己手机的 IP，本站服务器少访问学校；任何一步不顺就如实上报，由服务器兜底。
+
+function uploadUrl(url) {
+  return String(url).replace(/\.json(\?.*)?$/, "/upload");
+}
+
+/** 被踢回统一身份认证或教务自己的登录页：教务会话过期了，续期只能服务器做。 */
+function isLoginUrl(url, hosts) {
+  const m = /^https?:\/\/([^/:?#]+)(?::\d+)?([^?#]*)/i.exec(String(url || ""));
+  if (!m) return false;
+  const host = m[1].toLowerCase();
+  const path = (m[2] || "/").replace(/\/+$/, "");
+  return (hosts || []).includes(host) || (host === "jwxt.nufe.edu.cn" && path === "/student/login");
+}
+
+async function delegatedFetch(task, clock = () => Date.now()) {
+  const started = clock();
+  const out = { id: task.id, final_urls: [], set_cookies: [] };
+  try {
+    for (const step of task.steps || []) {
+      if (clock() - started > DELEGATE_BUDGET_MS) return { id: task.id, error: "timeout" };
+      const req = new Request(step.url);
+      req.timeoutInterval = 8;
+      req.headers = { ...(task.headers || {}), Cookie: step.cookie };
+      let loggedOut = false;
+      req.onRedirect = (next) => {
+        if (isLoginUrl(next.url, task.login_hosts)) {
+          loggedOut = true;
+          return null;
+        }
+        next.headers = { ...(next.headers || {}), Cookie: step.cookie };
+        return next;
+      };
+      const text = await req.loadString();
+      const res = req.response || {};
+      if (loggedOut || isLoginUrl(res.url, task.login_hosts)) return { id: task.id, error: "expired" };
+      if (res.statusCode >= 400) {
+        if (step.kind === "detail") continue; // 学期详情只是校历兜底，拿不到不要紧
+        return { id: task.id, error: `http_${res.statusCode}` };
+      }
+      out.final_urls.push(res.url || step.url);
+      for (const c of res.cookies || []) {
+        if (c && c.name) out.set_cookies.push({ name: String(c.name), value: String(c.value == null ? "" : c.value) });
+      }
+      if (step.kind === "course") out.course_html = text;
+      else if (step.kind === "print") out.print_data = text;
+      else if (step.kind === "detail") out.detail = text;
+    }
+  } catch (_) {
+    return { id: task.id, error: "network" };
+  }
+  return out;
+}
+
+/** 交回结果；服务器回的是最新的小组件数据（入库失败、交给服务器兜底时也照样给）。 */
+async function uploadFetch(result) {
+  const req = new Request(uploadUrl(WIDGET_URL));
+  req.method = "POST";
+  req.timeoutInterval = 15;
+  req.headers = { "Content-Type": "application/json" };
+  req.body = JSON.stringify(result);
+  const text = await req.loadString();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+  return data && data.widget && data.widget.v === 1 ? data.widget : null;
+}
+
+/** 有代抓任务就做；返回要用的数据（任务本身含 cookie，绝不写进缓存）。 */
+async function withDelegation(data) {
+  const task = data.fetch;
+  delete data.fetch;
+  if (!task || !task.id) return data;
+  try {
+    return (await uploadFetch(await delegatedFetch(task))) || data;
+  } catch (_) {
+    return data;
+  }
+}
+
 async function load() {
   try {
     const got = await readFeed(WIDGET_URL);
     if (got.error) return got;
+    got.data = await withDelegation(got.data);
     writeJsonFile(CACHE_FILE(), got.data);
     return { data: got.data, offline: false };
   } catch (_) {
@@ -1542,10 +1634,14 @@ async function say(title, message) {
 async function refreshNow() {
   const got = await readFeed(refreshUrl(WIDGET_URL));
   if (got.error) throw new Error(got.error);
+  const delegated = Boolean(got.data.fetch);
+  got.data = await withDelegation(got.data);
   writeJsonFile(CACHE_FILE(), got.data);
   const refresh = got.data.refresh || {};
   if (got.data.status && got.data.status !== "ok") {
     await say("需要重新登录", "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。");
+  } else if (delegated && !refresh.pending) {
+    await say("已更新", "这台手机刚从学校拿到了最新课表。");
   } else if (refresh.pending) {
     await say("已安排刷新", "正在向学校拉取课表，小组件大约两分钟后会换成新的。");
   } else if (refresh.fresh) {
@@ -1649,6 +1745,7 @@ if (typeof ListWidget === "undefined") {
     SCRIPT_VERSION, parseMode, parseParam, remindLead, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
+    uploadUrl, isLoginUrl, delegatedFetch,
   };
 } else {
   main().catch((e) => {
