@@ -21,7 +21,7 @@ import wiki.nufe.kebiao.widget.TomorrowReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 
 /**
- * 调试用：把三种小组件按常见尺寸都画出来。先授权绑定，再打开：
+ * 调试用：把三种小组件按常见尺寸（含拉高、拉窄）都画出来。先授权绑定，再打开：
  *
  *     adb shell appwidget grantbind --package wiki.nufe.kebiao
  *     adb shell am start -n wiki.nufe.kebiao/.preview.WidgetPreviewActivity
@@ -37,7 +37,11 @@ class WidgetPreviewActivity : ComponentActivity() {
         Triple("今天 · 4×3", TodayReceiver::class.java, 340 to 260),
         Triple("明天 · 4×2", TomorrowReceiver::class.java, 340 to 170),
         Triple("本周 · 4×2", WeekReceiver::class.java, 340 to 170),
+        Triple("本周 · 4×3", WeekReceiver::class.java, 340 to 260),
         Triple("本周 · 4×4", WeekReceiver::class.java, 340 to 360),
+        Triple("本周 · 4×5（拉高）", WeekReceiver::class.java, 340 to 480),
+        Triple("本周 · 2×3（拉窄）", WeekReceiver::class.java, 170 to 260),
+        Triple("本周 · 3×3", WeekReceiver::class.java, 250 to 260),
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
