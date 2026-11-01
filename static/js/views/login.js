@@ -591,6 +591,9 @@ export function mountLogin(root, { onSuccess } = {}) {
     if (status === "scanned") {
       qrOverlay.textContent = "已扫描，请在手机上确认";
       qrStatus.textContent = "等待手机确认…";
+    } else if (status === "confirmed") {
+      qrOverlay.textContent = "已确认，正在登录…";
+      qrStatus.textContent = "正在读取课表，请稍候…";
     } else if (status === "expired") {
       qrOverlay.textContent = "二维码已失效";
       qrStatus.textContent = "点击“刷新二维码”重新获取。";
@@ -598,8 +601,8 @@ export function mountLogin(root, { onSuccess } = {}) {
       qrStatus.textContent = "请用学校官方 App 扫描二维码";
     }
     renderVisibility();
-    if (status !== "expired" && status !== "scanned") schedulePoll(2000);
-    else if (status === "scanned") schedulePoll(2000);
+    if (status === "confirmed") schedulePoll(1000);
+    else if (status !== "expired") schedulePoll(2000);
   }
 
   function stopPolling() {

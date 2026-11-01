@@ -194,6 +194,9 @@ def login_qr_poll(flow_id: str) -> dict:
     if done:
         return done[1]
     p = _get_pending(flow_id)
+    if p.flow.stage not in _USER_STEPS:
+        # 手机已确认，调度线程正拿着流程读课表、建号（这里不等 p.lock）：让浏览器接着轮询，几秒后就能拿到结果
+        return {"need": "qr", "flow_id": p.flow_id, "error": None, "qr_status": "confirmed"}
     with p.poll_lock:
         p.qr_polls += 1
         over = p.qr_polls > MAX_QR_POLLS

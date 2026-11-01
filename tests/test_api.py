@@ -685,6 +685,19 @@ def test_qr_login(up):
     assert service._pending == {}
 
 
+def test_qr_poll_while_login_completes(up):
+    """手机已确认、调度线程还在读课表建号时，浏览器轮询看到的是“已确认”，接着轮询就拿到登录结果。"""
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    p = service._pending[fid]
+    p.flow.stage = "done"  # 调度线程拿着 p.lock 正在 _complete_login
+    r = c.post("/api/login/qr/poll", headers=ORIGIN, json={"flow_id": fid}).json()
+    assert r == {"ok": False, "need": "qr", "flow_id": fid, "error": None, "qr_status": "confirmed"}
+    p.flow.stage = "qr"
+    up.qr = "2023002"
+    assert _qr_poll(c, fid).json()["ok"] is True
+
+
 def test_qr_login_keeps_saved_password(up):
     c = TestClient(app)
     _login(c, "2023001", remember=True)
