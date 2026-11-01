@@ -161,8 +161,8 @@ def schedule(now: float | None = None) -> dict:
     now = db.now() if now is None else now
     conn = db.connect()
     rows = conn.execute(
-        f"""SELECT id, student_id, name, status, fail_count, last_error, last_refresh_at, next_refresh_at,
-                   refresh_request_reason, {service._SIGNAL_COLS} FROM users""").fetchall()
+        f"""SELECT id, student_id, name, cred_mode, status, fail_count, last_error, last_refresh_at, next_refresh_at,
+                   refresh_request_reason, sso_session_only, {service._SIGNAL_COLS} FROM users""").fetchall()
     queue = {uid: score for score, uid in service.candidates(now=now, limit=1_000_000)}
     items = []
     for r in rows:
@@ -178,6 +178,7 @@ def schedule(now: float | None = None) -> dict:
         items.append({
             "uid": r["id"], "student": mask_id(r["student_id"]), "name": mask_name(r["name"]),
             "status": r["status"], "fail_count": r["fail_count"], "last_error": r["last_error"],
+            "sso_short": service.sso_short(r["cred_mode"], r["sso_session_only"]),
             "next_refresh_at": nxt, "target_minutes": round(tgt.seconds / 60),
             "reason": refresh_policy.reason(sig, now),
             "pending": pending, "pending_reason": r["refresh_request_reason"] if pending else None,

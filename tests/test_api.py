@@ -2,7 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import cas, db, jwxt, scheduler, service
+from app import admin, cas, db, jwxt, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -53,7 +53,8 @@ class FakeUpstream:
         if PASSWORDS.get(username) != password:
             raise cas.CasError("您提供的用户名或者密码有误")
         self.logins.append(username)
-        session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver")
+        session.cookies.set("CASTGC", f"tgc-{username}", domain="authserver.nufe.edu.cn", path="/authserver",
+                            expires=TGC_REMEMBER_UNTIL)
         self.expired.discard(username)
 
     def renew(self, session):
@@ -79,6 +80,9 @@ class FakeUpstream:
         if not sid or sid in self.expired:
             raise jwxt.SessionExpired()
         return _timetable(sid, "高数" if sid == "2023001" else "英语")
+
+
+TGC_REMEMBER_UNTIL = 4_102_444_800  # 2100 年：账号密码登录（rememberMe）拿到的长效 CASTGC
 
 
 class FakeFlow:
@@ -172,7 +176,9 @@ class FakeFlow:
     def _done(self):
         who = self.username or getattr(self, "_qr_user", "")
         self.up.logins.append(who)
-        self.session.cookies.set("CASTGC", f"tgc-{who}", domain="authserver.nufe.edu.cn", path="/authserver")
+        # 和学校一样：账号密码登录带“记住我”，CASTGC 有过期时间；扫码登录只给会话级 CASTGC
+        self.session.cookies.set("CASTGC", f"tgc-{who}", domain="authserver.nufe.edu.cn", path="/authserver",
+                                 expires=None if not self.username else TGC_REMEMBER_UNTIL)
         self.up.expired.discard(who)
         self.stage = "done"
         self.wipe_password()
@@ -687,6 +693,40 @@ def test_qr_login_keeps_saved_password(up):
     up.qr = "2023001"
     assert _qr_poll(c2, fid).json()["ok"]
     assert c2.get("/api/me").json()["cred_mode"] == "password"
+
+
+def test_qr_login_warns_session_only_tgc(up):
+    """扫码登录只拿到会话级 CASTGC：提醒用户改用账号密码登录；账号密码登录后提醒消失。"""
+    c = TestClient(app)
+    fid = _qr_start(c)["flow_id"]
+    up.qr = "2023002"
+    assert _qr_poll(c, fid).json()["ok"]
+    me = c.get("/api/me").json()
+    assert me["sso_short"] is True
+    assert c.post("/api/refresh", headers=_csrf(c), json={}).json()["account"]["sso_short"] is True
+    uid = db.connect().execute("SELECT id FROM users WHERE student_id='2023002'").fetchone()["id"]
+    assert [i["sso_short"] for i in admin.schedule()["items"] if i["uid"] == uid] == [True]
+
+    c2 = TestClient(app)
+    _login(c2, "2023002")
+    assert c2.get("/api/me").json()["sso_short"] is False
+
+
+def test_password_login_has_long_tgc(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    assert c.get("/api/me").json()["sso_short"] is False
+
+
+def test_qr_login_with_saved_password_not_warned(up):
+    # 存了密码的人过期后会自动重新登录，不用提醒
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    c2 = TestClient(app)
+    fid = _qr_start(c2)["flow_id"]
+    up.qr = "2023001"
+    assert _qr_poll(c2, fid).json()["ok"]
+    assert c2.get("/api/me").json()["sso_short"] is False
 
 
 def test_qr_login_with_mfa_and_expiry(up):

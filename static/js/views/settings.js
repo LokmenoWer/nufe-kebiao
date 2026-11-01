@@ -184,7 +184,9 @@ export function openSettings({
     statusPill.className = `pill pill-${meta.tone}`;
     credText.textContent = current.cred_mode === "password"
       ? "已保存加密的密码：登录态过期时会自动重新登录。"
-      : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
+      : current.sso_short
+        ? "只保存登录态，不保存密码。扫码登录的登录态只能维持几个小时，之后需要你重新登录；用账号密码登录（不保存密码也行）可以维持约半年。"
+        : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
     forgetBtn.hidden = current.cred_mode !== "password";
   }
 

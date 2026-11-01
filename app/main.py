@@ -461,6 +461,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "refresh_pending": outlook.get("pending", False),
         "current_semester_id": sess["current_semester_id"],
         "semesters": _json_list(sess["semesters_json"]),
+        "sso_short": service.sso_short(sess["cred_mode"], sess["sso_session_only"]),
         "ics_url": _ics_url(sess["id"]),
         "mail": notify.snapshot(sess["id"]),
         "widget_url": _widget_url(sess["id"]),

@@ -962,6 +962,7 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
     now = db.now()
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         raise UserGone(uid)
+    cookies = dump_cookies(s)
     old = _old_activities(c, uid, data["semester_id"])
     _save_semester(c, data)
     c.execute(
@@ -973,10 +974,11 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
     c.execute(
         """UPDATE users SET name=?, enc_cookies=?, status='ok', fail_count=0, last_error=NULL,
            last_refresh_at=?, last_success_at=?, current_semester_id=?, semesters_json=?,
-           refresh_requested_at=NULL, refresh_request_reason=NULL
+           refresh_requested_at=NULL, refresh_request_reason=NULL, sso_session_only=?
            WHERE id=?""",
-        (data["student"].get("name"), crypto.encrypt_json(dump_cookies(s), "cookies", uid), now, now,
-         data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False), uid))
+        (data["student"].get("name"), crypto.encrypt_json(cookies, "cookies", uid), now, now,
+         data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False),
+         int(sso_session_only(cookies)), uid))
     c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,1,?)",
               (uid, now, trigger, f"{data['semester_name']}: {len(data['activities'])} 条排课"))
     _ics_cache.pop(uid, None)
@@ -995,6 +997,20 @@ def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
     row = c.execute(f"SELECT {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
     c.execute("UPDATE users SET next_refresh_at=? WHERE id=?", (refresh_policy.next_due(signals_of(row), now), uid))
     return changes
+
+
+def sso_session_only(cookies: list[dict]) -> bool:
+    """认证中心的 CASTGC 是不是会话级的（没有过期时间）。
+
+    账号密码登录带 rememberMe，CASTGC 能用半年；扫码登录的表单没有“记住我”，只发会话级 CASTGC，
+    认证中心几个小时后就不认了，教务会话一过期就只能本人重新登录。
+    """
+    return not any(c.get("name") == "CASTGC" and isinstance(c.get("expires"), int | float) for c in cookies)
+
+
+def sso_short(cred_mode: str | None, session_only) -> bool:
+    """自动刷新撑不了多久、需要提醒用户的情况。存了密码的人过期后会自动重新登录，不用提醒。"""
+    return bool(session_only) and cred_mode != "password"
 
 
 def _record_change(c, uid: int, now: float, changes: dict) -> None:
@@ -1116,7 +1132,7 @@ def account_snapshot(uid: int) -> dict | None:
     """刷新接口带回的账号状态，前端不必再请求 /api/me。"""
     row = db.connect().execute(
         """SELECT student_id, name, cred_mode, status, last_error, fail_count, last_refresh_at,
-                  last_success_at, next_refresh_at, current_semester_id, semesters_json
+                  last_success_at, next_refresh_at, current_semester_id, semesters_json, sso_session_only
            FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return None
@@ -1132,6 +1148,7 @@ def account_snapshot(uid: int) -> dict | None:
         "next_refresh_at": row["next_refresh_at"],
         "current_semester_id": row["current_semester_id"],
         "semesters": _json_list(row["semesters_json"]),
+        "sso_short": sso_short(row["cred_mode"], row["sso_session_only"]),
         **_outlook_fields(uid),
     }
 

@@ -218,7 +218,9 @@ function renderSchedule(s) {
   const lt = sc.last_tick;
   const rows = s.items.map((i) => h("tr",
     h("td", { class: "mono" }, i.student, i.name ? ` ${i.name}` : ""),
-    h("td", statusPill(i.status), i.fail_count ? h("span", { class: "muted" }, ` ×${i.fail_count}`) : null),
+    h("td", statusPill(i.status), i.fail_count ? h("span", { class: "muted" }, ` ×${i.fail_count}`) : null,
+      i.sso_short ? " " : null,
+      i.sso_short ? h("span", { class: "pill pill-warn", title: "扫码登录只有会话级 CASTGC，几小时后无法静默续期" }, "扫码·短效") : null),
     h("td", { class: "num" }, i.score !== null ? h("span", { class: "pill pill-warn" }, `排队中 ${i.score}`)
       : i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停"),
     h("td", { class: "wrap" }, i.pending_reason ? `${i.reason}（${i.pending_reason}）` : i.reason,

@@ -20,6 +20,10 @@ const STATUS_TEXT = {
   needs_rebind: { label: "需要重新登录", tone: "danger" },
 };
 
+// 扫码登录只拿到会话级的认证中心登录态：几小时后后台就续不上了
+const SSO_SHORT_TEXT = "扫码登录的登录态只能维持几个小时，之后自动刷新会暂停。"
+  + "想长期自动刷新，请退出后用账号密码登录（可以不保存密码）。";
+
 function actionButton(label, iconName, onClick, { className = "btn btn-ghost btn-sm" } = {}) {
   return h("button", { type: "button", class: className, onClick },
     icon(iconName),
@@ -597,8 +601,19 @@ class TimetableController {
 
   renderBanner() {
     const status = this.me?.status || "ok";
-    if (status === "ok") {
+    const short = Boolean(this.me?.sso_short);
+    if (status === "ok" && !short) {
       this.banner.hidden = true;
+      return;
+    }
+    if (status === "ok") {
+      this.banner.hidden = false;
+      this.banner.className = "status-banner status-warn";
+      this.bannerText.textContent = SSO_SHORT_TEXT;
+      this.bannerAction.hidden = false;
+      this.bannerAction.textContent = "改用密码登录";
+      this.bannerAction.dataset.action = "reauth";
+      replace(this.banner.querySelector(".banner-icon"), icon("key"));
       return;
     }
     const meta = STATUS_TEXT[status] || { label: "状态异常", tone: "warn" };
@@ -609,7 +624,8 @@ class TimetableController {
     };
     this.banner.hidden = false;
     this.banner.className = `status-banner status-${meta.tone}`;
-    this.bannerText.textContent = `${meta.label}：${messages[status] || status}`;
+    this.bannerText.textContent = `${meta.label}：${messages[status] || status}`
+      + (status === "needs_rebind" && short ? "（扫码登录的登录态只能维持几个小时，建议改用账号密码登录，可以不保存密码）" : "");
     const action = status === "error" ? "retry" : "reauth";
     this.bannerAction.hidden = false;
     this.bannerAction.textContent = action === "retry" ? "重试刷新" : "重新登录";
