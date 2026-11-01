@@ -114,7 +114,7 @@ _SESSION_USER_COLS = """
     s.csrf, s.expires_at, s.persistent AS session_persistent, u.id, u.student_id, u.name, u.created_at, u.cred_mode,
     u.password_consent_at, u.status, u.fail_count, u.last_error, u.last_refresh_at,
     u.last_success_at, u.next_refresh_at, u.current_semester_id, u.semesters_json,
-    u.ics_token_hash, u.refresh_hours, u.sso_session_only
+    u.ics_token_hash, u.refresh_hours, u.sso_session_only, u.keepalive_at, u.sso_lost_at, u.last_seen_at
 """
 
 

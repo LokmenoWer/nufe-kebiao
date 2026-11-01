@@ -1849,3 +1849,52 @@ def test_renewal_marks_sso_touched(up):
     up.tgc_alive.add("2023002")
     assert service.refresh_user(uid, "scheduled")["ok"]
     assert _keepalive_row(uid)["sso_touched_at"] > db.now() - 5
+
+
+def test_keepalive_covers_error_backoff_and_skips_idle_users(up):
+    _, uid = _qr_login("2023002")
+    _age_keepalive()
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='error', next_refresh_at=? WHERE id=?", (db.now() + 3600, uid))
+    assert service.keepalive_candidates() == [uid]  # 学校一时出错，登录态照样要保
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='ok', last_seen_at=?, last_success_at=? WHERE id=?",
+                     (db.now() - service.KEEPALIVE_IDLE - 60, db.now() - service.KEEPALIVE_IDLE - 60, uid))
+    assert service.keepalive_candidates() == []     # 太久没用：不再打扰学校
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET status='needs_rebind', last_seen_at=? WHERE id=?", (db.now(), uid))
+    assert service.keepalive_candidates() == []
+
+
+def test_keepalive_state_in_api(up):
+    c, uid = _qr_login("2023002")
+    keep = c.get("/api/me").json()["keepalive"]
+    assert keep["every_minutes"] == service.SSO_KEEPALIVE_MINUTES and keep["sso_ok"] is True
+    assert keep["last_at"] and keep["paused"] is False
+    up.sso_dead.add("2023002")
+    _age_keepalive()
+    service.keepalive_user(uid)
+    keep = c.post("/api/refresh", headers=_csrf(c), json={}).json()["account"]["keepalive"]
+    assert keep["sso_ok"] is False and keep["sso_lost_at"]
+    # 账号密码登录（长效 CASTGC）的人没有保活状态
+    c2 = TestClient(app)
+    _login(c2, "2023001")
+    assert c2.get("/api/me").json()["keepalive"] is None
+
+
+def test_keepalive_saves_cookies_when_only_sso_answers(up, monkeypatch):
+    _, uid = _qr_login("2023002")
+    up.expired.add("2023002")
+    _age_keepalive()
+    before = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0]
+
+    def touch_sso(session):
+        session.cookies.set("route", "new", domain="authserver.nufe.edu.cn", path="/")
+        return True
+    monkeypatch.setattr(cas, "touch_sso", touch_sso)
+    assert service.keepalive_user(uid) == {"jwxt": False, "sso": True}
+    after = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0]
+    assert after != before
+    from app import crypto
+    assert any(ck["name"] == "route" and ck["value"] == "new"
+               for ck in crypto.decrypt_json(after, "cookies", uid))

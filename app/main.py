@@ -462,6 +462,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "current_semester_id": sess["current_semester_id"],
         "semesters": _json_list(sess["semesters_json"]),
         "sso_short": service.sso_short(sess["cred_mode"], sess["sso_session_only"]),
+        "keepalive": service.keepalive_state(sess),
         "ics_url": _ics_url(sess["id"]),
         "mail": notify.snapshot(sess["id"]),
         "widget_url": _widget_url(sess["id"]),

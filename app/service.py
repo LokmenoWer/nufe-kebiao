@@ -26,6 +26,7 @@ from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
     REFRESH_MAX_FAILS,
+    SSO_KEEPALIVE_IDLE_DAYS,
     SSO_KEEPALIVE_MINUTES,
     TIMEZONE,
     semester_overrides,
@@ -1018,16 +1019,36 @@ def sso_session_only(cookies: list[dict]) -> bool:
 
 
 KEEPALIVE_EVERY = SSO_KEEPALIVE_MINUTES * 60
+KEEPALIVE_IDLE = SSO_KEEPALIVE_IDLE_DAYS * 86400
 
 
 def keepalive_candidates(now: float | None = None) -> list[int]:
-    """该保活的人：扫码登录（会话级 CASTGC）、没存密码、状态正常，且离上次保活已满间隔。最久没保活的在前。"""
+    """该保活的人：扫码登录（会话级 CASTGC）、没存密码、离上次保活已满间隔。最久没保活的在前。
+
+    刷新失败正在退避（error）的人也保活：学校一时出错不该让登录态跟着闲置过期。
+    很久没用本站（网站 / 小组件 / 日历订阅）的人不保活。
+    """
     now = db.now() if now is None else now
     rows = db.connect().execute(
         """SELECT id FROM users
-           WHERE status='ok' AND sso_session_only=1 AND cred_mode<>'password' AND COALESCE(keepalive_at, 0) <= ?
-           ORDER BY COALESCE(keepalive_at, 0)""", (now - KEEPALIVE_EVERY,)).fetchall()
+           WHERE status IN ('ok', 'error') AND sso_session_only=1 AND cred_mode<>'password'
+             AND COALESCE(keepalive_at, 0) <= ? AND COALESCE(last_seen_at, last_success_at, 0) > ?
+           ORDER BY COALESCE(keepalive_at, 0)""", (now - KEEPALIVE_EVERY, now - KEEPALIVE_IDLE)).fetchall()
     return [r["id"] for r in rows]
+
+
+def keepalive_state(row, now: float | None = None) -> dict | None:
+    """给前端看的保活状态（只对需要提醒的扫码用户）：
+
+    {"every_minutes", "last_at": 上次保活, "sso_ok": 认证中心是否还认, "sso_lost_at", "paused": 太久没用、已停止保活}
+    """
+    if not sso_short(row["cred_mode"], row["sso_session_only"]):
+        return None
+    now = db.now() if now is None else now
+    seen = row["last_seen_at"] or row["last_success_at"] or 0
+    return {"every_minutes": SSO_KEEPALIVE_MINUTES, "last_at": row["keepalive_at"],
+            "sso_ok": row["sso_lost_at"] is None, "sso_lost_at": row["sso_lost_at"],
+            "paused": now - seen > KEEPALIVE_IDLE}
 
 
 def keepalive_user(uid: int) -> dict:
@@ -1062,7 +1083,7 @@ def keepalive_user(uid: int) -> dict:
             return {"jwxt": None, "sso": None}
         with db.tx() as c:
             c.execute("UPDATE users SET keepalive_at=? WHERE id=?", (now, uid))
-            if jw_ok:
+            if jw_ok or sso_ok:  # 学校可能顺手换了 cookie：还有效就存回去
                 c.execute("UPDATE users SET enc_cookies=? WHERE id=?",
                           (crypto.encrypt_json(dump_cookies(s), "cookies", uid), uid))
             if sso_ok:
@@ -1070,7 +1091,7 @@ def keepalive_user(uid: int) -> dict:
             elif sso_ok is False:
                 c.execute("UPDATE users SET sso_lost_at=? WHERE id=?", (now, uid))
             if not jw_ok:
-                request_refresh(uid, "教务登录态已过期", now, conn=c)
+                request_refresh(uid, "教务登录态已过期", now, conn=c)  # 只对状态正常的人生效；退避中的按原计划重试
         if sso_ok is False:
             # 记下会话级 CASTGC 实际能撑多久，用来调保活间隔
             idle = (now - row["sso_touched_at"]) / 3600 if row["sso_touched_at"] else None
@@ -1207,7 +1228,8 @@ def account_snapshot(uid: int) -> dict | None:
     """刷新接口带回的账号状态，前端不必再请求 /api/me。"""
     row = db.connect().execute(
         """SELECT student_id, name, cred_mode, status, last_error, fail_count, last_refresh_at,
-                  last_success_at, next_refresh_at, current_semester_id, semesters_json, sso_session_only
+                  last_success_at, next_refresh_at, current_semester_id, semesters_json, sso_session_only,
+                  keepalive_at, sso_lost_at, last_seen_at
            FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return None
@@ -1224,6 +1246,7 @@ def account_snapshot(uid: int) -> dict | None:
         "current_semester_id": row["current_semester_id"],
         "semesters": _json_list(row["semesters_json"]),
         "sso_short": sso_short(row["cred_mode"], row["sso_session_only"]),
+        "keepalive": keepalive_state(row),
         **_outlook_fields(uid),
     }
 

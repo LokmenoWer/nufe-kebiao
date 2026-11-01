@@ -39,6 +39,17 @@ function refreshPace(me) {
   return `约每 ${every}${me.refresh_reason ? `（${me.refresh_reason}）` : ""}`;
 }
 
+// 扫码登录（会话级登录态）的保活情况
+function keepaliveRows(me) {
+  const keep = me.keepalive;
+  if (!keep || me.status === "needs_rebind" || me.status === "captcha") return [];
+  const pace = keep.paused
+    ? "已暂停（较长时间没打开本站），再次打开后恢复"
+    : `每 ${keep.every_minutes} 分钟 · 上次 ${keep.last_at ? T.relativeTime(keep.last_at) : "还没有"}`;
+  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}发现），教务登录态仍在保持`;
+  return [["保持登录", pace], ["统一身份认证", sso]];
+}
+
 export function openSettings({
   me,
   onUpdated,
@@ -185,7 +196,8 @@ export function openSettings({
     credText.textContent = current.cred_mode === "password"
       ? "已保存加密的密码：登录态过期时会自动重新登录。"
       : current.sso_short
-        ? "只保存登录态，不保存密码。扫码登录的登录态只能维持几个小时，之后需要你重新登录；用账号密码登录（不保存密码也行）可以维持约半年。"
+        ? "只保存登录态，不保存密码。你是扫码登录的：学校给的登录态较短，本站会定时替你保持（见“自动刷新”）；"
+          + "改用账号密码登录（不保存密码也行）能稳定维持约半年。"
         : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
     forgetBtn.hidden = current.cred_mode !== "password";
   }
@@ -196,6 +208,7 @@ export function openSettings({
       ["上次成功", T.formatDateTime(current.last_success_at)],
       ["下次计划", current.next_refresh_at ? T.formatDateTime(current.next_refresh_at) : "已暂停"],
       ["刷新频率", refreshPace(current)],
+      ...keepaliveRows(current),
     ].flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, String(value))]));
   }
 

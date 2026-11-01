@@ -87,6 +87,8 @@ if REFRESH_BUDGET_RPS > 0.9:
 SCHEDULER_TICK = _int("SCHEDULER_TICK", 30, minimum=5)
 # 扫码登录（会话级 CASTGC）且没存密码的人：每隔多少分钟碰一下认证中心和教务，让两边的登录态都别因为闲置过期
 SSO_KEEPALIVE_MINUTES = _int("SSO_KEEPALIVE_MINUTES", 20, minimum=5)
+# 超过这么多天没打开网站 / 小组件 / 日历订阅的人不再保活：不为没人用的账号持续打扰学校
+SSO_KEEPALIVE_IDLE_DAYS = _int("SSO_KEEPALIVE_IDLE_DAYS", 14, minimum=1)
 # 手动刷新：两次之间至少隔几秒（无论成败）；课表在多少秒内刚抓过就直接用已存的，不再打扰学校
 MANUAL_REFRESH_MIN_GAP = _int("MANUAL_REFRESH_MIN_GAP", 20)
 MANUAL_REFRESH_FRESH_SECONDS = _int("MANUAL_REFRESH_FRESH_SECONDS", 120)

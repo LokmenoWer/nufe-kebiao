@@ -7,7 +7,8 @@ import { createSliderCaptcha } from "../components/slider-captcha.js";
 
 const INTRO = {
   pwd: "服务器代你登录统一身份认证，只读取课表。密码不会明文落库。",
-  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。",
+  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。"
+    + "扫码登录的登录态比账号密码短，本站会定时替你保持；想最稳定地自动刷新，推荐账号密码登录。",
 };
 
 function field(id, labelText, input) {
