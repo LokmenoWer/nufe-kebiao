@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 桌面“添加小组件”时的静态预览（Android 12+ 的 previewLayout）：今天、明天共用，内容是示意 -->
+<!-- 桌面“添加小组件”时的静态预览（Android 12+ 的 previewLayout）：今天是示意内容 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"

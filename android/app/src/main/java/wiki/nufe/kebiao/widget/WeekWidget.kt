@@ -3,6 +3,7 @@ package wiki.nufe.kebiao.widget
 import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.GlanceId
@@ -14,10 +15,12 @@ import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.SizeMode
 import androidx.glance.appwidget.provideContent
+import androidx.glance.background
 import androidx.glance.layout.Alignment
 import androidx.glance.layout.Box
 import androidx.glance.layout.Column
 import androidx.glance.layout.Row
+import androidx.glance.layout.RowScope
 import androidx.glance.layout.Spacer
 import androidx.glance.layout.fillMaxHeight
 import androidx.glance.layout.fillMaxSize
@@ -39,29 +42,29 @@ import wiki.nufe.kebiao.data.weekToShow
  * 本周课表：和 iOS 的 week 模式一样按节次排、每节课写准确的起止时间，按内容排（见 WeekLayout.kt）。小组件可以随意拉伸，版面全按当前尺寸算：
  * 拉高了字变大、写上教师，拉矮了逐级少写；拉窄到一列不足 40dp 时只画从今天起放得下的几天。
  */
-open class WeekWidget(private val byTime: Boolean = false) : GlanceAppWidget() {
+class WeekWidget : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
+    override val previewSizeMode = SizeMode.Responsive(
+        setOf(DpSize(250.dp, 180.dp), DpSize(250.dp, 250.dp)),
+    )
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         provideContent {
             val data = rememberWidgetData(context)
             GlanceTheme {
                 val message = placeholderMessage(data)
-                if (message != null) Placeholder(context, message) else WeekContent(context, data, byTime)
+                if (message != null) Placeholder(context, message) else WeekContent(context, data)
             }
         }
+    }
+
+    override suspend fun providePreview(context: Context, widgetCategory: Int) {
+        provideContent { GlanceTheme { WeekPreview(context) } }
     }
 }
 
 class WeekReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = WeekWidget()
-}
-
-/** 本周（按时长）：和 iOS 的 full（铺满）模式一样，纵轴按真实时间，课越长格子越高。 */
-class FullWeekWidget : WeekWidget(byTime = true)
-
-class FullWeekReceiver : GlanceAppWidgetReceiver() {
-    override val glanceAppWidget: GlanceAppWidget = FullWeekWidget()
 }
 
 private const val COL_GAP = 3f
@@ -71,6 +74,57 @@ private const val MIN_COL_W = 40f   // 再窄连两个字都放不下：少画�
 private const val AXIS_SP = 9f
 private const val UNIT_SP = 8f      // 时间轴上“第几节”
 private const val END_SP = 8.5f     // 时间轴上的下课时间“–09:45”
+
+/** Android 15+ 小组件选择器里的生成预览：不读账号数据，画一张稳定的示意周视图。 */
+@Composable
+private fun WeekPreview(context: Context) {
+    WidgetRoot(onClick = openApp(context)) {
+        Column(GlanceModifier.fillMaxSize()) {
+            Header("本周", "11/2–11/8", null, compact = true)
+            Spacer(GlanceModifier.height(4.dp))
+            Row(GlanceModifier.fillMaxWidth().height(16.dp)) {
+                Spacer(GlanceModifier.width(26.dp))
+                for (day in listOf("一", "二", "三", "四", "五")) {
+                    Box(GlanceModifier.defaultWeight(), contentAlignment = Alignment.Center) {
+                        Label(day, size = 9.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                    }
+                }
+            }
+            Row(GlanceModifier.fillMaxWidth().defaultWeight()) {
+                Column(GlanceModifier.width(26.dp).fillMaxHeight()) {
+                    Label("08:00", size = 8.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                    Spacer(GlanceModifier.defaultWeight())
+                    Label("14:00", size = 8.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                    Spacer(GlanceModifier.defaultWeight())
+                    Label("20:00", size = 8.sp, color = GlanceTheme.colors.onSurfaceVariant)
+                }
+                PreviewColumn(listOf(PreviewBlock("高数", "#4b63e0"), null, PreviewBlock("英语", "#2f9e44")))
+                PreviewColumn(listOf(null, PreviewBlock("会计", "#e8590c"), null, PreviewBlock("体育", "#495057")))
+                PreviewColumn(listOf(PreviewBlock("线代", "#9c36b5"), null, PreviewBlock("实验", "#0f8b8d")))
+                PreviewColumn(listOf(null, PreviewBlock("英语", "#2f9e44"), null, PreviewBlock("营销", "#c2255c")))
+                PreviewColumn(listOf(PreviewBlock("经济学", "#e67700"), PreviewBlock("计算机", "#1971c2")))
+            }
+        }
+    }
+}
+
+private data class PreviewBlock(val name: String, val color: String)
+
+@Composable
+private fun RowScope.PreviewColumn(blocks: List<PreviewBlock?>) {
+    Column(GlanceModifier.defaultWeight().fillMaxHeight().padding(horizontal = 1.dp)) {
+        blocks.forEach { block ->
+            if (block == null) {
+                Spacer(GlanceModifier.defaultWeight())
+            } else {
+                Chip(block.color, height = 26.dp) {
+                    Label(block.name, size = 9.sp, bold = true, color = chipText(block.color))
+                }
+                Spacer(GlanceModifier.height(2.dp))
+            }
+        }
+    }
+}
 
 /**
  * 放不下的时候先省掉没课的日子（今天除外），还放不下就只画从今天（或这周第一个还没过去的日子）起的几天。
@@ -85,7 +139,7 @@ private fun visibleColumns(columns: List<DayColumn>, maxCols: Int, today: String
 }
 
 @Composable
-private fun WeekContent(context: Context, data: WidgetData, byTime: Boolean) {
+private fun WeekContent(context: Context, data: WidgetData) {
     val snapshot = data.snapshot!!
     val now = Now.current()
     val (title, block) = weekToShow(snapshot.payload, now)
@@ -113,7 +167,7 @@ private fun WeekContent(context: Context, data: WidgetData, byTime: Boolean) {
             val cells = columns.map(::cellsOf)
             val gridH = size.height.value - PADDING.value * 2 - HEADER_H - DAY_ROW_H
             val colW = if (columns.isEmpty()) 0f else usableW / columns.size - COL_GAP
-            val layout = if (gridH > 0) layoutGrid(cells, gridH, colW - CHIP_PAD_H, m, labelH, endH, byTime) else null
+            val layout = if (gridH > 0) layoutGrid(cells, gridH, colW - CHIP_PAD_H, m, labelH, endH) else null
             if (layout == null) {
                 Label(if (block?.week == null) "假期中" else "这周没有课", size = 14.sp, bold = true)
                 return@Column
@@ -132,7 +186,7 @@ private fun WeekContent(context: Context, data: WidgetData, byTime: Boolean) {
             Row(modifier = GlanceModifier.fillMaxWidth().height(gridH.dp)) {
                 Axis(layout, axisW, gridH, labelH, endH, m)
                 columns.forEachIndexed { i, c ->
-                    DayCells(context, data, c, layout, i, colW, m)
+                    DayCells(context, data, c, layout, i, colW, m, now)
                 }
             }
         }
@@ -177,20 +231,50 @@ private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, 
 
 @Composable
 private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layout: GridLayout, col: Int, width: Float,
-                     m: TextMeasure) {
+                     m: TextMeasure, now: Now) {
     // 每格叠在 Box 里、各自用上内边距从列顶算起，不接在上一格后面：桌面原地套用更新（reapply）偶尔会丢掉一格，
     // 接着排的话后面的课全跟着往上挪、落到别的节次上；各算各的，最多少一格，不会错位。
-    // 每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限
+    // 每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限；今天多留一个位置给时间线。
+    val spans = layout.spans.filter { it.col == col }.take(if (column.isToday) 9 else 10)
     Box(modifier = GlanceModifier.width((width + COL_GAP).dp).fillMaxHeight().padding(start = COL_GAP.dp)
         .clickable(openDay(context, data, column.day))) {
-        for (span in layout.spans.filter { it.col == col }.take(10)) {
+        for (span in spans) {
             val top = layout.bounds[span.a]
             val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)
             Box(modifier = GlanceModifier.fillMaxWidth().padding(top = top.dp)) {
                 CellChip(span.cell, h, width - CHIP_PAD_H, layout.fontScale, span.onAxis, m)
             }
         }
+        if (column.isToday) {
+            nowLineTop(layout, col, now.minutes)?.let { top ->
+                Box(GlanceModifier.fillMaxWidth().padding(top = top.dp)) {
+                    Box(GlanceModifier.fillMaxWidth().height(2.dp).background(solid(LIVE))) {}
+                }
+            }
+        }
     }
+}
+
+/** 像网站周视图一样，在当前天的列上按真实时间画一条红色横线。 */
+private fun nowLineTop(layout: GridLayout, col: Int, nowMinutes: Int): Float? {
+    val points = layout.spans
+        .filter { it.col == col }
+        .flatMap { listOf(it.cell.start to layout.bounds[it.a], it.cell.end to layout.bounds[it.b]) }
+        .distinct()
+        .sortedBy { it.first }
+    if (points.size < 2) return null
+    val first = points.first()
+    val last = points.last()
+    if (nowMinutes < first.first || nowMinutes > last.first) return null
+    for (i in 0 until points.lastIndex) {
+        val (t1, y1) = points[i]
+        val (t2, y2) = points[i + 1]
+        if (nowMinutes in t1..t2) {
+            if (t2 == t1) return y1
+            return y1 + (y2 - y1) * (nowMinutes - t1) / (t2 - t1)
+        }
+    }
+    return null
 }
 
 @Composable

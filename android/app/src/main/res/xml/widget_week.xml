@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/widget_week_desc"
+    android:previewImage="@drawable/widget_week_preview"
     android:previewLayout="@layout/preview_week"
     android:initialLayout="@layout/glance_default_loading_layout"
     android:minWidth="250dp"

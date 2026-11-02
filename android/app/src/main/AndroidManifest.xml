@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 读取课表 JSON 和网站资源 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 13+：上课提醒、实时提醒通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 16：Live Updates / 流体云 / 实时动态 -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <!-- Android 12+：精准闹钟，属于特殊权限，需在系统“闹钟和提醒”页面开启 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 开机后恢复本机提醒闹钟 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -43,24 +48,11 @@
             </intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_today" />
         </receiver>
-        <receiver android:name=".widget.TomorrowReceiver" android:exported="true" android:label="@string/widget_tomorrow">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_tomorrow" />
-        </receiver>
         <receiver android:name=".widget.WeekReceiver" android:exported="true" android:label="@string/widget_week">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_week" />
-        </receiver>
-
-        <receiver android:name=".widget.FullWeekReceiver" android:exported="true" android:label="@string/widget_full_week">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_full_week" />
         </receiver>
 
         <receiver android:name=".remind.ReminderReceiver" android:exported="false" />

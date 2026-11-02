@@ -415,14 +415,13 @@ private fun timeAxis(all: List<Cell>): Axis {
 private fun hm(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
 
 /**
- * byTime = true：iOS 的 full（铺满）模式，纵轴按真实时间，课越长格子越高；否则按节次。
+ * 纵轴优先按节次；有课没写节次又补不上时退回按真实时间。
  * labelH / endH：开始时间（含粗体）、下课时间标签的高度。
  */
-fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float,
-               byTime: Boolean = false): GridLayout? {
+fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float): GridLayout? {
     val all = columns.flatten()
     if (all.isEmpty()) return null
-    val unitAxis = if (byTime) null else unitAxis(all)
+    val unitAxis = unitAxis(all)
     val axis = unitAxis ?: timeAxis(all)
     val n = axis.ideal.size + 1
     val cellSpans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, axis.startIdx(it), axis.endIdx(it)) } }

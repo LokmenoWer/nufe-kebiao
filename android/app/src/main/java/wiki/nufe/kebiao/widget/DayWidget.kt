@@ -2,6 +2,7 @@ package wiki.nufe.kebiao.widget
 
 import android.content.Context
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.GlanceId
@@ -25,6 +26,7 @@ import androidx.glance.layout.width
 import wiki.nufe.kebiao.data.Cancelled
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.Now
+import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.WEEKDAY
@@ -33,50 +35,94 @@ import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
 
-/** 今天：正在上的课倒计时到下课，下一节 1 小时内倒计时到上课；当天课上完预告下次上课。 */
-class TodayWidget : DayWidget(tomorrow = false)
-
-/** 明天：明天的全部课；明天没课时预告下次上课。 */
-class TomorrowWidget : DayWidget(tomorrow = true)
+/** 今天：正在上的课倒计时到下课，下一节 1 小时内倒计时到上课；今天全部上完后直接显示明天的完整课表。 */
+class TodayWidget : DayWidget()
 
 class TodayReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = TodayWidget()
 }
 
-class TomorrowReceiver : GlanceAppWidgetReceiver() {
-    override val glanceAppWidget: GlanceAppWidget = TomorrowWidget()
-}
-
 private const val ROW_H = 44      // 列表一行（课名 + 时间教室）的高度，含间距；汉字行高约 1.4 倍字号
 private const val HEADER_H = 26
 
-open class DayWidget(private val tomorrow: Boolean) : GlanceAppWidget() {
+open class DayWidget : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
+    override val previewSizeMode = SizeMode.Responsive(
+        setOf(DpSize(140.dp, 140.dp), DpSize(250.dp, 140.dp), DpSize(250.dp, 250.dp)),
+    )
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         provideContent {
             val data = rememberWidgetData(context)
             GlanceTheme {
                 val message = placeholderMessage(data)
-                if (message != null) Placeholder(context, message) else DayContent(context, data, tomorrow)
+                if (message != null) Placeholder(context, message) else DayContent(context, data)
+            }
+        }
+    }
+
+    override suspend fun providePreview(context: Context, widgetCategory: Int) {
+        provideContent { GlanceTheme { DayPreview(context) } }
+    }
+}
+
+/** 今天还有课就画今天；今天的课都结束（或今天没课）后，直接画明天的完整课表。 */
+private fun planForNow(payload: Payload, now: Now): DayPlan {
+    val today = buildPlan(payload, tomorrowMode = false, now = now)
+    if (today.slots.isNotEmpty() || today.cancelled.isNotEmpty()) return today
+    return buildPlan(payload, tomorrowMode = true, now = now)
+}
+
+/** Android 15+ 小组件选择器里的生成预览：不读账号数据，画一张稳定的示意卡片。 */
+@Composable
+private fun DayPreview(context: Context) {
+    val small = LocalSize.current.height < 180.dp
+    WidgetRoot(onClick = openApp(context)) {
+        Column(GlanceModifier.fillMaxSize()) {
+            Header("今天", "周一 11/2", null, compact = true)
+            Spacer(GlanceModifier.height(4.dp))
+            PreviewLesson("算法设计与分析", "13:30–14:55 · 博观楼 JB404", "#9c36b5")
+            Spacer(GlanceModifier.height(5.dp))
+            PreviewLesson("企业营销道德", "18:30–20:50 · 德济楼 Z2-112", "#e8590c")
+            if (!small) {
+                Spacer(GlanceModifier.height(5.dp))
+                PreviewLesson("大学英语", "10:00–11:35 · 德济楼 305", "#2f9e44")
             }
         }
     }
 }
 
 @Composable
-private fun DayContent(context: Context, data: WidgetData, tomorrow: Boolean) {
+private fun PreviewLesson(name: String, meta: String, color: String) {
+    Chip(color, height = 40.dp) {
+        Column(GlanceModifier.fillMaxWidth()) {
+            Label(name, size = 12.sp, bold = true, color = chipText(color))
+            Label(meta, size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DayContent(context: Context, data: WidgetData) {
     val snapshot = data.snapshot!!
     val now = Now.current()
-    val plan = buildPlan(snapshot.payload, tomorrow, now)
+    val plan = planForNow(snapshot.payload, now)
     val size = LocalSize.current
     val small = size.width < 200.dp
     val changed = plan.slots.any { it.lesson.changed } || plan.cancelled.isNotEmpty()
     val note = headerNote(snapshot, plan.day, now, compact = small, changed = changed)
-    val subtitle = plan.day?.let { "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}" }.orEmpty()
+    val dateText = plan.day?.let { "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}" }.orEmpty()
+    val count = plan.slots.size
+    val subtitle = when {
+        small && count > 0 -> "还有 $count 门"
+        small -> ""
+        count > 0 && dateText.isNotEmpty() -> "$dateText · 还有 $count 门"
+        count > 0 -> "还有 $count 门"
+        else -> dateText
+    }
     WidgetRoot(onClick = openDay(context, data, plan.day)) {
         Column(modifier = GlanceModifier.fillMaxSize()) {
-            Header(plan.title, if (small) "" else subtitle, note, compact = small)
+            Header(plan.title, subtitle, if (small) null else note, compact = small)
             Spacer(GlanceModifier.height(4.dp))
             when {
                 plan.slots.isEmpty() -> EmptyState(context, data, plan, small)

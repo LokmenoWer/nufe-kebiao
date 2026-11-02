@@ -21,9 +21,7 @@ import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.resolveDays
 import wiki.nufe.kebiao.remind.Reminders
-import wiki.nufe.kebiao.widget.FullWeekWidget
 import wiki.nufe.kebiao.widget.TodayWidget
-import wiki.nufe.kebiao.widget.TomorrowWidget
 import wiki.nufe.kebiao.widget.WeekWidget
 import wiki.nufe.kebiao.widget.WidgetVersion
 
@@ -90,9 +88,7 @@ object Sync {
     suspend fun redraw(context: Context) {
         WidgetVersion.bump()
         TodayWidget().updateAll(context)
-        TomorrowWidget().updateAll(context)
         WeekWidget().updateAll(context)
-        FullWeekWidget().updateAll(context)
     }
 }
 
