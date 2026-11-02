@@ -906,6 +906,13 @@ private fun TodayCardView(
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenSite, contentPadding = PaddingValues(0.dp)) {
                 Text("前往网站查看完整课表", fontSize = 12.sp)
+                Spacer(Modifier.width(2.dp))
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
             }
         }
     }
