@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -116,9 +117,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.DayPlan
@@ -136,6 +139,8 @@ import wiki.nufe.kebiao.data.buildTodayPlan
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
+import wiki.nufe.kebiao.diag.Diag
+import wiki.nufe.kebiao.diag.Diagnostics
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
@@ -145,6 +150,7 @@ import wiki.nufe.kebiao.widget.WeekReceiver
 import wiki.nufe.kebiao.widget.parseColor
 
 private const val SITE_URL = "https://kebiao.nufe.wiki"
+private const val REPO_URL = "https://github.com/LokmenoWer/nufe-kebiao"
 private const val PIN_COOLDOWN_MS = 2_000L
 private const val PIN_CHECK_DELAY_MS = 1_000L
 private const val MANUAL_ADD =
@@ -187,6 +193,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        Diag.i("app start")
         incoming = linkFrom(intent)
         setContent {
             KebiaoTheme {
@@ -330,6 +337,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     fun save(raw: String) {
         val link = Repository.extractLink(raw)
         if (link == null) {
+            Diag.w("link format invalid")
             message = "链接格式不对：应是以 /widget/<token>.json 结尾的链接。"
             return
         }
@@ -341,6 +349,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
             try {
                 val snap = repo.fetch()
                 if (snap == null || snap.offline) {
+                    Diag.w("link validation offline")
                     repo.widgetUrl = previous
                     message = "连不上服务器，无法校验链接；请检查网络后重试。"
                     return@launch
@@ -353,11 +362,14 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 Reminders.reschedule(context)
                 Sync.schedule(context)
                 Sync.redraw(context)
+                Diag.i("link saved")
             } catch (_: LinkInvalidException) {
+                Diag.w("link invalid")
                 repo.widgetUrl = previous
                 invalid = true
                 message = "这条链接已失效，请在网站设置里重新生成。"
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Diag.w("link validation failed: ${error.javaClass.simpleName}")
                 repo.widgetUrl = previous
                 message = "连接服务器失败，请稍后再试。"
             } finally {
@@ -374,14 +386,21 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
             try {
                 val snap = repo.fetch(refresh = true)
                 if (snap != null) snapshot = snap
-                if (snap?.offline == true) message = "连不上服务器，显示的是缓存。"
+                if (snap?.offline == true) {
+                    Diag.w("refresh offline")
+                    message = "连不上服务器，显示的是缓存。"
+                } else {
+                    Diag.i("refresh ok")
+                }
                 Reminders.reschedule(context)
                 Sync.redraw(context)
             } catch (_: LinkInvalidException) {
+                Diag.w("refresh invalid link")
                 invalid = true
                 LinkState.markInvalid(context, true)
                 message = "链接已失效，请重新生成。"
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Diag.w("refresh failed: ${error.javaClass.simpleName}")
                 message = "刷新失败，请稍后再试。"
             } finally {
                 busy = false
@@ -390,6 +409,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     }
 
     fun removeLink() {
+        Diag.i("link removed")
         repo.widgetUrl = null
         Sync.cancelAll(context)
         LiveUpdates.cancel(context)
@@ -717,6 +737,7 @@ private fun HomeScreen(
             alarmEnabled = alarmEnabled,
             onPickTime = { showWheel = true },
             onAlarmToggle = { enabled ->
+                Diag.i("alarm enabled=$enabled")
                 alarmEnabled = enabled
                 repo.alarmEnabled = enabled
                 if (enabled && minutes == 0) {
@@ -728,6 +749,7 @@ private fun HomeScreen(
             },
             liveUpdate = liveUpdate,
             onLiveUpdateChange = { checked ->
+                Diag.i("live update enabled=$checked")
                 liveUpdate = checked
                 repo.liveUpdateEnabled = checked
                 if (!checked) LiveUpdates.cancel(context)
@@ -1262,6 +1284,25 @@ private fun MineScreen(
     val host = repo.widgetUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() } ?: "未连接"
     val student = snapshot?.payload?.student
     val mail = snapshot?.payload?.mail
+    val scope = rememberCoroutineScope()
+    var exporting by remember { mutableStateOf(false) }
+
+    fun exportDiagnostics() {
+        if (exporting) return
+        exporting = true
+        scope.launch {
+            val file = withContext(Dispatchers.IO) {
+                runCatching { Diagnostics.export(context, repo, snapshot) }.getOrNull()
+            }
+            exporting = false
+            if (file == null) {
+                Toast.makeText(context, "导出失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val shared = runCatching { Diagnostics.share(context, file) }.isSuccess
+            if (!shared) Toast.makeText(context, "没有可用的分享应用", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1421,6 +1462,21 @@ private fun MineScreen(
 
         Spacer(Modifier.height(14.dp))
         SectionCard {
+            Text("帮助开发者优化 App", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Hint("导出诊断文件，包含版本、设备、权限、链接状态和最近日志；不含小组件链接、密码或邮箱。")
+            Spacer(Modifier.height(4.dp))
+            Hint("遇到问题时先复现，再立即导出，日志更有用。")
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = ::exportDiagnostics,
+                enabled = !exporting,
+                contentPadding = PaddingValues(0.dp),
+            ) { Text(if (exporting) "正在导出…" else "导出诊断日志", fontSize = 12.sp) }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        SectionCard {
             Text("数据", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
             Hint("桌面小组件、实时提醒和日历订阅都读取同一条只读链接。链接泄露后请在网站重新生成，或在这里移除。")
@@ -1490,8 +1546,11 @@ private fun AboutScreen() {
             AboutRow("官方网站", SITE_URL) {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL)))
             }
+            AboutRow("GitHub 仓库", "LokmenoWer/nufe-kebiao") {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(REPO_URL)))
+            }
             AboutRow("许可证", "GPL-3.0-or-later")
-            AboutRow("版本", version.ifBlank { "1.1.0" })
+            AboutRow("版本", version.ifBlank { "1.1.1" })
             AboutRow("图标", "IconPark · Apache-2.0") {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),

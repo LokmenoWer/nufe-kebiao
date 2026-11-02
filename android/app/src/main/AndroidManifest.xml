@@ -55,6 +55,16 @@
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_week" />
         </receiver>
 
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <receiver android:name=".remind.ReminderReceiver" android:exported="false" />
         <receiver android:name=".remind.BootReceiver" android:exported="true">
             <intent-filter>
