@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
@@ -61,11 +62,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.Instant
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Now
@@ -297,6 +302,8 @@ private fun TodayCard(repo: Repository, snapshot: Snapshot?, busy: Boolean, onRe
 }
 
 private const val PIN_COOLDOWN_MS = 2_000L
+private const val PIN_CHECK_DELAY_MS = 1_000L
+private const val MANUAL_ADD = "长按桌面空白处 → 小组件（OPPO / 一加是“卡片” → 拉到底“插件”）→ 找到“南财课表”。"
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -306,6 +313,11 @@ private fun WidgetCard() {
     // 桌面弹出确认框要几百毫秒，期间再点一下就会排进第二个请求；勾过“自动添加”或国产桌面直接添加时
     // 根本没有确认框，每点一下就多一个。所以几个按钮共用一个冷却，冷却内的点击直接忽略。
     var lastPinAt by remember { mutableLongStateOf(0L) }
+    // requestPinAppWidget 返回 true 只说明请求发出去了：ColorOS 等桌面会不声不响地拒掉。
+    // 所以点完等桌面的确认框关掉、回到这页，再数一下这种小组件多没多；没多就告诉用户手动加。
+    var showGuide by remember { mutableStateOf(false) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val scope = rememberCoroutineScope()
     Section("添加到桌面") {
         Hint("今天：正在上课倒计时下课、下一节倒计时上课；课上完预告下次上课。明天：明天的全部课。本周：学校课表的样子，每节课写准确的起止时间；本周（按时长）：课越长格子越高。都可以随意拉伸，本周建议 4×3 以上。")
         if (manager.isRequestPinAppWidgetSupported) {
@@ -320,14 +332,34 @@ private fun WidgetCard() {
                         val now = SystemClock.elapsedRealtime()
                         if (now - lastPinAt >= PIN_COOLDOWN_MS) {
                             lastPinAt = now
-                            manager.requestPinAppWidget(ComponentName(context, receiver), null, null)
+                            val provider = ComponentName(context, receiver)
+                            val before = manager.getAppWidgetIds(provider).size
+                            if (manager.requestPinAppWidget(provider, null, null)) {
+                                scope.launch {
+                                    delay(PIN_CHECK_DELAY_MS)
+                                    lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+                                    delay(PIN_CHECK_DELAY_MS)
+                                    if (manager.getAppWidgetIds(provider).size <= before) showGuide = true
+                                }
+                            } else {
+                                showGuide = true
+                            }
                         }
                     }) { Text("添加“$label”") }
                 }
             }
+            Hint("点了没反应的话：$MANUAL_ADD")
         } else {
-            Hint("这个桌面不支持一键添加：长按桌面空白处 → 小组件 → 找到“南财课表”。")
+            Hint("这个桌面不支持一键添加：$MANUAL_ADD")
         }
+    }
+    if (showGuide) {
+        AlertDialog(
+            onDismissRequest = { showGuide = false },
+            confirmButton = { TextButton(onClick = { showGuide = false }) { Text("知道了") } },
+            title = { Text("没加到桌面？") },
+            text = { Text("有的桌面（比如 OPPO、一加、vivo、华为）不让 App 直接添加小组件。请手动添加：$MANUAL_ADD") },
+        )
     }
 }
 
