@@ -243,6 +243,7 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
         "now": now.isoformat(timespec="seconds"),
         "semester": (view or {}).get("semester_name"),
         "semester_id": (view or {}).get("semester_id"),
+        "student": (view or {}).get("student") or {},
         "script_version": script_version,
         "updated_at": (view or {}).get("fetched_at"),
         "status": status,               # ok | error | captcha | needs_rebind：脚本据此提示“需要重新登录”

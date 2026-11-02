@@ -714,6 +714,15 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     _template, version = _widget_template()
     payload = widget.build(view, week1, status=user["status"], script_version=version,
                            changes=service.recent_changes(user["id"]))
+
+    # 只给打码地址：小组件链接是只读凭证，泄露时不应连完整邮箱一起暴露
+    try:
+        email = notify.snapshot(user["id"]).get("email")
+        payload["mail"] = {"bound": bool(email), "email": mailer.mask(email) if email else None}
+    except Exception as e:
+        log.warning("widget mail state failed for user %s: %s", user["id"], type(e).__name__)
+        payload["mail"] = {"bound": False, "email": None}
+
     try:
         payload["refresh"] = service.widget_refresh_state(user["id"])
     except Exception as e:
