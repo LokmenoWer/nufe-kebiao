@@ -97,6 +97,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -741,9 +742,6 @@ private fun HomeScreen(
                 showWheel = false
                 minutes = selected
                 repo.remindMinutes = selected
-                alarmEnabled = selected > 0
-                repo.alarmEnabled = alarmEnabled
-                if (!alarmEnabled) LiveUpdates.cancel(context)
                 Reminders.reschedule(context)
             },
         )
@@ -1123,6 +1121,7 @@ private fun ReminderSection(
     onLiveUpdateChange: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val manager = context.getSystemService(NotificationManager::class.java)
     var canNotify by remember { mutableStateOf(Reminders.canNotify(context)) }
     val permission = rememberLauncherForActivityResult(
@@ -1135,61 +1134,90 @@ private fun ReminderSection(
 
     SectionCard {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onPickTime),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(onClick = onPickTime),
-            ) {
-                Text("上课提醒", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Column(Modifier.weight(1f)) {
+                Text("上课前提示时间", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    if (!alarmEnabled || minutes == 0) "已关闭" else "选择提前时间：$minutes 分钟",
+                    if (minutes > 0) "提前 $minutes 分钟" else "未设置",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = alarmEnabled, onCheckedChange = onAlarmToggle)
-        }
-        if (!alarmEnabled) {
-            Spacer(Modifier.height(4.dp))
-            Hint("关闭后不会安排本地闹钟，也不会发提醒通知。")
-        }
-        if (Build.VERSION.SDK_INT >= 36) {
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 12.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("在${liveName}显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.height(2.dp))
-                    Hint("课前显示倒计时，上课 5 分钟后自动收起。")
-                }
-                Switch(
-                    checked = alarmEnabled && liveUpdate,
-                    onCheckedChange = onLiveUpdateChange,
-                    enabled = alarmEnabled,
-                )
+        }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = 12.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("闹钟上课提示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Hint("开启后会设置本地闹钟，在设定的时间响起。")
             }
-            if (liveUpdate && alarmEnabled && manager?.canPostPromotedNotifications() != true) {
-                Spacer(Modifier.height(6.dp))
-                Hint("系统还没允许本应用的${liveName}提醒；到系统设置 → 通知与控制中心 → $liveName 里允许。")
-                TextButton(
-                    onClick = {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                        )
+            Switch(
+                checked = alarmEnabled,
+                onCheckedChange = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    onAlarmToggle(it)
+                },
+            )
+        }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = 12.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("流体云显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Hint(
+                    if (Build.VERSION.SDK_INT >= 36) {
+                        "课前显示倒计时，上课 5 分钟后自动收起。"
+                    } else {
+                        "需要 Android 16 / ColorOS 16 或 HyperOS 3。"
                     },
-                    contentPadding = PaddingValues(0.dp),
-                ) { Text("去通知设置", fontSize = 12.sp) }
+                )
+                if (!alarmEnabled) {
+                    Spacer(Modifier.height(2.dp))
+                    Hint("开启“闹钟上课提示”后生效。")
+                }
             }
-        } else {
+            Switch(
+                checked = liveUpdate,
+                onCheckedChange = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    onLiveUpdateChange(it)
+                },
+                enabled = Build.VERSION.SDK_INT >= 36,
+            )
+        }
+        if (Build.VERSION.SDK_INT >= 36 && liveUpdate && alarmEnabled &&
+            manager?.canPostPromotedNotifications() != true
+        ) {
             Spacer(Modifier.height(6.dp))
-            Hint("系统实时提醒需要 Android 16 / ColorOS 16 或 HyperOS 3。")
+            Hint("系统还没允许本应用的${liveName}提醒；到系统设置 → 通知与控制中心 → $liveName 里允许。")
+            TextButton(
+                onClick = {
+                    context.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                    )
+                },
+                contentPadding = PaddingValues(0.dp),
+            ) { Text("去通知设置", fontSize = 12.sp) }
         }
         if (alarmEnabled && minutes > 0 && !canNotify && Build.VERSION.SDK_INT >= 33) {
             TextButton(
@@ -1544,10 +1572,12 @@ private fun GlassNav(selected: Tab, onSelect: (Tab) -> Unit, modifier: Modifier 
         ),
     )
     val scope = rememberCoroutineScope()
+    val view = LocalView.current
     val scale = remember { Animatable(1f) }
     var direction by remember { mutableIntStateOf(1) }
 
     fun select(item: Tab) {
+        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
         if (item != selected) {
             direction = if (item.ordinal > selected.ordinal) 1 else -1
         }
@@ -1668,13 +1698,14 @@ private fun TimeWheelDialog(
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit,
 ) {
-    val options = (listOf(0, 5, 10, 15, 20, 30) + initial).distinct().sorted()
-    var selected by remember { mutableIntStateOf(initial) }
+    val options = (1..60).toList()
+    val start = initial.coerceIn(1, 60)
+    var selected by remember { mutableIntStateOf(start) }
 
     PopupCard(onDismissRequest = onDismiss) {
-        Text("选择提前时间", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("上课前提示时间", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(2.dp))
-        Text("课前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
+        Text("提前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
         Spacer(Modifier.height(8.dp))
         AndroidView(
             factory = { ctx ->
@@ -1683,13 +1714,12 @@ private fun TimeWheelDialog(
                 ).apply {
                     minValue = 0
                     maxValue = options.lastIndex
-                    displayedValues = options.map {
-                        if (it == 0) "关闭" else "提前 $it 分钟"
-                    }.toTypedArray()
-                    value = options.indexOf(initial).coerceAtLeast(0)
+                    displayedValues = options.map { "提前 $it 分钟" }.toTypedArray()
+                    value = options.indexOf(start)
                     wrapSelectorWheel = true
                     descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                    setOnValueChangedListener { _, _, newValue ->
+                    setOnValueChangedListener { picker, _, newValue ->
+                        picker.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                         options.getOrNull(newValue)?.let { selected = it }
                     }
                 }
