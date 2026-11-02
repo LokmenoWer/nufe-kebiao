@@ -994,6 +994,17 @@ test("开了代抓：课前 37 分钟也重画一次，落在出门前的检查�
   assert.equal(W.nextRefreshMs(PAYLOAD, at1330), at1330.ms + 20 * 60000); // 13:50
 });
 
+test("服务器用 poll_after 定下次来问的时间：只在开了代抓时听，不会比 1 分钟更快", () => {
+  const at1200 = W.shanghaiNow(Date.UTC(2026, 9, 26, 4, 0)); // 12:00，12:15 下课还远
+  const on = { ...PAYLOAD, delegate: true };
+  assert.equal(W.nextRefreshMs({ ...on, poll_after: 300 }, at1200), at1200.ms + 5 * 60000);
+  assert.equal(W.nextRefreshMs({ ...on, poll_after: 5 }, at1200), at1200.ms + 60000);
+  assert.equal(W.nextRefreshMs({ ...PAYLOAD, poll_after: 300 }, at1200), W.nextRefreshMs(PAYLOAD, at1200));
+  for (const bad of [null, 0, -60, "x"]) {
+    assert.equal(W.nextRefreshMs({ ...on, poll_after: bad }, at1200), W.nextRefreshMs(on, at1200));
+  }
+});
+
 test("订阅到日历：链接换成 /calendar，ICS 地址换成 webcal://", () => {
   assert.equal(W.calendarUrl("https://k.example/widget/abc.json"), "https://k.example/widget/abc/calendar");
   assert.equal(W.webcalUrl("https://k.example/ics/xyz.ics"), "webcal://k.example/ics/xyz.ics");

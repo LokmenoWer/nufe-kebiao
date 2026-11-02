@@ -48,6 +48,9 @@ QUIET_END = (6, 30)                 # 北京时间 0:00 到这个时刻之间不
 WIDGET_GRACE_BASE = 45 * MINUTE
 WIDGET_GRACE_REQUESTED = 10 * MINUTE
 WIDGET_GRACE_CHECKPOINT_MARGIN = 2 * MINUTE   # 检查点到期前这么久还没等到手机，服务器自己刷
+WIDGET_POLL_MAX = 15 * MINUTE       # 快上课时小组件最多隔这么久来问一次（iOS 每天给的刷新次数有限，别处不缩短）
+WIDGET_POLL_NEAR_CLASS = 3 * HOUR   # 离下节课这么近才缩短
+WIDGET_POLL_MIN = MINUTE
 
 # 排队优先级：主动请求（打开了过期页面 / 同班同学课表变动）> 检查点 > 基础间隔
 REQUESTED_BOOST = 100.0
@@ -164,6 +167,19 @@ def reason(sig: Signals, now: float) -> str:
     if checks_before_class(sig, now) and sig.next_class_at:
         return f"{base}；每节课出门前再确认一次"
     return base
+
+
+def widget_poll_after(sig: Signals, now: float) -> float:
+    """告诉小组件多少秒后再来问：服务器叫不醒手机，只能由它定下次来的时间。
+
+    到下次该刷新时正好来取任务；离下节课 3 小时以内再限到最多 15 分钟一次，
+    中途排上的刷新（比如换了学期）也能很快交给手机。只是建议，实际时机由 iOS 决定。
+    """
+    wait = next_due(sig, now) - now
+    until_class = sig.next_class_at - now if sig.next_class_at else None
+    if until_class is not None and 0 < until_class <= WIDGET_POLL_NEAR_CLASS:
+        wait = min(wait, WIDGET_POLL_MAX)
+    return max(WIDGET_POLL_MIN, wait)
 
 
 def widget_grace_until(sig: Signals, now: float) -> float | None:

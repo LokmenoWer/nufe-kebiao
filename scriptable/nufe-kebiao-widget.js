@@ -596,7 +596,8 @@ function headerNote(payload, offline, day, family, extra = {}) {
 /**
  * 下次重画：最近的上下课时刻、服务器确认完下一节课之后（课前 25 分钟）、北京时间零点后一分钟、
  * 最多 30 分钟，取最早（至少 1 分钟后）。课表正在向学校拉取时改为大约 2 分钟后再看一眼。
- * 开了手机代抓（payload.delegate）时再加课前 37 分钟：落在检查窗口里，由手机自己去学校确认。
+ * 开了手机代抓（payload.delegate）时再加课前 37 分钟：落在检查窗口里，由手机自己去学校确认；
+ * 服务器还会用 poll_after（秒）说多久后再来问，到点来取代抓任务，快上课时最多 15 分钟一次。
  */
 function nextRefreshMs(payload, now) {
   const candidates = [now.ms + MAX_REDRAW_MS];
@@ -613,6 +614,8 @@ function nextRefreshMs(payload, now) {
   }
   const refresh = payload && payload.refresh;
   if (refresh && (refresh.pending || refresh.due)) candidates.push(now.ms + PENDING_REFRESH_MS);
+  const pollAfter = payload && payload.delegate ? Number(payload.poll_after) : 0;
+  if (pollAfter > 0) candidates.push(now.ms + pollAfter * 1000);
   return Math.max(now.ms + 60000, Math.min(...candidates));
 }
 

@@ -1842,6 +1842,13 @@ def _upload(path, body, **kw):
     return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
 
 
+def test_widget_feed_poll_after_only_when_delegating(widget_user, up):
+    c, path = widget_user
+    assert TestClient(app).get(path).json()["poll_after"] >= 60
+    service.set_widget_fetch(service_uid("2023001"), False)
+    assert TestClient(app).get(path).json()["poll_after"] is None
+
+
 def test_widget_delegated_fetch_roundtrip(widget_user, up):
     c, path = widget_user
     feed = TestClient(app).get(path)

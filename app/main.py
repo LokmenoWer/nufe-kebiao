@@ -727,6 +727,7 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     if task:
         payload["fetch"] = task
     payload["delegate"] = _widget_fetch_enabled(user["id"])
+    payload["poll_after"] = service.widget_poll_after(user["id"])
     # 正在排队 / 带着代抓任务（含 cookie）时不要缓存，两分钟后的重画必须打到服务器
     caching = "private, no-store" if payload["refresh"].get("pending") or task else "private, max-age=60"
     return JSONResponse(payload, headers={"Cache-Control": caching, **_WIDGET_HEADERS})
@@ -739,6 +740,7 @@ def _widget_payload(user) -> dict:
                            script_version=version, changes=service.recent_changes(user["id"]))
     payload["refresh"] = service.widget_refresh_state(user["id"])
     payload["delegate"] = _widget_fetch_enabled(user["id"])
+    payload["poll_after"] = service.widget_poll_after(user["id"])
     return payload
 
 
