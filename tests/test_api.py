@@ -202,6 +202,7 @@ def up(monkeypatch):
     db.init()
     with db.tx() as c:
         c.execute("DELETE FROM users")
+        c.execute("DELETE FROM semesters")  # 别让上一个用例写的开学日期漏到下一个
     service._locks.clear()
     service._pending.clear()
     service._completed.clear()
@@ -1496,6 +1497,9 @@ def test_opening_stale_page_queues_background_refresh(up):
 def test_widget_push_refresh(up):
     c = TestClient(app)
     _login(c, "2023001")
+    # 这里只测小组件主动刷新的排队语义：清掉“下一节课”，免得周一 07:40–07:50 撞上出门前检查点
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET next_class_at=NULL, next_class_slots='[]' WHERE student_id='2023001'")
     path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
     anon = TestClient(app)
 
