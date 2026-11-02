@@ -47,6 +47,10 @@ object LiveUpdates {
     private fun available(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 36) return false
         val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        if (!manager.areNotificationsEnabled()) return false
+        // 用户可能只关掉流体云通道：此时退回普通提醒通道
+        val channel = manager.getNotificationChannel(CHANNEL)
+        if (channel != null && channel.importance == NotificationManager.IMPORTANCE_NONE) return false
         return manager.canPostPromotedNotifications()
     }
 

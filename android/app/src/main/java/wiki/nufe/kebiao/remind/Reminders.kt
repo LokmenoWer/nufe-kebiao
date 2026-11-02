@@ -167,7 +167,9 @@ class ReminderReceiver : BroadcastReceiver() {
         if (!Reminders.canNotify(context)) return
         val at = intent.getLongExtra("at", 0L)
         val repo = Repository(context)
-        if (repo.liveUpdateEnabled && LiveUpdates.post(context, LiveUpdates.itemFrom(intent))) return
+        if (repo.liveUpdateEnabled &&
+            runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
+        ) return
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) return
         Reminders.ensureChannel(context)
