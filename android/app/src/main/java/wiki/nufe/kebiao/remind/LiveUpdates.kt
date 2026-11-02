@@ -126,23 +126,37 @@ object LiveUpdates {
             Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = Notification.Builder(context, CHANNEL)
+        val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle(title)
             .setContentText("${item.start}–${item.end} · $room$changed")
             .setSubText("南财课表 · 流体云提醒")
             .setContentIntent(open)
             .setOngoing(true)
-            .setRequestPromotedOngoing(true)
-            .setShortCriticalText(if (phase == Phase.BEFORE) "距上课" else "上课中")
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOnlyAlertOnce(true)
             .setStyle(progressStyle)
             .setWhen(if (phase == Phase.BEFORE) startMs else endMs)
             .setUsesChronometer(true)
             .setChronometerCountDown(true)
-            .build()
-        context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+        applyPromotedFlags(builder, if (phase == Phase.BEFORE) "距上课" else "上课中")
+        context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, builder.build())
+    }
+
+    /** HyperOS 的 API 36 框架可能没实现这两个方法，反射调用，缺失就跳过。 */
+    private fun applyPromotedFlags(builder: Notification.Builder, shortText: String) {
+        try {
+            Notification.Builder::class.java
+                .getMethod("setRequestPromotedOngoing", Boolean::class.javaPrimitiveType)
+                .invoke(builder, true)
+        } catch (_: Throwable) {
+        }
+        try {
+            Notification.Builder::class.java
+                .getMethod("setShortCriticalText", String::class.java)
+                .invoke(builder, shortText)
+        } catch (_: Throwable) {
+        }
     }
 
     private fun ensureChannel(context: Context) {

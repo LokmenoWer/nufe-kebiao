@@ -216,20 +216,21 @@ class LiveUpdateTestActivity : ComponentActivity() {
             .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notify))
             .setStyledByProgress(true)
 
-        val notification = Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle("流体云测试")
             .setContentText("正在上课 · 算法设计与分析")
             .setSubText("博远楼JC406 · 10:00–11:25")
             .setContentIntent(openAppIntent())
             .setOngoing(true)
-            .setRequestPromotedOngoing(true)
-            .setShortCriticalText("剩 ${formatRemaining(remainingMs)}")
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOnlyAlertOnce(true)
             .setStyle(style)
-            .build()
-        manager.notify(NOTIFICATION_ID, notification)
+            .setWhen(System.currentTimeMillis() + remainingMs)
+            .setUsesChronometer(true)
+            .setChronometerCountDown(true)
+        applyPromotedFlags(builder, "剩 ${formatRemaining(remainingMs)}")
+        manager.notify(NOTIFICATION_ID, builder.build())
     }
 
     private fun stopLiveUpdate(message: String) {
@@ -272,6 +273,22 @@ class LiveUpdateTestActivity : ComponentActivity() {
     private fun formatRemaining(ms: Long): String {
         val seconds = (ms / 1000).coerceAtLeast(0)
         return String.format(Locale.ROOT, "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    /** HyperOS 的 API 36 框架可能没实现这两个方法，反射调用，缺失就跳过。 */
+    private fun applyPromotedFlags(builder: Notification.Builder, shortText: String) {
+        try {
+            Notification.Builder::class.java
+                .getMethod("setRequestPromotedOngoing", Boolean::class.javaPrimitiveType)
+                .invoke(builder, true)
+        } catch (_: Throwable) {
+        }
+        try {
+            Notification.Builder::class.java
+                .getMethod("setShortCriticalText", String::class.java)
+                .invoke(builder, shortText)
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onDestroy() {
