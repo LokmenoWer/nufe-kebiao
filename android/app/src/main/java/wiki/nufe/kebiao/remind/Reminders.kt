@@ -35,7 +35,18 @@ object Reminders {
     private const val MIN_GAP_MS = 60_000L // 不足 1 分钟就开始的不再响
     private const val PREFS = "reminders"
 
-    data class Item(val atMs: Long, val title: String, val text: String)
+    data class Item(
+        val atMs: Long,
+        val title: String,
+        val text: String,
+        val date: String = "",
+        val start: String = "",
+        val end: String = "",
+        val name: String = "",
+        val room: String = "",
+        val changed: Boolean = false,
+        val was: String? = null,
+    )
 
     /** 未来几天有课的日子（去重）；今天 / 明天按缓存日期纠正，避免把昨天的“今天”排进提醒。 */
     private fun lessonDays(payload: Payload, now: Now): List<Day> {
@@ -63,7 +74,18 @@ object Reminders {
                 if (at - now.ms < MIN_GAP_MS) continue
                 val place = lesson.room.ifEmpty { "地点待定" }
                 val changed = if (lesson.changed) " · 已调课${lesson.was?.let { "（$it）" } ?: ""}" else ""
-                out += Item(at, "$lead 分钟后：${lesson.name}", "${lesson.start}–${lesson.end} · $place$changed")
+                out += Item(
+                    atMs = at,
+                    title = "$lead 分钟后：${lesson.name}",
+                    text = "${lesson.start}–${lesson.end} · $place$changed",
+                    date = day.date,
+                    start = lesson.start,
+                    end = lesson.end,
+                    name = lesson.name,
+                    room = place,
+                    changed = lesson.changed,
+                    was = lesson.was,
+                )
             }
         }
         return out.sortedBy { it.atMs }.take(MAX)
@@ -105,7 +127,16 @@ object Reminders {
     private fun pending(context: Context, index: Int, item: Item?): PendingIntent? {
         val intent = Intent(context, ReminderReceiver::class.java).setAction(ACTION)
         if (item != null) {
-            intent.putExtra("title", item.title).putExtra("text", item.text).putExtra("at", item.atMs)
+            intent.putExtra("title", item.title)
+                .putExtra("text", item.text)
+                .putExtra("at", item.atMs)
+                .putExtra("date", item.date)
+                .putExtra("start", item.start)
+                .putExtra("end", item.end)
+                .putExtra("name", item.name)
+                .putExtra("room", item.room)
+                .putExtra("changed", item.changed)
+                .putExtra("was", item.was)
         }
         val flags = PendingIntent.FLAG_IMMUTABLE or
             if (item == null) PendingIntent.FLAG_NO_CREATE else PendingIntent.FLAG_UPDATE_CURRENT
@@ -121,8 +152,22 @@ object Reminders {
 
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Reminders.ACTION || !Reminders.canNotify(context)) return
+        when (intent.action) {
+            LiveUpdates.ACTION_START -> {
+                if (Reminders.canNotify(context)) LiveUpdates.startClass(context, intent)
+                return
+            }
+            LiveUpdates.ACTION_END -> {
+                LiveUpdates.cancel(context)
+                return
+            }
+            Reminders.ACTION -> Unit
+            else -> return
+        }
+        if (!Reminders.canNotify(context)) return
         val at = intent.getLongExtra("at", 0L)
+        val repo = Repository(context)
+        if (repo.liveUpdateEnabled && LiveUpdates.post(context, LiveUpdates.itemFrom(intent))) return
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) return
         Reminders.ensureChannel(context)

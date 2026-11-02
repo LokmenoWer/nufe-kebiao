@@ -10,3 +10,6 @@ keystore.properties
 # 根目录的 data/、debug/ 是本地数据和调试输出；这里同名的是源码目录，要提交
 !app/src/main/java/wiki/nufe/kebiao/data/
 !app/src/debug/
+
+# 本地 OPPO 卡片 SDK：只在开发机使用，不随仓库分发
+SDK/

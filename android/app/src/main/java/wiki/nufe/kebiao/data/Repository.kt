@@ -33,6 +33,11 @@ class Repository(context: Context) {
         get() = prefs.getInt(KEY_REMIND, DEFAULT_REMIND_MINUTES)
         set(value) = prefs.edit().putInt(KEY_REMIND, value).apply()
 
+    /** 是否用 Android 16 Live Updates / ColorOS 流体云展示上课提醒。 */
+    var liveUpdateEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LIVE_UPDATE, false)
+        set(value) = prefs.edit().putBoolean(KEY_LIVE_UPDATE, value).apply()
+
     /** 本机缓存，没有就是 null。 */
     fun cached(): Snapshot? {
         if (!cacheFile.exists()) return null
@@ -88,6 +93,7 @@ class Repository(context: Context) {
     companion object {
         private const val KEY_URL = "widget_url"
         private const val KEY_REMIND = "remind_minutes"
+        private const val KEY_LIVE_UPDATE = "live_update_enabled"
         const val DEFAULT_REMIND_MINUTES = 10
 
         private val LINK = Regex("""^https?://[^\s]+/widget/[A-Za-z0-9_-]{16,128}\.json$""")

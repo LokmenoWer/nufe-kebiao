@@ -6,5 +6,9 @@
             android:name=".preview.WidgetPreviewActivity"
             android:exported="true"
             android:label="小组件预览" />
+        <activity
+            android:name=".preview.LiveUpdateTestActivity"
+            android:exported="true"
+            android:label="流体云测试" />
     </application>
 </manifest>

@@ -2,6 +2,7 @@ package wiki.nufe.kebiao.ui
 
 import android.Manifest
 import android.app.AlarmManager
+import android.app.NotificationManager
 import android.appwidget.AppWidgetManager
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -43,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -79,6 +81,7 @@ import wiki.nufe.kebiao.data.SHANGHAI
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.data.buildPlan
 import wiki.nufe.kebiao.data.headerNote
+import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.Sync
@@ -369,6 +372,11 @@ private fun ReminderCard(repo: Repository) {
     val context = LocalContext.current
     var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
     var canNotify by remember { mutableStateOf(Reminders.canNotify(context)) }
+    var liveUpdate by remember { mutableStateOf(repo.liveUpdateEnabled) }
+    val notificationManager = remember { context.getSystemService(NotificationManager::class.java) }
+    var canPromote by remember {
+        mutableStateOf(Build.VERSION.SDK_INT >= 36 && notificationManager?.canPostPromotedNotifications() == true)
+    }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         canNotify = granted
         Reminders.reschedule(context)
@@ -390,6 +398,30 @@ private fun ReminderCard(repo: Repository) {
                     label = { Text(if (m == 0) "关闭" else "提前 $m 分钟") },
                 )
             }
+        }
+        if (Build.VERSION.SDK_INT >= 36) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Switch(
+                    checked = liveUpdate,
+                    onCheckedChange = { checked ->
+                        liveUpdate = checked
+                        repo.liveUpdateEnabled = checked
+                        canPromote = notificationManager?.canPostPromotedNotifications() == true
+                        if (!checked) LiveUpdates.cancel(context)
+                        Reminders.reschedule(context)
+                    },
+                )
+                Text("在流体云显示上课提醒")
+            }
+            Hint(
+                if (canPromote) {
+                    "系统已允许本应用的流体云提醒；课前会显示倒计时卡片。"
+                } else {
+                    "需要到系统设置 → 通知与控制中心 → 流体云里允许本应用；否则会退回普通通知。"
+                },
+            )
+        } else {
+            Hint("流体云提醒需要 Android 16 / ColorOS 16。")
         }
         if (minutes > 0 && !canNotify && Build.VERSION.SDK_INT >= 33) {
             TextButton(onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("允许通知") }
