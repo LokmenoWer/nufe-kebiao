@@ -1377,7 +1377,10 @@ def test_widget_link_lifecycle(up):
     path = url.removeprefix("http://testserver")
     anon = TestClient(app)  # 链接本身就是凭证，不需要登录
     r = anon.get(path)
-    assert r.status_code == 200 and r.json()["v"] == 1 and r.json()["semester"] == "2026-2027-1"
+    payload = r.json()
+    assert r.status_code == 200 and payload["v"] == 1 and payload["semester"] == "2026-2027-1"
+    assert payload["student"] == {"name": "学生1", "code": "2023001"}
+    assert payload["mail"] == {"bound": False, "email": None}
     assert r.headers["x-robots-tag"].startswith("noindex") and "private" in r.headers["cache-control"]
     script = c.get("/api/widget/script")
     assert script.status_code == 200 and url in script.text and "__WIDGET_URL__" not in script.text
@@ -1388,6 +1391,17 @@ def test_widget_link_lifecycle(up):
     c.post("/api/widget/disable", headers=_csrf(c))
     assert anon.get(url2.removeprefix("http://testserver")).status_code == 404
     assert c.get("/api/me").json()["widget_url"] is None
+
+
+def test_widget_feed_returns_only_masked_email(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox, "Me.Name@Example.com")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    r = TestClient(app).get(path)
+    assert r.status_code == 200
+    assert r.json()["mail"] == {"bound": True, "email": "M***e@example.com"}
+    assert "Me.Name@example.com" not in r.text
 
 
 def test_widget_script_self_update_by_token(up):
