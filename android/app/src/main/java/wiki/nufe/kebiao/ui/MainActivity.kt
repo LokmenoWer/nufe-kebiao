@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
-import android.widget.NumberPicker
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -57,6 +56,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -86,6 +88,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -102,11 +105,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.lifecycle.Lifecycle
@@ -116,6 +119,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.LinkInvalidException
@@ -1698,7 +1702,6 @@ private fun TimeWheelDialog(
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit,
 ) {
-    val options = (1..60).toList()
     val start = initial.coerceIn(1, 60)
     var selected by remember { mutableIntStateOf(start) }
 
@@ -1707,31 +1710,7 @@ private fun TimeWheelDialog(
         Spacer(Modifier.height(2.dp))
         Text("提前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
         Spacer(Modifier.height(8.dp))
-        AndroidView(
-            factory = { ctx ->
-                NumberPicker(
-                    android.view.ContextThemeWrapper(ctx, android.R.style.Theme_Material_Light),
-                ).apply {
-                    minValue = 0
-                    maxValue = options.lastIndex
-                    displayedValues = options.map { "提前 $it 分钟" }.toTypedArray()
-                    value = options.indexOf(start)
-                    wrapSelectorWheel = true
-                    descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                    setOnValueChangedListener { picker, _, newValue ->
-                        picker.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-                        options.getOrNull(newValue)?.let { selected = it }
-                    }
-                }
-            },
-            update = { picker ->
-                val index = options.indexOf(selected)
-                if (index >= 0 && picker.value != index) picker.value = index
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(180.dp),
-        )
+        MinuteWheel(initial = start, onSelected = { selected = it })
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1750,6 +1729,68 @@ private fun TimeWheelDialog(
                 shape = RoundedCornerShape(14.dp),
             ) { Text("确定") }
         }
+    }
+}
+
+/** 数字单独滚动，“提前 / 分钟”固定；上下相邻数字按距离缩小、变淡并透视。 */
+@Composable
+private fun MinuteWheel(initial: Int, onSelected: (Int) -> Unit) {
+    val pager = rememberPagerState(initialPage = initial.coerceIn(1, 60) - 1, pageCount = { 60 })
+    val view = LocalView.current
+    var lastPage by remember { mutableIntStateOf(pager.currentPage) }
+    LaunchedEffect(pager) {
+        snapshotFlow { pager.currentPage }.collect { page ->
+            onSelected(page + 1)
+            if (page != lastPage) {
+                lastPage = page
+                view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+            }
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().height(220.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("提前", fontSize = 17.sp, color = Color(0xFF77777D))
+        Spacer(Modifier.width(14.dp))
+        Box(Modifier.width(84.dp).height(220.dp)) {
+            VerticalPager(
+                state = pager,
+                modifier = Modifier.fillMaxSize(),
+                pageSize = PageSize.Fixed(44.dp),
+                contentPadding = PaddingValues(vertical = 88.dp),
+                pageSpacing = 0.dp,
+            ) { page ->
+                val current = pager.currentPage + pager.currentPageOffsetFraction
+                val distance = abs(page - current)
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = (page + 1).toString(),
+                        fontSize = 30.sp,
+                        fontWeight = if (page == pager.currentPage) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (page == pager.currentPage) Color(0xFF111111) else Color(0xFF77777D),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.graphicsLayer {
+                            val p = distance.coerceAtMost(3f)
+                            alpha = (1f - p * 0.28f).coerceIn(0.15f, 1f)
+                            val scale = (1f - p * 0.16f).coerceIn(0.55f, 1f)
+                            scaleX = scale
+                            scaleY = scale
+                            rotationX = (page - current) * 12f
+                            transformOrigin = TransformOrigin(0.5f, 0.5f)
+                            cameraDistance = 24f * density
+                        },
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Text("分钟", fontSize = 17.sp, color = Color(0xFF77777D))
     }
 }
 
