@@ -21,6 +21,8 @@ data class Payload(
     val upcoming: Day?,
     val changedAt: Long?,
     val refresh: Refresh,
+    val student: StudentInfo?,
+    val mail: MailInfo?,
 ) {
     companion object {
         fun parse(text: String): Payload {
@@ -41,10 +43,39 @@ data class Payload(
                 refresh = o.optJSONObject("refresh").let {
                     Refresh(pending = it?.optBoolean("pending") == true, due = it?.optBoolean("due") == true)
                 },
+                student = o.optJSONObject("student")?.let(StudentInfo::parse)?.takeIf { it.hasData },
+                mail = o.optJSONObject("mail")?.let {
+                    MailInfo(bound = it.optBoolean("bound"), email = it.str("email"))
+                },
             )
         }
     }
 }
+
+data class StudentInfo(
+    val name: String?,
+    val code: String?,
+    val department: String?,
+    val major: String?,
+    val adminclass: String?,
+    val grade: String?,
+) {
+    val hasData get() = name != null || code != null || department != null ||
+        major != null || adminclass != null || grade != null
+
+    companion object {
+        fun parse(o: JSONObject) = StudentInfo(
+            name = o.str("name"),
+            code = o.str("code"),
+            department = o.str("department"),
+            major = o.str("major"),
+            adminclass = o.str("adminclass"),
+            grade = o.str("grade"),
+        )
+    }
+}
+
+data class MailInfo(val bound: Boolean, val email: String?)
 
 data class Day(
     val date: String,              // 2026-11-02
