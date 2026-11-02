@@ -2,4 +2,7 @@
 <resources>
     <color name="brand">#4B63E0</color>
     <color name="widget_bg">#F6F7FB</color>
+    <color name="widget_text">#1B1D23</color>
+    <color name="widget_sub">#6B7080</color>
+    <color name="widget_block">#DCE2FB</color>
 </resources>
