@@ -150,6 +150,13 @@ fun buildPlan(payload: Payload, tomorrowMode: Boolean, now: Now): DayPlan {
     )
 }
 
+/** 今天还有课就画今天；今天的课都结束（或今天没课）后，直接画明天的完整课表。 */
+fun buildTodayPlan(payload: Payload, now: Now): DayPlan {
+    val today = buildPlan(payload, tomorrowMode = false, now = now)
+    if (today.slots.isNotEmpty() || today.cancelled.isNotEmpty()) return today
+    return buildPlan(payload, tomorrowMode = true, now = now)
+}
+
 /** 周末本周剩下的日子都没课时改看下周。 */
 fun weekToShow(payload: Payload, now: Now): Pair<String, WeekBlock?> {
     val current = payload.week

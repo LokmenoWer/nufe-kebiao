@@ -132,10 +132,9 @@ import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.WEEKDAY
 import wiki.nufe.kebiao.data.annotate
-import wiki.nufe.kebiao.data.buildPlan
+import wiki.nufe.kebiao.data.buildTodayPlan
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
-import wiki.nufe.kebiao.data.resolveDays
 import wiki.nufe.kebiao.data.shortDate
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
@@ -689,7 +688,7 @@ private fun HomeScreen(
         }
     }
 
-    val plan = snapshot?.let { buildPlan(it.payload, false, now) }
+    val plan = snapshot?.let { buildTodayPlan(it.payload, now) }
     val changed = plan?.slots?.any { it.lesson.changed } == true || plan?.cancelled?.isNotEmpty() == true
     val note = snapshot?.let { headerNote(it, plan?.day, now, compact = false, changed = changed) }
 
@@ -812,21 +811,22 @@ private fun TodayCardView(
     onRefresh: () -> Unit,
     onOpenSite: () -> Unit,
 ) {
+    val tomorrow = plan?.title == "明天"
     var showAll by remember(plan?.day?.date) { mutableStateOf(false) }
-    val fullSlots = snapshot
-        ?.let { resolveDays(it.payload, now).first }
-        ?.let { annotate(it.lessons, now.minutes) }
+    val fullSlots = plan?.day
+        ?.let { if (tomorrow) annotate(it.lessons, -1, false) else annotate(it.lessons, now.minutes) }
         .orEmpty()
     val hiddenPast = fullSlots.count { it.state == State.PAST }
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("今天", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(plan?.title ?: "今天", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             plan?.day?.let {
                 Spacer(Modifier.width(8.dp))
                 Text(
                     "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}",
                     fontSize = 12.sp,
+                    maxLines = 1,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -844,7 +844,7 @@ private fun TodayCardView(
         if (plan != null && plan.slots.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
             Text(
-                "还有 ${plan.slots.size} 门课要上",
+                if (tomorrow) "明天还有 ${plan.slots.size} 门课" else "还有 ${plan.slots.size} 门课要上",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.primary,

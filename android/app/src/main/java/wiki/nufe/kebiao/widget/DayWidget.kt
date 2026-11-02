@@ -30,7 +30,7 @@ import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.WEEKDAY
-import wiki.nufe.kebiao.data.buildPlan
+import wiki.nufe.kebiao.data.buildTodayPlan
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
@@ -66,13 +66,6 @@ open class DayWidget : GlanceAppWidget() {
     }
 }
 
-/** 今天还有课就画今天；今天的课都结束（或今天没课）后，直接画明天的完整课表。 */
-private fun planForNow(payload: Payload, now: Now): DayPlan {
-    val today = buildPlan(payload, tomorrowMode = false, now = now)
-    if (today.slots.isNotEmpty() || today.cancelled.isNotEmpty()) return today
-    return buildPlan(payload, tomorrowMode = true, now = now)
-}
-
 /** Android 15+ 小组件选择器里的生成预览：不读账号数据，画一张稳定的示意卡片。 */
 @Composable
 private fun DayPreview(context: Context) {
@@ -106,7 +99,7 @@ private fun PreviewLesson(name: String, meta: String, color: String) {
 private fun DayContent(context: Context, data: WidgetData) {
     val snapshot = data.snapshot!!
     val now = Now.current()
-    val plan = planForNow(snapshot.payload, now)
+    val plan = buildTodayPlan(snapshot.payload, now)
     val size = LocalSize.current
     val small = size.width < 200.dp
     val changed = plan.slots.any { it.lesson.changed } || plan.cancelled.isNotEmpty()
