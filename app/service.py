@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -20,6 +21,8 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
+
+import requests
 
 from . import cas, crypto, db, ics, jwxt, notify, refresh_policy, widget
 from .config import (
@@ -459,7 +462,7 @@ def _complete_login(p: PendingLogin) -> int:
             else:
                 c.execute("UPDATE users SET cred_mode='cookie', enc_password=NULL, password_consent_at=NULL WHERE id=?",
                           (uid,))
-            _save_success(c, uid, s, data, "login")
+            _save_success(c, uid, dump_cookies(s), data, "login")
     return uid
 
 
@@ -613,19 +616,24 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
 
     try:
         with db.tx() as c:
-            changes = _save_success(c, uid, s, data, trigger)
+            changes = _save_success(c, uid, dump_cookies(s), data, trigger)
     except UserGone:
         return {"ok": False, "status": "deleted", "message": "账号已删除，请重新登录"}
-    if changes:
-        if trigger == "scheduled":
-            _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
-        try:
-            n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
-            if n:
-                log.info("user %s: timetable changed, asked %s classmates to refresh", uid, n)
-        except Exception as e:
-            log.warning("alert classmates failed for user %s: %s", uid, type(e).__name__)
+    _after_change(uid, trigger, changes)
     return {"ok": True}
+
+
+def _after_change(uid: int, trigger: str, changes: dict | None) -> None:
+    if not changes:
+        return
+    if trigger in ("scheduled", "widget"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
+        _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
+    try:
+        n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
+        if n:
+            log.info("user %s: timetable changed, asked %s classmates to refresh", uid, n)
+    except Exception as e:
+        log.warning("alert classmates failed for user %s: %s", uid, type(e).__name__)
 
 
 def _notify_safely(fn, *args) -> None:
@@ -644,6 +652,7 @@ NEXT_CLASS_LOOKAHEAD_DAYS = 60
 NEXT_CLASS_RECHECK = 6 * 3600   # 两个月内都没课时，隔这么久再按已存课表重算一次（校历可能改了）
 TOUCH_EVERY = 600               # 秒：last_seen_at 最多每 10 分钟写一次库
 CHANGE_KEEP = 5                 # 最多留几次调课记录给小组件标记
+_WIDGET_COLS = "widget_fetch, widget_fetch_ok_at, widget_fetch_fails, widget_fetch_pending_until"
 
 
 def signals_of(row, peer_checked_at: float | None = None) -> refresh_policy.Signals:
@@ -819,11 +828,214 @@ def push_widget_refresh(uid: int, now: float | None = None) -> dict:
     return widget_refresh_state(uid, now)
 
 
+# ---------- 小组件代抓：用手机自己的网络向教务要课表 ----------
+#
+# 网页里的脚本读不到学校的响应（学校不发 CORS 头），登录也只能在服务器上完成；但 Scriptable 的请求是原生的，
+# 不受这个限制。所以到期时把“去教务拿课表”这件事交给手机：服务器下发只含教务域 cookie 的任务
+# （统一身份认证的 CASTGC 不出服务器），手机抓完把原始页面和 print-data 传回来，由服务器照常解析入库。
+# 这样学校看到的是学生自己手机的 IP；手机做不了（会话过期、断网、没装小组件）时服务器照旧兜底。
+
+WIDGET_TASK_TTL = 300            # 秒：任务有效期，也是这段时间里服务器不抢着刷
+WIDGET_HEALTHY_FOR = 86400       # 这么久内代抓成功过、且之后没失败：到期后服务器先等手机
+WIDGET_COURSE_HTML_MAX = 1024 * 1024
+
+
+@dataclass
+class WidgetTask:
+    task_id: str
+    uid: int
+    semester_id: int
+    expires_at: float
+
+
+_widget_tasks: dict[str, WidgetTask] = {}
+_widget_tasks_lock = threading.Lock()
+
+
+class WidgetUploadRejected(Exception):
+    """上传的东西不能用（任务不对 / 过期 / 格式坏）：给脚本看的原因。"""
+
+
+def widget_fetch_healthy(row, now: float) -> bool:
+    return bool(row["widget_fetch"] and row["widget_fetch_ok_at"] and not row["widget_fetch_fails"]
+                and now - row["widget_fetch_ok_at"] < WIDGET_HEALTHY_FOR)
+
+
+def _jwxt_cookie_header(jar, url: str) -> str:
+    """按 url 算出浏览器会带的 Cookie 头；统一身份认证（authserver）的 cookie 本来就不匹配教务域名，这里再保险一次。"""
+    from requests.cookies import RequestsCookieJar, get_cookie_header
+    only = RequestsCookieJar()
+    for c in jar:
+        if c.name != "CASTGC" and c.domain.lstrip(".") != cas.AUTH_HOST:
+            only.set_cookie(c)
+    return get_cookie_header(only, requests.Request("GET", url).prepare()) or ""
+
+
+def widget_fetch_task(uid: int, now: float | None = None) -> dict | None:
+    """小组件来取数据时：这个人此刻需要刷新（已在排队）、允许代抓、有可用的教务 cookie，就发一个任务。
+
+    同一个人同时只有一个任务；还没过期的再来要就原样给（不顺延，免得坏掉的脚本一直挡着服务器）；
+    上一个任务没交回来就过期了，记一次代抓失败。
+    """
+    now = db.now() if now is None else now
+    row = db.connect().execute(
+        f"SELECT status, enc_cookies, current_semester_id, semesters_json, {_WIDGET_COLS} FROM users WHERE id=?",
+        (uid,)).fetchone()
+    if (not row or row["status"] != "ok" or not row["widget_fetch"] or not row["enc_cookies"]
+            or row["current_semester_id"] is None or not widget_refresh_state(uid, now)["pending"]):
+        return None
+    with _widget_tasks_lock:
+        mine = [t for t in _widget_tasks.values() if t.uid == uid]
+        for t in mine:
+            _widget_tasks.pop(t.task_id, None)
+        live = next((t for t in mine if t.expires_at > now), None)
+        lapsed = not live and bool(mine)
+    if lapsed:
+        _widget_fetch_failed(uid, "上次的代抓任务没有交回", fallback=False)
+    try:
+        cookies = crypto.decrypt_json(row["enc_cookies"], "cookies", uid)
+        s = requests.Session()
+        load_cookies(s, cookies)
+    except (crypto.CryptoError, TypeError, KeyError):
+        return None
+    sid = row["current_semester_id"]
+    urls = [("course", cas.COURSE_TABLE_URL), ("print", jwxt.print_data_url(sid))]
+    if not jwxt.week1_known(sid, [x for x in _json_list(row["semesters_json"]) if isinstance(x, dict)]):
+        urls.append(("detail", jwxt.semester_detail_url(sid)))
+    steps = [{"kind": kind, "url": url, "cookie": _jwxt_cookie_header(s.cookies, url)} for kind, url in urls]
+    if not steps[0]["cookie"]:
+        return None  # 没有教务会话（只剩 CASTGC）：续期只能服务器做
+    task = live or WidgetTask(secrets.token_urlsafe(18), uid, sid, now + WIDGET_TASK_TTL)
+    with _widget_tasks_lock:
+        _widget_tasks[task.task_id] = task
+    if not live:
+        with db.tx() as c:
+            c.execute("UPDATE users SET widget_fetch_pending_until=? WHERE id=?", (task.expires_at, uid))
+    return {"id": task.task_id, "expires_in": max(0, round(task.expires_at - now)), "steps": steps,
+            "headers": jwxt.PRINT_DATA_HEADERS, "login_hosts": [cas.AUTH_HOST]}
+
+
+def _widget_fetch_failed(uid: int, why: str, fallback: bool = True) -> None:
+    """代抓没成：记失败（之后到期不再等手机），需要的话立刻交给服务器刷。"""
+    log.info("user %s: widget fetch failed: %s", uid, why)
+    with db.tx() as c:
+        c.execute("""UPDATE users SET widget_fetch_fails=widget_fetch_fails+1, widget_fetch_pending_until=NULL
+                     WHERE id=?""", (uid,))
+        if fallback:
+            # 已经在排队的保持原样；没排的（比如任务签发后被别处刷过）就不必再刷
+            c.execute("UPDATE users SET refresh_request_reason=? WHERE id=? AND refresh_requested_at IS NOT NULL",
+                      (f"手机代抓未完成（{why}）", uid))
+
+
+def _take_widget_task(uid: int, task_id, now: float) -> WidgetTask:
+    if not isinstance(task_id, str):
+        raise WidgetUploadRejected("任务不存在")
+    with _widget_tasks_lock:
+        task = _widget_tasks.get(task_id)
+        if not task or task.uid != uid:
+            raise WidgetUploadRejected("任务不存在")
+        _widget_tasks.pop(task_id, None)
+    if task.expires_at <= now:
+        _widget_fetch_failed(uid, "任务已过期")
+        raise WidgetUploadRejected("任务已过期")
+    return task
+
+
+def _logged_out(url) -> bool:
+    if not isinstance(url, str):
+        return False
+    from urllib.parse import urlparse
+    return urlparse(url).hostname == cas.AUTH_HOST or cas.is_jw_login_url(url)
+
+
+def _merge_phone_cookies(cookies: list[dict], updates) -> list[dict]:
+    """手机收到的新 cookie 值：只更新已有的、教务域名下的同名 cookie，不接受新增名字或别的域名。"""
+    if not isinstance(updates, list):
+        return cookies
+    fresh = {}
+    for u in updates[:50]:
+        if (isinstance(u, dict) and isinstance(u.get("name"), str) and isinstance(u.get("value"), str)
+                and len(u["value"]) <= 4096):
+            fresh[u["name"]] = u["value"]
+    out = []
+    for c in cookies:
+        if (isinstance(c, dict) and c.get("name") in fresh and c.get("name") != "CASTGC"
+                and str(c.get("domain", "")).lstrip(".") == "jwxt.nufe.edu.cn"):
+            c = {**c, "value": fresh[c["name"]]}
+        out.append(c)
+    return out
+
+
+def accept_widget_upload(uid: int, body: dict, now: float | None = None) -> dict:
+    """手机交回代抓结果。成功就和服务器自己刷到的一样入库（trigger = widget）。"""
+    now = db.now() if now is None else now
+    task = _take_widget_task(uid, body.get("id"), now)
+    error = body.get("error")
+    if error or any(_logged_out(u) for u in (body.get("final_urls") or [])[:10]):
+        why = "教务登录态已过期" if error in (None, "expired") else "手机网络或学校出错"
+        _widget_fetch_failed(uid, why)
+        return {"ok": False, "status": "fallback", "message": why}
+    try:
+        html, raw = body.get("course_html"), body.get("print_data")
+        if not isinstance(html, str) or not isinstance(raw, str) or len(html) > WIDGET_COURSE_HTML_MAX:
+            raise ValueError("上传内容不完整")
+        page = jwxt.parse_course_page(html)
+        print_data = jwxt.parse_print_data(raw)
+        detail = None
+        if isinstance(body.get("detail"), str) and len(body["detail"]) < 64 * 1024:
+            with contextlib.suppress(ValueError):
+                detail = json.loads(body["detail"])
+    except ValueError as e:
+        _widget_fetch_failed(uid, type(e).__name__)
+        raise WidgetUploadRejected("上传的课表无法解析") from None
+    if page.current_semester_id != task.semester_id:
+        # 换学期了：课表页里的学期列表、校历都要重新拿，交给服务器
+        _widget_fetch_failed(uid, "当前学期已变化")
+        return {"ok": False, "status": "fallback", "message": "当前学期已变化"}
+    data = jwxt.build_timetable(page, task.semester_id, print_data, detail)
+
+    lock = _locks[uid]
+    if not lock.acquire(blocking=False):
+        return {"ok": False, "status": "busy", "message": "服务器正在刷新"}
+    try:
+        user = db.connect().execute("SELECT student_id, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+        if not user:
+            raise UserGone(uid)
+        code = str(data["student"].get("code") or "")
+        if code and code != user["student_id"]:
+            _widget_fetch_failed(uid, "学号不一致")
+            raise WidgetUploadRejected("课表不是本人的")
+        try:
+            cookies = crypto.decrypt_json(user["enc_cookies"], "cookies", uid) if user["enc_cookies"] else []
+        except crypto.CryptoError:
+            cookies = []
+        cookies = _merge_phone_cookies(cookies if isinstance(cookies, list) else [], body.get("set_cookies"))
+        with db.tx() as c:
+            changes = _save_success(c, uid, cookies, data, "widget")
+            c.execute("""UPDATE users SET widget_fetch_ok_at=?, widget_fetch_fails=0, widget_fetch_pending_until=NULL
+                         WHERE id=?""", (now, uid))
+    finally:
+        lock.release()
+    _after_change(uid, "widget", changes)
+    return {"ok": True}
+
+
+def set_widget_fetch(uid: int, enabled: bool) -> None:
+    with db.tx() as c:
+        c.execute("""UPDATE users SET widget_fetch=?, widget_fetch_fails=0, widget_fetch_pending_until=NULL
+                     WHERE id=?""", (1 if enabled else 0, uid))
+    if not enabled:
+        with _widget_tasks_lock:
+            for t in [t for t in _widget_tasks.values() if t.uid == uid]:
+                _widget_tasks.pop(t.task_id, None)
+
+
 def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, int]]:
     """该刷的人，按逾期程度从高到低：[(score, uid)]。顺带惰性重算过期的“下一节课”。"""
     now = db.now() if now is None else now
     conn = db.connect()
-    cols = f"id, status, next_refresh_at, next_class_checked_at, next_class_slots, current_semester_id, {_SIGNAL_COLS}"
+    cols = (f"id, status, next_refresh_at, next_class_checked_at, next_class_slots, current_semester_id, "
+            f"{_WIDGET_COLS}, {_SIGNAL_COLS}")
     rows = conn.execute(
         f"""SELECT {cols} FROM users
             WHERE status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?)""",
@@ -852,14 +1064,32 @@ def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, i
 
 
 def _score(conn, row, now: float) -> float:
-    """逾期程度。只有卡在检查点上的人才去查同班同学（一条按 slot 的索引查询）。"""
+    """逾期程度。只有卡在检查点上的人才去查同班同学（一条按 slot 的索引查询）。
+
+    手机正在代抓、或这个人的小组件最近都能代抓时，到期后先给手机留一段宽限（见 refresh_policy），
+    宽限内返回 0：服务器不碰学校。
+    """
     sig = signals_of(row)
     cp = refresh_policy.checkpoint(sig, now)
     if cp and now >= cp[0] and not refresh_policy.requested(sig):
         peer = _peer_checked_at(conn, row["id"], row["current_semester_id"], row["next_class_slots"])
         if peer:
             sig = signals_of(row, peer)
-    return refresh_policy.overdue(sig, now)
+    score = refresh_policy.overdue(sig, now)
+    if score >= 1 and _waiting_for_widget(row, sig, now):
+        return 0.0
+    return score
+
+
+def _waiting_for_widget(row, sig: refresh_policy.Signals, now: float) -> bool:
+    if not row["widget_fetch"]:
+        return False
+    if (row["widget_fetch_pending_until"] or 0) > now:
+        return True  # 任务刚交给手机，它正在向学校要
+    if not widget_fetch_healthy(row, now):
+        return False
+    grace = refresh_policy.widget_grace_until(sig, now)
+    return grace is not None and now < grace
 
 
 def still_due(uid: int, now: float | None = None) -> bool:
@@ -867,7 +1097,7 @@ def still_due(uid: int, now: float | None = None) -> bool:
     now = db.now() if now is None else now
     conn = db.connect()
     row = conn.execute(
-        f"""SELECT id, status, next_refresh_at, next_class_slots, current_semester_id, {_SIGNAL_COLS}
+        f"""SELECT id, status, next_refresh_at, next_class_slots, current_semester_id, {_WIDGET_COLS}, {_SIGNAL_COLS}
             FROM users WHERE id=?""", (uid,)).fetchone()
     if not row:
         return False
@@ -964,14 +1194,13 @@ def _old_activities(c, uid: int, semester_id) -> list | None:
     return acts if isinstance(acts, list) else None
 
 
-def _save_success(c, uid: int, s, data: dict, trigger: str) -> dict | None:
+def _save_success(c, uid: int, cookies: list[dict], data: dict, trigger: str) -> dict | None:
     """保存结果；返回课表变动 {"semester_name", "semester_id", "added", "removed", "old", "new"}
     （首次抓取或无变化时为 None）。added / removed 是给人看的行，old / new 是改动前后的排课本身。
     """
     now = db.now()
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         raise UserGone(uid)
-    cookies = dump_cookies(s)
     old = _old_activities(c, uid, data["semester_id"])
     _save_semester(c, data)
     c.execute(

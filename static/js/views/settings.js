@@ -145,6 +145,8 @@ export function openSettings({
 
   const widgetSection = createWidgetSection({
     widgetUrl: current.widget_url,
+    widgetFetch: current.widget_fetch !== false,
+    onFetchChange: (enabled) => { current.widget_fetch = enabled; },
     onChange: (url) => {
       current.widget_url = url;
       onUpdated?.(current);

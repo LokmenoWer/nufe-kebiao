@@ -19,7 +19,7 @@ async function copyFromRequest(textPromise) {
   await navigator.clipboard.writeText(await textPromise);
 }
 
-export function createWidgetSection({ widgetUrl, onChange } = {}) {
+export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, onFetchChange } = {}) {
   let url = widgetUrl || null;
 
   const status = h("p", { class: "hint", role: "status", "aria-live": "polite" });
@@ -28,6 +28,12 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     icon("copy"), h("span", {}, "复制脚本"));
   const rotateBtn = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => rotate() }, "重新生成");
   const disableBtn = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => disable() }, "停用");
+  const fetchToggle = h("input", { type: "checkbox", onChange: () => saveFetch() });
+  fetchToggle.checked = widgetFetch;
+  const fetchRow = h("label", { class: "check" }, fetchToggle,
+    h("span", {}, "用这台手机的网络直接向学校获取课表（推荐）",
+      h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件，"
+        + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新）")));
   const manual = h("textarea", {
     class: "widget-script", readonly: "", rows: "6", hidden: true, "aria-label": "小组件脚本，手动全选复制",
   });
@@ -45,8 +51,9 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     h("li", {}, "锁屏小组件同理，会显示下一节课和倒计时。"),
     h("li", {}, "上课提醒是手机本地通知（课程、时间、教室）。请打开 Scriptable 运行一次脚本并允许通知；"
       + "课表有变动后，再运行一次脚本就会按新课表重排。不要依赖桌面刷新去改通知。"),
-    h("li", {}, "课表过期，或下一节课在一个半小时内且数据已超过 15 分钟，小组件会请服务器向学校拉取。"
-      + "标题栏显示“更新中”，大约两分钟后再画一次。在 Scriptable 里运行脚本，选“刷新课表”可以马上排一次。"),
+    h("li", {}, "课表该更新时（每节课出门前也会确认一次），小组件会用手机的网络直接向学校拿课表；"
+      + "拿不到或关闭了这项时由服务器拉取，标题栏显示“更新中”，大约两分钟后再画一次。"
+      + "在 Scriptable 里运行脚本，选“刷新课表”可以马上更新。"),
     h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
 
   const el = h("div", { class: "widget-settings" },
@@ -54,6 +61,7 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
       + "课表过期或快上课时，小组件会主动请服务器更新，并在上课前发本地通知。"
       + "小组件用一条只读链接取数据，链接本身就是凭证，泄露后请重新生成。"),
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
+    fetchRow,
     manual,
     status,
     h("details", { class: "widget-help" }, h("summary", {}, "安装步骤"), steps));
@@ -63,6 +71,7 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
     copyBtn.hidden = !url;
     rotateBtn.hidden = !url;
     disableBtn.hidden = !url;
+    fetchRow.hidden = !url;
     if (!url) manual.hidden = true;
   }
 
@@ -111,6 +120,18 @@ export function createWidgetSection({ widgetUrl, onChange } = {}) {
       } catch (error) {
         status.textContent = error.message;
       }
+    }
+  }
+
+  async function saveFetch() {
+    const want = fetchToggle.checked;
+    try {
+      await api.post("api/widget/fetch-pref", { enabled: want });
+      onFetchChange?.(want);
+      status.textContent = want ? "已开启：小组件会用手机的网络向学校获取课表。" : "已关闭：课表改由服务器向学校获取。";
+    } catch (error) {
+      fetchToggle.checked = !want;
+      showToast(error.message, { type: "error" });
     }
   }
 

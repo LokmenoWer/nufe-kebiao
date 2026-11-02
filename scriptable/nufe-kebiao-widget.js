@@ -40,6 +40,9 @@ const REMIND_MIN_GAP_MS = 60 * 1000;
 const MAX_REDRAW_MS = 30 * 60000;      // 最长 30 分钟重画一次
 const PENDING_REFRESH_MS = 2 * 60000;  // 服务器正在拉课表：大约两分钟后再看
 const AFTER_CHECK_MINUTES = 25;        // 服务器在上课前 30 分钟确认课表，之后重画一次把结果画上
+const DELEGATE_CHECK_MINUTES = 37;     // 手机代抓：在出门前的检查窗口（课前 40–30 分钟）里自己向学校确认一次
+const DELEGATE_BUDGET_MS = 20000;      // 代抓总时长上限：小组件进程活不了太久，超时就交回服务器
+const DELEGATE_MAX_HOPS = 5;           // 代抓时一步最多跟几次跳转
 const WEEKDAY = ["", "一", "二", "三", "四", "五", "六", "日"];
 const FULL_GAP = 6;                    // 周视图 / 铺满：午休、傍晚这些没课的时段压成这么高的间隔
 const LABEL_H = 13;                    // 周视图 / 铺满：时间轴一个标签占的高度
@@ -593,6 +596,7 @@ function headerNote(payload, offline, day, family, extra = {}) {
 /**
  * 下次重画：最近的上下课时刻、服务器确认完下一节课之后（课前 25 分钟）、北京时间零点后一分钟、
  * 最多 30 分钟，取最早（至少 1 分钟后）。课表正在向学校拉取时改为大约 2 分钟后再看一眼。
+ * 开了手机代抓（payload.delegate）时再加课前 37 分钟：落在检查窗口里，由手机自己去学校确认。
  */
 function nextRefreshMs(payload, now) {
   const candidates = [now.ms + MAX_REDRAW_MS];
@@ -601,7 +605,9 @@ function nextRefreshMs(payload, now) {
   const { today } = resolveDays(payload, now);
   for (const lesson of (today && today.lessons) || []) {
     const start = toMinutes(lesson.start);
-    for (const t of [start - AFTER_CHECK_MINUTES, start, toMinutes(lesson.end)]) {
+    const marks = [start - AFTER_CHECK_MINUTES, start, toMinutes(lesson.end)];
+    if (payload.delegate) marks.push(start - DELEGATE_CHECK_MINUTES);
+    for (const t of marks) {
       if (t > now.minutes) candidates.push(now.ms + (t - now.minutes) * 60000);
     }
   }
@@ -1468,10 +1474,168 @@ async function readFeed(url) {
   return { data };
 }
 
+// ---- 手机代抓：用这台手机的网络向教务要课表，交给服务器解析 ----
+//
+// 服务器到期时在 JSON 里带一个 fetch 任务（只有教务域名的 cookie，统一身份认证的凭据不下发）。
+// 这样学校看到的是你自己手机的 IP，本站服务器少访问学校；任何一步不顺就如实上报，由服务器兜底。
+
+function uploadUrl(url) {
+  return String(url).replace(/\.json(\?.*)?$/, "/upload");
+}
+
+/** 被踢回统一身份认证或教务自己的登录页：教务会话过期了，续期只能服务器做。 */
+function isLoginUrl(url, hosts) {
+  const m = /^https?:\/\/([^/:?#]+)(?::\d+)?([^?#]*)/i.exec(String(url || ""));
+  if (!m) return false;
+  const host = m[1].toLowerCase();
+  const path = (m[2] || "/").replace(/\/+$/, "");
+  return (hosts || []).includes(host) || (host === "jwxt.nufe.edu.cn" && path === "/student/login");
+}
+
+/** 只往教务发：任务地址和每一跳都得是 https://jwxt.nufe.edu.cn，cookie 不会被带到别处。 */
+function jwxtUrl(url) {
+  return /^https:\/\/jwxt\.nufe\.edu\.cn(?:[/?][^\s\\#]*)?$/i.test(String(url || ""));
+}
+
+/** 把 Location 解析成绝对地址（学校常回相对路径）。 */
+function resolveLocation(base, loc) {
+  const s = String(loc || "").trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;
+  if (s.startsWith("//")) return `https:${s}`;
+  const origin = (/^https?:\/\/[^/?#]+/i.exec(String(base)) || [""])[0];
+  const path = String(base).slice(origin.length).split(/[?#]/)[0] || "/";
+  if (s.startsWith("/")) return origin + s;
+  if (s.startsWith("?")) return origin + path + s;
+  return origin + path.replace(/[^/]*$/, "") + s;
+}
+
+function cookieMap(header) {
+  const jar = new Map();
+  for (const part of String(header || "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0) jar.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
+  return jar;
+}
+
+function headerValue(headers, name) {
+  const key = Object.keys(headers || {}).find((k) => k.toLowerCase() === name);
+  return key ? headers[key] : null;
+}
+
+/**
+ * Request 的 timeoutInterval 只管网络空闲，学校慢慢吐数据时能一直拖下去，
+ * 拖过小组件进程的时限就整个被系统杀掉；这里按剩余预算硬性截断。
+ */
+function bounded(promise, ms) {
+  if (typeof Timer === "undefined" || !Timer || !Timer.schedule) return promise;
+  let timer = null;
+  const alarm = new Promise((_, reject) => {
+    timer = Timer.schedule(Math.max(0, ms), false, () => {
+      const e = new Error("budget");
+      e.budget = true;
+      reject(e);
+    });
+  });
+  promise.catch(() => {}); // 被截断后迟到的失败不再有人等
+  return Promise.race([promise, alarm]).finally(() => {
+    if (timer && typeof timer.invalidate === "function") timer.invalidate();
+  });
+}
+
+async function delegatedFetch(task, clock = () => Date.now()) {
+  const started = clock();
+  const out = { id: task.id, final_urls: [], set_cookies: [] };
+  const fresh = new Map(); // 这次学校新发的 cookie，后面的请求接着带
+  const fail = (error) => ({ id: task.id, error });
+  try {
+    for (const step of task.steps || []) {
+      let url = step.url;
+      let res = {};
+      let text = "";
+      // 跳转自己跟：每一跳先查目的地、再带上最新的 cookie，不依赖 Scriptable 改写跳转请求
+      for (let hop = 0; ; hop++) {
+        if (isLoginUrl(url, task.login_hosts)) return fail("expired");
+        if (!jwxtUrl(url)) return fail("blocked");
+        if (hop > DELEGATE_MAX_HOPS) return fail("redirect");
+        const left = DELEGATE_BUDGET_MS - (clock() - started);
+        if (left <= 0) return fail("timeout");
+        const jar = cookieMap(step.cookie);
+        for (const [k, v] of fresh) jar.set(k, v);
+        const req = new Request(url);
+        req.timeoutInterval = 8;
+        req.headers = { ...(task.headers || {}), Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") };
+        let target = null;
+        req.onRedirect = (next) => {
+          target = next && next.url;
+          return null;
+        };
+        text = await bounded(req.loadString(), left);
+        res = req.response || {};
+        for (const c of res.cookies || []) {
+          if (!c || !c.name) continue;
+          const domain = String(c.domain || "").replace(/^\./, "").toLowerCase();
+          if (domain && domain !== "jwxt.nufe.edu.cn") continue;
+          const value = String(c.value == null ? "" : c.value);
+          fresh.set(String(c.name), value);
+          out.set_cookies.push({ name: String(c.name), value });
+        }
+        const code = res.statusCode || 200;
+        if (code < 300 || code >= 400) break;
+        const loc = target || headerValue(res.headers, "location");
+        if (!loc) return fail(`http_${code}`);
+        url = resolveLocation(url, loc);
+      }
+      if (isLoginUrl(res.url, task.login_hosts)) return fail("expired");
+      if (res.statusCode >= 400) {
+        if (step.kind === "detail") continue; // 学期详情只是校历兜底，拿不到不要紧
+        return fail(`http_${res.statusCode}`);
+      }
+      out.final_urls.push(res.url || url);
+      if (step.kind === "course") out.course_html = text;
+      else if (step.kind === "print") out.print_data = text;
+      else if (step.kind === "detail") out.detail = text;
+    }
+  } catch (e) {
+    return fail(e && e.budget ? "timeout" : "network");
+  }
+  return out;
+}
+
+/** 交回结果；服务器回的是最新的小组件数据（入库失败、交给服务器兜底时也照样给）。 */
+async function uploadFetch(result) {
+  const req = new Request(uploadUrl(WIDGET_URL));
+  req.method = "POST";
+  req.timeoutInterval = 15;
+  req.headers = { "Content-Type": "application/json" };
+  req.body = JSON.stringify(result);
+  const text = await req.loadString();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+  return data && data.widget && data.widget.v === 1 ? data.widget : null;
+}
+
+/** 有代抓任务就做；返回要用的数据（任务本身含 cookie，绝不写进缓存）。 */
+async function withDelegation(data) {
+  const task = data.fetch;
+  delete data.fetch;
+  if (!task || !task.id) return data;
+  try {
+    return (await uploadFetch(await delegatedFetch(task))) || data;
+  } catch (_) {
+    return data;
+  }
+}
+
 async function load() {
   try {
     const got = await readFeed(WIDGET_URL);
     if (got.error) return got;
+    got.data = await withDelegation(got.data);
     writeJsonFile(CACHE_FILE(), got.data);
     return { data: got.data, offline: false };
   } catch (_) {
@@ -1552,10 +1716,14 @@ async function say(title, message) {
 async function refreshNow() {
   const got = await readFeed(refreshUrl(WIDGET_URL));
   if (got.error) throw new Error(got.error);
+  const delegated = Boolean(got.data.fetch);
+  got.data = await withDelegation(got.data);
   writeJsonFile(CACHE_FILE(), got.data);
   const refresh = got.data.refresh || {};
   if (got.data.status && got.data.status !== "ok") {
     await say("需要重新登录", "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。");
+  } else if (delegated && !refresh.pending) {
+    await say("已更新", "这台手机刚从学校拿到了最新课表。");
   } else if (refresh.pending) {
     await say("已安排刷新", "正在向学校拉取课表，小组件大约两分钟后会换成新的。");
   } else if (refresh.fresh) {
@@ -1687,7 +1855,7 @@ if (typeof ListWidget === "undefined") {
     SCRIPT_VERSION, parseMode, parseParam, remindLead, shanghaiNow, lessonDate, daysBetween, isOutdated, cacheName, siteLink,
     resolveDays, annotate, cancelledOn, termState, buildPlan, weekToShow, weekColumns, widgetSizeFor, unitRange, gridLayout, textWidth, lineHeight, chipNeed, fitRoom, splitRoom, linesNeeded, chipPlan, showsChanges, planHasChanges,
     needsReminderResync, headerNote, nextRefreshMs, lessonDays, refreshUrl, reminderPlan, reminderDiff,
-    calendarUrl, webcalUrl,
+    uploadUrl, calendarUrl, webcalUrl, isLoginUrl, jwxtUrl, resolveLocation, delegatedFetch,
   };
 } else {
   main().catch((e) => {

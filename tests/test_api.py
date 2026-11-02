@@ -1428,6 +1428,12 @@ def test_widget_calendar_subscription(up):
     assert anon.post(cal).json()["ics_url"] == rotated
     assert anon.get(cal).status_code == 405
     assert anon.post("/widget/nope/calendar").status_code == 404
+    # 浏览器从别站发起仍按非法来源拒绝
+    assert anon.post(cal, headers={"Origin": "https://evil.example"}).status_code == 403
+    # 停用后再点：重新生成一个新的
+    c.post("/api/ics/disable", headers=_csrf(c))
+    again = anon.post(cal).json()["ics_url"]
+    assert again != rotated and c.get("/api/me").json()["ics_url"] == again
 
 
 def test_widget_requires_login_and_reports_status(up):
@@ -1788,6 +1794,177 @@ def test_admin_password_hash_roundtrip():
     assert not admin.verify_password("wrong", stored)
     assert not admin.verify_password("x", "garbage")
     assert admin.mask_id("2023012345") == "2023****45"
+
+
+# ---------- 小组件代抓：手机用自己的网络向教务要课表 ----------
+
+COURSE_HTML = ('<script>var personId = 1; var currentSemester = {"id": 161, "nameZh": "x"};</script>'
+               '<select id="allSemesters"><option value="161">2026-2027-1</option></select>')
+
+
+def _print_data(code="2023001", room="B202"):
+    import json as _json
+    return _json.dumps({"studentTableVms": [{"name": "学生1", "code": code, "activities": [{
+        "courseName": "高数", "teachers": [{"name": "T"}], "weekday": 1, "startUnit": 1, "endUnit": 2,
+        "weeksStr": "1~16", "weekIndexes": list(range(1, 17)), "room": room, "startTime": "8:20", "endTime": "9:45"}]}]})
+
+
+def _jar(sid):
+    from app import crypto
+    uid = service_uid(sid)
+    row = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+    return crypto.decrypt_json(row["enc_cookies"], "cookies", uid)
+
+
+def _give_jwxt_session(sid, value="jw-1"):
+    from app import crypto
+    uid = service_uid(sid)
+    jar = [c for c in _jar(sid) if c["name"] != "SESSION"] + [
+        {"name": "SESSION", "value": value, "domain": "jwxt.nufe.edu.cn", "path": "/student", "secure": True,
+         "expires": None}]
+    with db.tx() as c:
+        c.execute("UPDATE users SET enc_cookies=? WHERE id=?", (crypto.encrypt_json(jar, "cookies", uid), uid))
+
+
+@pytest.fixture
+def widget_user(up):
+    service._widget_tasks.clear()
+    c = TestClient(app)
+    _login(c, "2023001")
+    _give_jwxt_session("2023001")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    with db.tx() as conn:  # 数据早就过期了：打开小组件就该刷新
+        conn.execute("UPDATE users SET last_success_at=? WHERE student_id='2023001'", (db.now() - 30 * 86400,))
+    return c, path
+
+
+def _upload(path, body, **kw):
+    return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
+
+
+def test_widget_delegated_fetch_roundtrip(widget_user, up):
+    c, path = widget_user
+    feed = TestClient(app).get(path)
+    data = feed.json()
+    task = data["fetch"]
+    assert data["delegate"] is True and data["refresh"]["pending"] is True
+    assert "no-store" in feed.headers["cache-control"]
+    # 只下发教务域名的 cookie：统一身份认证的 CASTGC 不出服务器
+    assert "tgc-" not in feed.text and "CASTGC" not in feed.text
+    assert [s["kind"] for s in task["steps"]][:2] == ["course", "print"]
+    assert all(s["cookie"] == "SESSION=jw-1" for s in task["steps"])
+    assert "/semester/161/print-data" in task["steps"][1]["url"]
+    # 还没交回来时再来要：同一个任务，不顺延
+    assert TestClient(app).get(path).json()["fetch"]["id"] == task["id"]
+    # 手机抓着的时候服务器不抢
+    uid = service_uid("2023001")
+    assert uid not in [u for _s, u in service.candidates()]
+
+    fetches = up.fetches
+    r = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data(),
+                       "final_urls": ["https://jwxt.nufe.edu.cn/student/for-std/course-table"],
+                       "set_cookies": [{"name": "SESSION", "value": "jw-2"}, {"name": "EVIL", "value": "x"}]})
+    out = r.json()
+    assert r.status_code == 200 and out["ok"] is True, out
+    assert out["widget"]["v"] == 1 and out["widget"]["refresh"]["pending"] is False
+    assert up.fetches == fetches  # 服务器没有访问学校
+    assert c.get("/api/timetable").json()["activities"][0]["room"] == "B202"
+    assert db.connect().execute("SELECT trigger, ok FROM refresh_log WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                                (uid,)).fetchone()[:] == ("widget", 1)
+    row = _row("2023001", "widget_fetch_ok_at, widget_fetch_fails, widget_fetch_pending_until")
+    assert row[0] and row[1] == 0 and row[2] is None
+    # cookie：已有的教务 cookie 换成新值；没见过的名字不收；CASTGC 原样
+    jar = {x["name"]: x["value"] for x in _jar("2023001")}
+    assert jar["SESSION"] == "jw-2" and "EVIL" not in jar and jar["CASTGC"] == "tgc-2023001"
+    # 同一个任务只能交一次
+    again = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data()})
+    assert again.status_code == 400
+    # 刚更新过：不再发任务
+    assert "fetch" not in TestClient(app).get(path).json()
+
+
+def test_widget_upload_expired_session_falls_back_to_server(widget_user, up):
+    _c, path = widget_user
+    task = TestClient(app).get(path).json()["fetch"]
+    r = _upload(path, {"id": task["id"], "final_urls": ["https://authserver.nufe.edu.cn/authserver/login?service=x"]})
+    assert r.json()["status"] == "fallback" and r.json()["widget"]["refresh"]["pending"] is True
+    assert _row("2023001", "widget_fetch_fails")[0] == 1
+    # 交给服务器：调度器马上就会选中他
+    assert service_uid("2023001") in [u for _s, u in service.candidates()]
+    fetches = up.fetches
+    scheduler.run_once()
+    assert up.fetches == fetches + 1 and _row("2023001", "status")[0] == "ok"
+
+
+def test_widget_upload_rejections(widget_user, up):
+    _c, path = widget_user
+    task = TestClient(app).get(path).json()["fetch"]
+    assert _upload(path, {"id": "nope"}).status_code == 400
+    assert _upload(path, {"id": task["id"]}, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert TestClient(app).post("/widget/nope/upload", json={"id": task["id"]}).status_code == 404
+    big = TestClient(app).post(path.removesuffix(".json") + "/upload", content=b"x" * (5 * 1024 * 1024),
+                               headers={"Content-Type": "application/json"})
+    assert big.status_code == 413
+    # 解析不了：拒绝并交给服务器
+    bad = _upload(path, {"id": task["id"], "course_html": "<html>login</html>", "print_data": _print_data()})
+    assert bad.status_code == 400 and _row("2023001", "widget_fetch_fails")[0] == 1
+    # 别人的课表
+    task = TestClient(app).get(path).json()["fetch"]
+    other = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data(code="2023999")})
+    assert other.status_code == 400
+    assert c_room(_c) == "A101"
+
+
+def c_room(client):
+    return client.get("/api/timetable").json()["activities"][0]["room"]
+
+
+def test_scheduler_waits_for_healthy_widget(widget_user, up):
+    uid = service_uid("2023001")
+    now = db.now()
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_success_at=?, refresh_requested_at=?, refresh_request_reason='x' WHERE id=?",
+                     (now - 3600, now - 60, uid))
+    due = lambda: uid in [u for _s, u in service.candidates(now)]  # noqa: E731
+    assert due()  # 从没代抓成功过：服务器照常刷
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET widget_fetch_ok_at=? WHERE id=?", (now - 600, uid))
+    assert not due() and not service.still_due(uid, now)  # 小组件最近都能代抓：请求后先等它 10 分钟
+    assert due() is False and uid in [u for _s, u in service.candidates(now + 700)]
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET widget_fetch_fails=1 WHERE id=?", (uid,))
+    assert due()  # 上次失败了：不等
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET widget_fetch_fails=0, widget_fetch=0 WHERE id=?", (uid,))
+    assert due()  # 用户关掉了
+
+
+def test_widget_fetch_pref(widget_user, up):
+    c, path = widget_user
+    assert c.get("/api/me").json()["widget_fetch"] is True
+    assert c.post("/api/widget/fetch-pref", headers=_csrf(c), json={"enabled": False}).json() == {"widget_fetch": False}
+    data = TestClient(app).get(path).json()
+    assert "fetch" not in data and data["delegate"] is False and data["refresh"]["pending"] is True
+    assert c.get("/api/me").json()["widget_fetch"] is False
+    assert c.post("/api/widget/fetch-pref", headers=ORIGIN, json={"enabled": True}).status_code == 403
+
+
+def test_widget_task_lapses_count_as_failure(widget_user, up):
+    _c, path = widget_user
+    task = TestClient(app).get(path).json()["fetch"]
+    service._widget_tasks[task["id"]].expires_at = db.now() - 1
+    assert TestClient(app).get(path).json()["fetch"]["id"] != task["id"]
+    assert _row("2023001", "widget_fetch_fails")[0] == 1
+
+
+def test_widget_no_task_without_jwxt_session(up):
+    service._widget_tasks.clear()
+    c = TestClient(app)
+    _login(c, "2023001")  # 只有 CASTGC：续期只能服务器做
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_success_at=? WHERE student_id='2023001'", (db.now() - 30 * 86400,))
+    assert "fetch" not in TestClient(app).get(path).json()
 
 
 def _qr_login(sid):

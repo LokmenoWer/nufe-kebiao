@@ -44,6 +44,11 @@ NO_CLASS_HORIZON = 7 * DAY
 NO_CLASS_INTERVAL = 24 * HOUR
 QUIET_END = (6, 30)                 # 北京时间 0:00 到这个时刻之间不做基础刷新
 
+# 小组件代抓：手机最近能代抓时，到期后服务器先等它这么久再自己动手
+WIDGET_GRACE_BASE = 45 * MINUTE
+WIDGET_GRACE_REQUESTED = 10 * MINUTE
+WIDGET_GRACE_CHECKPOINT_MARGIN = 2 * MINUTE   # 检查点到期前这么久还没等到手机，服务器自己刷
+
 # 排队优先级：主动请求（打开了过期页面 / 同班同学课表变动）> 检查点 > 基础间隔
 REQUESTED_BOOST = 100.0
 CHECKPOINT_BOOST = 10.0
@@ -159,3 +164,21 @@ def reason(sig: Signals, now: float) -> str:
     if checks_before_class(sig, now) and sig.next_class_at:
         return f"{base}；每节课出门前再确认一次"
     return base
+
+
+def widget_grace_until(sig: Signals, now: float) -> float | None:
+    """该刷了的时候，最多等手机代抓到什么时刻；None = 不等（从没成功过、还没到期）。
+
+    - 主动请求：请求后 10 分钟；
+    - 出门前检查点：窗口打开后一直等到检查点前 2 分钟；
+    - 基础间隔：到期后 45 分钟。
+    """
+    if not sig.last_success_at:
+        return None
+    if requested(sig):
+        return sig.refresh_requested_at + WIDGET_GRACE_REQUESTED
+    cp = checkpoint(sig, now)
+    if cp and now >= cp[0]:
+        return max(cp[0], cp[1] - WIDGET_GRACE_CHECKPOINT_MARGIN)
+    due = _base_due(sig, now)
+    return due + WIDGET_GRACE_BASE if now >= due else None

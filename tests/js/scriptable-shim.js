@@ -155,6 +155,9 @@ export async function runWidgetScript({
   payload, status = 200, family = "medium", parameter = "", url, nowMs, fail = false, cache,
   inApp = false, choose = [], scriptBody, scriptStatus = 200, pending = [], version = "sha-000000000001",
   screen = { width: 393, height: 852 },
+  // 手机代抓：jwxt(url) → { status, body, url, cookies, redirect, hang }；upload(body) → 服务器回的 JSON
+  // budgetMs：Timer 到点前的真实等待（默认按脚本给的毫秒数）
+  jwxt, upload, budgetMs,
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
@@ -165,14 +168,41 @@ export async function runWidgetScript({
   const finished = new Promise((resolve) => { done = resolve; });
 
   const requests = [];
+  const uploads = [];
+  const school = [];
   class Request {
     constructor(u) {
       this.url = u;
+      this.method = "GET";
       requests.push(u);
     }
 
     async loadString() {
       if (fail) throw new Error("offline");
+      if (String(this.url).endsWith("/upload")) {
+        const body = JSON.parse(this.body);
+        uploads.push({ body, headers: this.headers, method: this.method });
+        this.response = { statusCode: 200 };
+        return JSON.stringify(upload ? upload(body) : { ok: true });
+      }
+      if (String(this.url).includes("nufe.edu.cn")) {
+        school.push({ url: this.url, headers: this.headers });
+        const got = jwxt ? jwxt(this.url) : { status: 200, body: "" };
+        if (got.throws) throw new Error(got.throws);
+        if (got.hang) return new Promise(() => {});
+        if (got.redirect) {
+          // 和真机一样：onRedirect 返回 null 就停在这次 3xx 上，Location 在响应头里
+          const next = this.onRedirect ? this.onRedirect({ url: got.redirect, headers: {} }) : null;
+          if (!next) {
+            this.response = {
+              statusCode: got.status || 302, url: this.url, headers: { Location: got.redirect }, cookies: got.cookies || [],
+            };
+            return "";
+          }
+        }
+        this.response = { statusCode: got.status || 200, url: got.url || this.url, cookies: got.cookies || [] };
+        return got.body || "";
+      }
       if (String(this.url).endsWith(".js")) {
         this.response = { statusCode: scriptStatus };
         return scriptBody;
@@ -286,6 +316,12 @@ export async function runWidgetScript({
 
   const context = {
     ListWidget, Color, Font, Size, Request, Notification,
+    Timer: {
+      schedule: (ms, _repeats, cb) => {
+        const h = setTimeout(cb, budgetMs ?? ms);
+        return { invalidate: () => clearTimeout(h) };
+      },
+    },
     FileManager: { local: () => fm, iCloud: () => { throw new Error("iCloud disabled"); } },
     Alert,
     Device: { screenSize: () => ({ ...screen }) },
@@ -305,5 +341,5 @@ export async function runWidgetScript({
   context.globalThis = context;
   vm.runInNewContext(source, context);
   await finished;
-  return { widget: result, files, alerts, presented, requests, notifications: bucket };
+  return { widget: result, files, alerts, presented, requests, uploads, school, notifications: bucket };
 }

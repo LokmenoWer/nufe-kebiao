@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_request_reason TEXT,
     next_class_slots TEXT,             -- 下一节课的 slot_key 列表（JSON）：同班同学刚刷过就算检查过
     recent_changes_json TEXT,          -- 最近 7 天发现的调课（改动前后的排课），小组件据此标出“调”和“停”
+    -- 小组件代抓：手机用自己的网络向教务要课表，再上传给本站（见 service.widget_fetch_task）
+    widget_fetch     INTEGER NOT NULL DEFAULT 1,   -- 用户是否允许
+    widget_fetch_ok_at REAL,           -- 最近一次代抓成功
+    widget_fetch_fails INTEGER NOT NULL DEFAULT 0, -- 连续失败次数
+    widget_fetch_pending_until REAL,   -- 刚把任务交给手机：这之前服务器不抢着刷
     sso_session_only INTEGER NOT NULL DEFAULT 0,   -- 认证中心只发了会话级 CASTGC（扫码登录没有“记住我”），几小时后就续不上
     -- 会话级 CASTGC 的保活（见 service.keepalive_user）
     keepalive_at     REAL,             -- 最近一次保活（成败都记，免得反复打扰学校）
@@ -96,7 +101,7 @@ CREATE TABLE IF NOT EXISTS refresh_log (
     id       INTEGER PRIMARY KEY,
     user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     at       REAL NOT NULL,
-    trigger  TEXT NOT NULL,     -- login | manual | scheduled
+    trigger  TEXT NOT NULL,     -- login | manual | scheduled | widget（手机代抓）
     ok       INTEGER NOT NULL,
     message  TEXT
 );
@@ -170,6 +175,8 @@ def init() -> None:
                      ("next_class_at", "REAL"), ("next_class_checked_at", "REAL"),
                      ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT"),
                      ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT"),
+                     ("widget_fetch", "INTEGER NOT NULL DEFAULT 1"), ("widget_fetch_ok_at", "REAL"),
+                     ("widget_fetch_fails", "INTEGER NOT NULL DEFAULT 0"), ("widget_fetch_pending_until", "REAL"),
                      ("sso_session_only", "INTEGER NOT NULL DEFAULT 0"), ("keepalive_at", "REAL"),
                      ("sso_touched_at", "REAL"), ("sso_lost_at", "REAL")):
         if col not in cols:

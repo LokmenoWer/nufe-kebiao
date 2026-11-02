@@ -191,8 +191,8 @@ function renderOverview(o) {
   const st = o.user_status;
   const r = o.refresh_24h;
   const sum = (suffix) => Object.entries(r).filter(([k]) => k.endsWith(suffix)).reduce((a, [, v]) => a + v, 0);
-  const triggers = ["scheduled", "manual", "login"].map((t) =>
-    `${{ scheduled: "后台", manual: "手动", login: "登录" }[t]} ${r[`${t}_ok`] || 0}/${(r[`${t}_ok`] || 0) + (r[`${t}_fail`] || 0)}`).join(" · ");
+  const triggers = ["widget", "scheduled", "manual", "login"].map((t) =>
+    `${TRIGGER[t]} ${r[`${t}_ok`] || 0}/${(r[`${t}_ok`] || 0) + (r[`${t}_fail`] || 0)}`).join(" · ");
   replace(body,
     h("div", { class: "adm-section-title" }, `在线（${Math.round(on.window_seconds / 60)} 分钟内有请求）`),
     h("div", { class: "adm-tiles" },
@@ -255,7 +255,7 @@ function renderSchedule(s) {
     table(["用户", "状态", "下次刷新", "原因", "目标间隔", "上次成功", "下一节课", "最近使用", ""], rows, "还没有用户"));
 }
 
-const TRIGGER = { scheduled: "后台", manual: "手动", login: "登录" };
+const TRIGGER = { widget: "手机代抓", scheduled: "后台", manual: "手动", login: "登录" };
 
 function renderRefreshes(list) {
   if (tab !== "refreshes") return;

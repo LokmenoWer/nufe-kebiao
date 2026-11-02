@@ -126,10 +126,10 @@ async def validation_exception(_request: Request, _exc: RequestValidationError):
 
 
 def _widget_post(request: Request) -> bool:
-    """小组件要日历订阅链接：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，没有 CSRF 的问题。
-    浏览器带了别站的 Origin 仍然拒绝。"""
+    """小组件交回代抓结果 / 要日历订阅链接：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，
+    没有 CSRF 的问题。浏览器带了别站的 Origin 仍然拒绝。"""
     return (request.method == "POST" and request.url.path.startswith("/widget/")
-            and request.url.path.endswith("/calendar") and not request.headers.get("origin"))
+            and request.url.path.endswith(("/upload", "/calendar")) and not request.headers.get("origin"))
 
 
 @app.middleware("http")
@@ -473,6 +473,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "ics_url": _ics_url(sess["id"]),
         "mail": notify.snapshot(sess["id"]),
         "widget_url": _widget_url(sess["id"]),
+        "widget_fetch": _widget_fetch_enabled(sess["id"]),
     }
 
 
@@ -651,6 +652,21 @@ def widget_rotate(sess=Depends(csrf_protected)):
     return {"widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json"}
 
 
+def _widget_fetch_enabled(uid: int) -> bool:
+    row = db.connect().execute("SELECT widget_fetch FROM users WHERE id=?", (uid,)).fetchone()
+    return bool(row and row["widget_fetch"])
+
+
+class WidgetFetchIn(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/widget/fetch-pref")
+def widget_fetch_pref(body: WidgetFetchIn, sess=Depends(csrf_protected)):
+    service.set_widget_fetch(sess["id"], body.enabled)
+    return {"widget_fetch": body.enabled}
+
+
 @app.post("/api/widget/disable")
 def widget_disable(sess=Depends(csrf_protected)):
     with db.tx() as c:
@@ -703,9 +719,63 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     except Exception as e:
         log.warning("widget refresh state failed for user %s: %s", user["id"], type(e).__name__)
         payload["refresh"] = {"pending": False, "due": False, "fresh": False}
-    # 正在排队时不要缓存，两分钟后的重画必须打到服务器
-    caching = "private, no-store" if payload["refresh"].get("pending") else "private, max-age=60"
+    try:
+        task = service.widget_fetch_task(user["id"])
+    except Exception as e:
+        log.warning("widget fetch task failed for user %s: %s", user["id"], type(e).__name__)
+        task = None
+    if task:
+        payload["fetch"] = task
+    payload["delegate"] = _widget_fetch_enabled(user["id"])
+    # 正在排队 / 带着代抓任务（含 cookie）时不要缓存，两分钟后的重画必须打到服务器
+    caching = "private, no-store" if payload["refresh"].get("pending") or task else "private, max-age=60"
     return JSONResponse(payload, headers={"Cache-Control": caching, **_WIDGET_HEADERS})
+
+
+def _widget_payload(user) -> dict:
+    view = service.timetable_view(user["id"], None)
+    _template, version = _widget_template()
+    payload = widget.build(view, view.get("week1_monday") if view else None, status=user["status"],
+                           script_version=version, changes=service.recent_changes(user["id"]))
+    payload["refresh"] = service.widget_refresh_state(user["id"])
+    payload["delegate"] = _widget_fetch_enabled(user["id"])
+    return payload
+
+
+WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
+
+
+@app.post("/widget/{token}/upload")
+async def widget_upload(token: str, request: Request):
+    """小组件用手机网络抓到的课表页和 print-data。响应带上最新的小组件数据，脚本同一次运行就能画上。"""
+    user = await asyncio.to_thread(_widget_user, token)
+    size = request.headers.get("content-length") or "0"
+    if not size.isdigit() or int(size) > WIDGET_UPLOAD_MAX:
+        raise HTTPException(413, "上传内容过大")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > WIDGET_UPLOAD_MAX:
+            raise HTTPException(413, "上传内容过大")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "格式不正确") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "格式不正确")
+
+    def run():
+        try:
+            result = service.accept_widget_upload(user["id"], body)
+        except service.WidgetUploadRejected as e:
+            raise HTTPException(400, str(e)) from None
+        except service.UserGone:
+            raise HTTPException(404) from None
+        fresh = db.connect().execute("SELECT id, status FROM users WHERE id=?", (user["id"],)).fetchone()
+        return {**result, "widget": _widget_payload(fresh)}
+
+    out = await asyncio.to_thread(run)
+    return JSONResponse(out, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 @app.post("/widget/{token}/calendar")
@@ -716,10 +786,14 @@ def widget_calendar(token: str):
     url = _ics_url(user["id"])
     if not url:
         new = secrets.token_urlsafe(24)
+        # 事务里再看一眼（BEGIN IMMEDIATE 已串行）：两次点击同时到达，后到的那次不能把先发出去的链接顶掉
         with db.tx() as c:
-            c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=?",
-                      (crypto.token_hash(new), crypto.encrypt(new.encode(), "ics", user["id"]), user["id"]))
-        url = f"{PUBLIC_BASE_URL}/ics/{new}.ics"
+            if _ics_url(user["id"]) is None:
+                c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=?",
+                          (crypto.token_hash(new), crypto.encrypt(new.encode(), "ics", user["id"]), user["id"]))
+        url = _ics_url(user["id"])
+        if not url:
+            raise HTTPException(404)
     return JSONResponse({"ics_url": url}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
