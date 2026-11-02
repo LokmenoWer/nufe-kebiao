@@ -64,7 +64,7 @@ object LiveUpdates {
         return post(context, item)
     }
 
-    /** 课前闹钟到点：发 Live Update，并安排上课和“开课后 5 分钟撤销”两个更新点。 */
+    /** 课前闹钟到点：发 Live Update，并安排上课更新和开课 5 分钟后的撤销。 */
     fun post(context: Context, item: Reminders.Item): Boolean {
         if (!available(context) || item.date.isBlank() || item.start.isBlank() || item.end.isBlank()) return false
         val startMs = lessonMs(item.date, item.start)
@@ -124,6 +124,8 @@ object LiveUpdates {
         val title = "${item.start}–${item.end} · $room"
         val course = (item.name.ifBlank { "下一节课" }) + changed
         val status = if (phase == Phase.BEFORE) "准备上课" else "正在上课"
+        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        val timeout = (dismissMs - System.currentTimeMillis()).coerceAtLeast(1L)
         val open = PendingIntent.getActivity(
             context,
             0,
@@ -141,8 +143,10 @@ object LiveUpdates {
             .setOnlyAlertOnce(true)
             .setStyle(progressStyle)
             .setWhen(if (phase == Phase.BEFORE) startMs else endMs)
+            .setShowWhen(true)
             .setUsesChronometer(true)
             .setChronometerCountDown(true)
+            .setTimeoutAfter(timeout)
         applyPromotedFlags(builder, status)
         context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, builder.build())
     }
@@ -180,10 +184,22 @@ object LiveUpdates {
         val pending = PendingIntent.getBroadcast(
             context, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        if (Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()) {
-            alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
-        } else {
-            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
+        // ColorOS 会把普通精确闹钟放进最长 1 小时的弹性窗口；改用用户可见的 alarm clock
+        // 才能保证开课时刻切换，关闭则依靠通知 timeout。
+        val show = PendingIntent.getActivity(
+            context,
+            requestCode,
+            Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching {
+            alarms.setAlarmClock(AlarmManager.AlarmClockInfo(atMs, show), pending)
+        }.onFailure {
+            if (Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()) {
+                alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
+            } else {
+                alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
+            }
         }
     }
 
