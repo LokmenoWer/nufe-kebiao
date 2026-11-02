@@ -6,6 +6,8 @@ local.properties
 .kotlin/
 keystore.properties
 *.jks
+app/release/
+gradle/gradle-daemon-jvm.properties
 
 # 根目录的 data/、debug/ 是本地数据和调试输出；这里同名的是源码目录，要提交
 !app/src/main/java/wiki/nufe/kebiao/data/
