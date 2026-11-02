@@ -178,17 +178,17 @@ private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, 
 @Composable
 private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layout: GridLayout, col: Int, width: Float,
                      m: TextMeasure) {
-    Column(modifier = GlanceModifier.width((width + COL_GAP).dp).fillMaxHeight().padding(start = COL_GAP.dp)
+    // 每格叠在 Box 里、各自用上内边距从列顶算起，不接在上一格后面：桌面原地套用更新（reapply）偶尔会丢掉一格，
+    // 接着排的话后面的课全跟着往上挪、落到别的节次上；各算各的，最多少一格，不会错位。
+    // 每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限
+    Box(modifier = GlanceModifier.width((width + COL_GAP).dp).fillMaxHeight().padding(start = COL_GAP.dp)
         .clickable(openDay(context, data, column.day))) {
-        var cursor = 0f
         for (span in layout.spans.filter { it.col == col }.take(10)) {
             val top = layout.bounds[span.a]
             val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)
-            // 用上内边距代替 Spacer：每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限
-            Box(modifier = GlanceModifier.padding(top = (top - cursor).coerceAtLeast(0f).dp)) {
+            Box(modifier = GlanceModifier.fillMaxWidth().padding(top = top.dp)) {
                 CellChip(span.cell, h, width - CHIP_PAD_H, layout.fontScale, span.onAxis, m)
             }
-            cursor = top + h + CHIP_GAP
         }
     }
 }
