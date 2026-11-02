@@ -45,6 +45,8 @@ object LiveUpdates {
     )
 
     private fun available(context: Context): Boolean {
+        // 流体云目前只按 ColorOS 16 的展示行为适配；其他平台统一走普通通知
+        if (!isColorOs()) return false
         if (Build.VERSION.SDK_INT < 36) return false
         val manager = context.getSystemService(NotificationManager::class.java) ?: return false
         if (!manager.areNotificationsEnabled()) return false
@@ -52,6 +54,13 @@ object LiveUpdates {
         val channel = manager.getNotificationChannel(CHANNEL)
         if (channel != null && channel.importance == NotificationManager.IMPORTANCE_NONE) return false
         return manager.canPostPromotedNotifications()
+    }
+
+    private fun isColorOs(): Boolean {
+        val maker = Build.MANUFACTURER.lowercase()
+        val brand = Build.BRAND.lowercase()
+        return maker in setOf("oppo", "oneplus", "realme") ||
+            brand in setOf("oppo", "oneplus", "realme")
     }
 
     /** debug 预览：不等到课前，直接拿缓存里的下一节课发一张真实卡片。 */
