@@ -9,6 +9,6 @@
         <activity
             android:name=".preview.LiveUpdateTestActivity"
             android:exported="true"
-            android:label="流体云测试" />
+            android:label="实时提醒测试" />
     </application>
 </manifest>

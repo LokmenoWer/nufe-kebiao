@@ -85,9 +85,10 @@ class LiveUpdateTestActivity : ComponentActivity() {
                             .padding(24.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text("流体云 / Live Updates 测试", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text("实时提醒 / Live Updates 测试", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            "Android 16 的 Live Updates，ColorOS 16 的流体云已接入这套标准 API。",
+                            "Android 16 Live Updates：ColorOS 显示为流体云，HyperOS 显示为实时动态/焦点通知；" +
+                                "超级岛需要小米企业开发者与上架 App ID。",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(status, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -132,7 +133,7 @@ class LiveUpdateTestActivity : ComponentActivity() {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             "如果开始后状态栏没有胶囊/卡片：先看上面的 canPostPromotedNotifications " +
-                                "是否为 true，再到系统设置 → 通知与控制中心 → 流体云 / 实时通知里允许本应用。",
+                                "是否为 true，再到系统设置 → 通知与控制中心 → 流体云 / 实时动态里允许本应用。",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
