@@ -119,13 +119,11 @@ object LiveUpdates {
             .setProgressTrackerIcon(Icon.createWithResource(context, R.drawable.ic_notify))
             .setStyledByProgress(true)
 
-        val title = if (phase == Phase.BEFORE) {
-            "即将上课 · ${item.name.ifBlank { "下一节课" }}"
-        } else {
-            "正在上课 · ${item.name.ifBlank { "当前课程" }}"
-        }
         val room = item.room.ifBlank { "地点待定" }
         val changed = if (item.changed) " · 已调课${item.was?.let { "（$it）" } ?: ""}" else ""
+        val title = "${item.start}–${item.end} · $room"
+        val course = (item.name.ifBlank { "下一节课" }) + changed
+        val status = if (phase == Phase.BEFORE) "准备上课" else "正在上课"
         val open = PendingIntent.getActivity(
             context,
             0,
@@ -135,8 +133,8 @@ object LiveUpdates {
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle(title)
-            .setContentText("${item.start}–${item.end} · $room$changed")
-            .setSubText("南财课表 · 流体云提醒")
+            .setContentText(status)
+            .setSubText(course)
             .setContentIntent(open)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
@@ -145,7 +143,7 @@ object LiveUpdates {
             .setWhen(if (phase == Phase.BEFORE) startMs else endMs)
             .setUsesChronometer(true)
             .setChronometerCountDown(true)
-        applyPromotedFlags(builder, if (phase == Phase.BEFORE) "距上课" else "上课中")
+        applyPromotedFlags(builder, status)
         context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, builder.build())
     }
 
