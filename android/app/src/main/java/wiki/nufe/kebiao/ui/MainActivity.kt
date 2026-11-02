@@ -673,6 +673,7 @@ private fun HomeScreen(
     val context = LocalContext.current
     var now by remember { mutableStateOf(Now.current()) }
     var liveUpdate by remember { mutableStateOf(repo.liveUpdateEnabled) }
+    var alarmEnabled by remember { mutableStateOf(repo.alarmEnabled) }
     var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
     var showWheel by remember { mutableStateOf(false) }
 
@@ -709,7 +710,18 @@ private fun HomeScreen(
         ReminderSection(
             repo = repo,
             minutes = minutes,
+            alarmEnabled = alarmEnabled,
             onPickTime = { showWheel = true },
+            onAlarmToggle = { enabled ->
+                alarmEnabled = enabled
+                repo.alarmEnabled = enabled
+                if (enabled && minutes == 0) {
+                    minutes = 10
+                    repo.remindMinutes = 10
+                }
+                if (!enabled) LiveUpdates.cancel(context)
+                Reminders.reschedule(context)
+            },
             liveUpdate = liveUpdate,
             onLiveUpdateChange = { checked ->
                 liveUpdate = checked
@@ -729,6 +741,9 @@ private fun HomeScreen(
                 showWheel = false
                 minutes = selected
                 repo.remindMinutes = selected
+                alarmEnabled = selected > 0
+                repo.alarmEnabled = alarmEnabled
+                if (!alarmEnabled) LiveUpdates.cancel(context)
                 Reminders.reschedule(context)
             },
         )
@@ -1101,7 +1116,9 @@ private fun WidgetOption(
 private fun ReminderSection(
     repo: Repository,
     minutes: Int,
+    alarmEnabled: Boolean,
     onPickTime: () -> Unit,
+    onAlarmToggle: (Boolean) -> Unit,
     liveUpdate: Boolean,
     onLiveUpdateChange: (Boolean) -> Unit,
 ) {
@@ -1118,26 +1135,27 @@ private fun ReminderSection(
 
     SectionCard {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onPickTime),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(onClick = onPickTime),
+            ) {
                 Text("上课提醒", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    if (minutes == 0) "关闭" else "选择提前时间：$minutes 分钟",
+                    if (!alarmEnabled || minutes == 0) "已关闭" else "选择提前时间：$minutes 分钟",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Icon(
-                painter = painterResource(R.drawable.ic_chevron_right),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
+            Switch(checked = alarmEnabled, onCheckedChange = onAlarmToggle)
+        }
+        if (!alarmEnabled) {
+            Spacer(Modifier.height(4.dp))
+            Hint("关闭后不会安排本地闹钟，也不会发提醒通知。")
         }
         if (Build.VERSION.SDK_INT >= 36) {
             HorizontalDivider(
@@ -1148,11 +1166,15 @@ private fun ReminderSection(
                 Column(Modifier.weight(1f)) {
                     Text("在${liveName}显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(2.dp))
-                    Hint("课前显示倒计时，上课/下课自动切换。")
+                    Hint("课前显示倒计时，上课 5 分钟后自动收起。")
                 }
-                Switch(checked = liveUpdate, onCheckedChange = onLiveUpdateChange)
+                Switch(
+                    checked = alarmEnabled && liveUpdate,
+                    onCheckedChange = onLiveUpdateChange,
+                    enabled = alarmEnabled,
+                )
             }
-            if (liveUpdate && manager?.canPostPromotedNotifications() != true) {
+            if (liveUpdate && alarmEnabled && manager?.canPostPromotedNotifications() != true) {
                 Spacer(Modifier.height(6.dp))
                 Hint("系统还没允许本应用的${liveName}提醒；到系统设置 → 通知与控制中心 → $liveName 里允许。")
                 TextButton(
@@ -1169,13 +1191,13 @@ private fun ReminderSection(
             Spacer(Modifier.height(6.dp))
             Hint("系统实时提醒需要 Android 16 / ColorOS 16 或 HyperOS 3。")
         }
-        if (minutes > 0 && !canNotify && Build.VERSION.SDK_INT >= 33) {
+        if (alarmEnabled && minutes > 0 && !canNotify && Build.VERSION.SDK_INT >= 33) {
             TextButton(
                 onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) },
                 contentPadding = PaddingValues(0.dp),
             ) { Text("允许通知", fontSize = 12.sp) }
         }
-        if (minutes > 0 && Build.VERSION.SDK_INT >= 31 &&
+        if (alarmEnabled && minutes > 0 && Build.VERSION.SDK_INT >= 31 &&
             context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms() == false
         ) {
             TextButton(

@@ -64,21 +64,22 @@ object LiveUpdates {
         return post(context, item)
     }
 
-    /** 课前闹钟到点：发 Live Update，并安排上课/下课两个更新点。 */
+    /** 课前闹钟到点：发 Live Update，并安排上课和“开课后 5 分钟撤销”两个更新点。 */
     fun post(context: Context, item: Reminders.Item): Boolean {
         if (!available(context) || item.date.isBlank() || item.start.isBlank() || item.end.isBlank()) return false
         val startMs = lessonMs(item.date, item.start)
         val endMs = lessonMs(item.date, item.end)
-        if (endMs <= System.currentTimeMillis()) return false
+        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        if (dismissMs <= System.currentTimeMillis()) return false
         ensureChannel(context)
         val phase = if (startMs > System.currentTimeMillis()) Phase.BEFORE else Phase.DURING
         notify(context, item, phase, startMs, endMs)
         schedule(context, item, ACTION_START, startMs, REQ_START)
-        schedule(context, item, ACTION_END, endMs, REQ_END)
+        schedule(context, item, ACTION_END, dismissMs, REQ_END)
         return true
     }
 
-    /** 上课时刻：把“即将上课”切换成“正在上课”。 */
+    /** 上课时刻：把“即将上课”切换成“正在上课”，开课 5 分钟后静默撤销。 */
     fun startClass(context: Context, intent: Intent) {
         if (!available(context)) {
             cancel(context)
@@ -87,13 +88,14 @@ object LiveUpdates {
         val item = itemFrom(intent)
         val startMs = lessonMs(item.date, item.start)
         val endMs = lessonMs(item.date, item.end)
-        if (endMs <= System.currentTimeMillis()) {
+        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        if (dismissMs <= System.currentTimeMillis()) {
             cancel(context)
             return
         }
         ensureChannel(context)
         notify(context, item, Phase.DURING, startMs, endMs)
-        schedule(context, item, ACTION_END, endMs, REQ_END)
+        schedule(context, item, ACTION_END, dismissMs, REQ_END)
     }
 
     fun cancel(context: Context) {

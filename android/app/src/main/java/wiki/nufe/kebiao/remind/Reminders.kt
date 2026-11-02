@@ -30,6 +30,7 @@ import wiki.nufe.kebiao.ui.MainActivity
  */
 object Reminders {
     const val CHANNEL = "class_reminder"
+    const val IN_CLASS_VISIBLE_MS = 5 * 60_000L  // 开课后保留 5 分钟，然后静默撤销
     private const val HORIZON_DAYS = 7     // 只排未来这么多天的；更远的等下次同步
     private const val MAX = 40             // 闹钟太多会被部分 ROM 限制
     private const val MIN_GAP_MS = 60_000L // 不足 1 分钟就开始的不再响
@@ -106,7 +107,7 @@ object Reminders {
     fun reschedule(context: Context) {
         val repo = Repository(context)
         val snapshot = repo.cached()
-        val items = if (snapshot == null || repo.widgetUrl == null) emptyList()
+        val items = if (snapshot == null || repo.widgetUrl == null || !repo.alarmEnabled) emptyList()
         else plan(snapshot.payload, Now.current(), repo.remindMinutes)
         val alarms = context.getSystemService(AlarmManager::class.java)
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -167,6 +168,7 @@ class ReminderReceiver : BroadcastReceiver() {
         if (!Reminders.canNotify(context)) return
         val at = intent.getLongExtra("at", 0L)
         val repo = Repository(context)
+        if (!repo.alarmEnabled) return
         if (repo.liveUpdateEnabled &&
             runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
         ) return
@@ -176,6 +178,12 @@ class ReminderReceiver : BroadcastReceiver() {
         val open = PendingIntent.getActivity(
             context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
         )
+        val date = intent.getStringExtra("date").orEmpty()
+        val start = intent.getStringExtra("start").orEmpty()
+        val startMs = if (date.isNotBlank() && start.isNotBlank()) lessonMs(date, start) else null
+        val timeout = startMs?.let {
+            (it + Reminders.IN_CLASS_VISIBLE_MS - System.currentTimeMillis()).coerceAtLeast(1L)
+        } ?: Reminders.IN_CLASS_VISIBLE_MS
         val notification = NotificationCompat.Builder(context, Reminders.CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle(intent.getStringExtra("title"))
@@ -184,6 +192,7 @@ class ReminderReceiver : BroadcastReceiver() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(open)
             .setAutoCancel(true)
+            .setTimeoutAfter(timeout)
             .build()
         try {
             NotificationManagerCompat.from(context).notify((at / 60_000L).toInt(), notification)

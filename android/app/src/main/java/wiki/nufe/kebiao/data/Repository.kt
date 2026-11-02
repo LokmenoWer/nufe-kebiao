@@ -33,6 +33,14 @@ class Repository(context: Context) {
         get() = prefs.getInt(KEY_REMIND, DEFAULT_REMIND_MINUTES)
         set(value) = prefs.edit().putInt(KEY_REMIND, value).apply()
 
+    /** 上课提醒总开关；关闭后不排本地闹钟，也不发课前通知。 */
+    var alarmEnabled: Boolean
+        get() = prefs.getBoolean(
+            KEY_ALARM,
+            prefs.getInt(KEY_REMIND, DEFAULT_REMIND_MINUTES) > 0,
+        )
+        set(value) = prefs.edit().putBoolean(KEY_ALARM, value).apply()
+
     /** 是否用 Android 16 Live Updates / ColorOS 流体云展示上课提醒。 */
     var liveUpdateEnabled: Boolean
         get() = prefs.getBoolean(KEY_LIVE_UPDATE, false)
@@ -93,6 +101,7 @@ class Repository(context: Context) {
     companion object {
         private const val KEY_URL = "widget_url"
         private const val KEY_REMIND = "remind_minutes"
+        private const val KEY_ALARM = "alarm_enabled"
         private const val KEY_LIVE_UPDATE = "live_update_enabled"
         const val DEFAULT_REMIND_MINUTES = 10
 
