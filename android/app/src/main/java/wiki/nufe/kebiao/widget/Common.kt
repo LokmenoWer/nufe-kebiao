@@ -219,7 +219,7 @@ fun Placeholder(context: Context, message: String) {
     WidgetRoot(onClick = openApp(context)) {
         Column(modifier = GlanceModifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically,
             horizontalAlignment = Alignment.CenterHorizontally) {
-            Label("南财课表", size = 14.sp, bold = true, color = GlanceTheme.colors.primary)
+            Label("nufe课表", size = 14.sp, bold = true, color = GlanceTheme.colors.primary)
             Spacer(GlanceModifier.height(4.dp))
             Label(message, size = 12.sp, color = GlanceTheme.colors.onSurfaceVariant, lines = 2)
         }

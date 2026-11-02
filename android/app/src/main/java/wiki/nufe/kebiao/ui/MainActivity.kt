@@ -149,7 +149,7 @@ private const val SITE_URL = "https://kebiao.nufe.wiki"
 private const val PIN_COOLDOWN_MS = 2_000L
 private const val PIN_CHECK_DELAY_MS = 1_000L
 private const val MANUAL_ADD =
-    "长按桌面空白处 → 小组件（OPPO / 一加是“卡片” → 拉到底“插件”）→ 找到“南财课表”。"
+    "长按桌面空白处 → 小组件（OPPO / 一加是“卡片” → 拉到底“插件”）→ 找到“nufe课表”。"
 
 private val LiveRed = Color(0xFFE03131)
 private val WarmOrange = Color(0xFFE8590C)
@@ -755,7 +755,7 @@ private fun HomeScreen(
 @Composable
 private fun HeaderBlock() {
     Text(
-        "南财课表",
+        "nufe课表",
         fontSize = 34.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = (-0.5).sp,
@@ -1189,7 +1189,7 @@ private fun ReminderSection(
                 Spacer(Modifier.height(2.dp))
                 Hint(
                     if (Build.VERSION.SDK_INT >= 36) {
-                        "课前显示倒计时，上课 5 分钟后自动收起。"
+                        "仅 ColorOS 16+ 使用流体云，其他平台回退普通通知；开课 5 分钟后收起。"
                     } else {
                         "需要 Android 16 / ColorOS 16 或 HyperOS 3。"
                     },
@@ -1467,11 +1467,11 @@ private fun AboutScreen() {
             color = MaterialTheme.colorScheme.onBackground,
         )
         Spacer(Modifier.height(4.dp))
-        Text("南财课表 · 非官方工具", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("nufe课表 · 非官方工具", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
 
         SectionCard {
-            Text("南财课表", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("nufe课表", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(3.dp))
             Text("把课程放在桌面。", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
@@ -1491,7 +1491,7 @@ private fun AboutScreen() {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL)))
             }
             AboutRow("许可证", "GPL-3.0-or-later")
-            AboutRow("版本", version.ifBlank { "1.0.0" })
+            AboutRow("版本", version.ifBlank { "1.1.0" })
             AboutRow("图标", "IconPark · Apache-2.0") {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),

@@ -62,9 +62,9 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
 
   const androidSteps = h("ol", { class: "widget-steps" },
-    h("li", {}, "安装“南财课表”安卓 App（源码在项目仓库的 android/ 目录）。"),
+    h("li", {}, "安装“nufe课表”安卓 App（源码在项目仓库的 android/ 目录）。"),
     h("li", {}, "在手机浏览器里点上面的“在安卓 App 中打开”，或“复制链接”后在 App 里粘贴。"),
-    h("li", {}, "在 App 里点“添加‘今天’ / ‘明天’ / ‘本周’”，或长按桌面 → 小组件 → 南财课表。本周课表建议 4×3 以上。"),
+    h("li", {}, "在 App 里点“添加‘今天’ / ‘本周’”，或长按桌面 → 小组件 → nufe课表。本周课表建议 4×3 以上。"),
     h("li", {}, "上课提醒在 App 里选提前几分钟，并允许通知；国产系统请允许 App 自启动、后台运行。"));
 
   const el = h("div", { class: "widget-settings" },
@@ -74,7 +74,7 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
     fetchRow,
     manual,
-    h("p", { class: "hint" }, "安卓：用“南财课表”App 在桌面显示今天、明天和本周的课，并在课前提醒。"),
+    h("p", { class: "hint" }, "安卓：用“nufe课表”App 在桌面显示今天和本周的课，并在课前提醒。"),
     androidRow,
     status,
     h("details", { class: "widget-help" }, h("summary", {}, "iOS 安装步骤"), steps),
@@ -154,7 +154,7 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(url);
-      status.textContent = "链接已复制，打开南财课表 App 粘贴即可。";
+      status.textContent = "链接已复制，打开 nufe课表 App 粘贴即可。";
       showToast("链接已复制", { type: "success" });
     } catch {
       manual.value = url;

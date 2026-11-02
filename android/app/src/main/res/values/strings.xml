@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">南财课表</string>
+    <string name="app_name">nufe课表</string>
     <string name="widget_today">今天的课</string>
     <string name="widget_week">本周课表</string>
     <string name="widget_today_desc">正在上课倒计时、下一节提醒；今天的课结束后自动显示明天</string>
