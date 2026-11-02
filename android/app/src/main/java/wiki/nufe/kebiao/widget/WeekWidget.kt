@@ -186,7 +186,7 @@ private fun WeekContent(context: Context, data: WidgetData) {
             Row(modifier = GlanceModifier.fillMaxWidth().height(gridH.dp)) {
                 Axis(layout, axisW, gridH, labelH, endH, m)
                 columns.forEachIndexed { i, c ->
-                    DayCells(context, data, c, layout, i, colW, m, now)
+                    DayCells(context, data, c, layout, i, colW, m)
                 }
             }
         }
@@ -231,11 +231,11 @@ private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, 
 
 @Composable
 private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layout: GridLayout, col: Int, width: Float,
-                     m: TextMeasure, now: Now) {
+                     m: TextMeasure) {
     // 每格叠在 Box 里、各自用上内边距从列顶算起，不接在上一格后面：桌面原地套用更新（reapply）偶尔会丢掉一格，
     // 接着排的话后面的课全跟着往上挪、落到别的节次上；各算各的，最多少一格，不会错位。
-    // 每格只占一个子元素，一天五六节课也不会超出 RemoteViews 的子元素上限；今天多留一个位置给时间线。
-    val spans = layout.spans.filter { it.col == col }.take(if (column.isToday) 9 else 10)
+    // 每格只占一个子元素，一天最多十节课也不会超出 RemoteViews 的子元素上限。
+    val spans = layout.spans.filter { it.col == col }.take(10)
     Box(modifier = GlanceModifier.width((width + COL_GAP).dp).fillMaxHeight().padding(start = COL_GAP.dp)
         .clickable(openDay(context, data, column.day))) {
         for (span in spans) {
@@ -245,36 +245,7 @@ private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layo
                 CellChip(span.cell, h, width - CHIP_PAD_H, layout.fontScale, span.onAxis, m)
             }
         }
-        if (column.isToday) {
-            nowLineTop(layout, col, now.minutes)?.let { top ->
-                Box(GlanceModifier.fillMaxWidth().padding(top = top.dp)) {
-                    Box(GlanceModifier.fillMaxWidth().height(2.dp).background(solid(LIVE))) {}
-                }
-            }
-        }
     }
-}
-
-/** 像网站周视图一样，在当前天的列上按真实时间画一条红色横线。 */
-private fun nowLineTop(layout: GridLayout, col: Int, nowMinutes: Int): Float? {
-    val points = layout.spans
-        .filter { it.col == col }
-        .flatMap { listOf(it.cell.start to layout.bounds[it.a], it.cell.end to layout.bounds[it.b]) }
-        .distinct()
-        .sortedBy { it.first }
-    if (points.size < 2) return null
-    val first = points.first()
-    val last = points.last()
-    if (nowMinutes < first.first || nowMinutes > last.first) return null
-    for (i in 0 until points.lastIndex) {
-        val (t1, y1) = points[i]
-        val (t2, y2) = points[i + 1]
-        if (nowMinutes in t1..t2) {
-            if (t2 == t1) return y1
-            return y1 + (y2 - y1) * (nowMinutes - t1) / (t2 - t1)
-        }
-    }
-    return null
 }
 
 @Composable
