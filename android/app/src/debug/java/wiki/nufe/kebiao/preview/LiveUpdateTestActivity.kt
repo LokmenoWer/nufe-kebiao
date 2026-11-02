@@ -152,13 +152,42 @@ class LiveUpdateTestActivity : ComponentActivity() {
         if (intent.getBooleanExtra("fallback_test", false)) {
             window.decorView.post { sendReminderFallback() }
         }
+        if (intent.getBooleanExtra("near_test", false)) {
+            window.decorView.post { sendNearReminder() }
+        }
         if (intent.getBooleanExtra("live_test", false)) {
             window.decorView.post { begin() }
         }
     }
 
+    /** 2 分钟后开课，用来验证 Live Update 是否会自动切到“正在上课”并收起。 */
+    private fun sendNearReminder() {
+        val zone = java.time.ZoneId.of("Asia/Shanghai")
+        val now = java.time.ZonedDateTime.now(zone)
+        val start = now.plusMinutes(2)
+        val end = now.plusMinutes(10)
+        val fmt = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+        sendReminder(
+            title = "近端测试课程",
+            date = now.toLocalDate().toString(),
+            start = start.format(fmt),
+            end = end.format(fmt),
+        )
+        status = "已安排 2 分钟后开课的测试；观察流体云是否在开课时切为“正在上课”，并在 5 分钟后收起。"
+    }
+
     /** 走真实的 ReminderReceiver：流体云不可用时应落到普通通知。 */
     private fun sendReminderFallback() {
+        sendReminder(
+            title = "回退测试课程",
+            date = Now.current().date,
+            start = "23:00",
+            end = "23:50",
+        )
+        status = "已通过 ReminderReceiver 发送提醒：流体云可用时显示实时卡片，不可用时应为普通通知。"
+    }
+
+    private fun sendReminder(title: String, date: String, start: String, end: String) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -170,15 +199,14 @@ class LiveUpdateTestActivity : ComponentActivity() {
         val intent = Intent(this, ReminderReceiver::class.java)
             .setAction(Reminders.ACTION)
             .putExtra("at", at)
-            .putExtra("title", "回退测试课程")
-            .putExtra("text", "流体云不可用时，这条应该以普通消息通知出现")
-            .putExtra("date", Now.current().date)
-            .putExtra("start", "23:00")
-            .putExtra("end", "23:50")
-            .putExtra("name", "回退测试课程")
+            .putExtra("title", title)
+            .putExtra("text", "测试提醒")
+            .putExtra("date", date)
+            .putExtra("start", start)
+            .putExtra("end", end)
+            .putExtra("name", title)
             .putExtra("room", "A101")
         sendBroadcast(intent)
-        status = "已通过 ReminderReceiver 发送提醒：流体云可用时显示实时卡片，不可用时应为普通通知。"
     }
 
     private fun describe(): String {
