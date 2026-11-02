@@ -47,7 +47,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
+import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.remind.LiveUpdates
+import wiki.nufe.kebiao.remind.ReminderReceiver
+import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.ui.MainActivity
 
 /**
@@ -119,6 +122,11 @@ class LiveUpdateTestActivity : ComponentActivity() {
 
                         OutlinedButton(
                             modifier = Modifier.fillMaxWidth(),
+                            onClick = { sendReminderFallback() },
+                        ) { Text("测试提醒回退（走真实 ReminderReceiver）") }
+
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 LiveUpdates.cancel(this@LiveUpdateTestActivity)
                                 status = "已停止真实课程提醒。"
@@ -141,6 +149,36 @@ class LiveUpdateTestActivity : ComponentActivity() {
                 }
             }
         }
+        if (intent.getBooleanExtra("fallback_test", false)) {
+            window.decorView.post { sendReminderFallback() }
+        }
+        if (intent.getBooleanExtra("live_test", false)) {
+            window.decorView.post { begin() }
+        }
+    }
+
+    /** 走真实的 ReminderReceiver：流体云不可用时应落到普通通知。 */
+    private fun sendReminderFallback() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        val at = System.currentTimeMillis()
+        val intent = Intent(this, ReminderReceiver::class.java)
+            .setAction(Reminders.ACTION)
+            .putExtra("at", at)
+            .putExtra("title", "回退测试课程")
+            .putExtra("text", "流体云不可用时，这条应该以普通消息通知出现")
+            .putExtra("date", Now.current().date)
+            .putExtra("start", "23:00")
+            .putExtra("end", "23:50")
+            .putExtra("name", "回退测试课程")
+            .putExtra("room", "A101")
+        sendBroadcast(intent)
+        status = "已通过 ReminderReceiver 发送提醒：流体云可用时显示实时卡片，不可用时应为普通通知。"
     }
 
     private fun describe(): String {
