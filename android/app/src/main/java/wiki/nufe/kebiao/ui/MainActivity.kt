@@ -4,7 +4,9 @@ import android.Manifest
 import android.app.AlarmManager
 import android.app.NotificationManager
 import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -17,12 +19,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.collection.intSetOf
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
@@ -30,7 +35,6 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -63,6 +67,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -72,6 +77,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -85,31 +91,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Note
@@ -130,9 +136,7 @@ import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.Sync
-import wiki.nufe.kebiao.widget.FullWeekReceiver
 import wiki.nufe.kebiao.widget.TodayReceiver
-import wiki.nufe.kebiao.widget.TomorrowReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 import wiki.nufe.kebiao.widget.parseColor
 
@@ -185,6 +189,25 @@ class MainActivity : ComponentActivity() {
                 AppRoot(incoming) { incoming = null }
             }
         }
+        publishWidgetPreviews()
+    }
+
+    /** Android 15+ 的小组件选择器支持 App 生成的预览；每天最多发一次，避免系统限流。 */
+    private fun publishWidgetPreviews() {
+        if (Build.VERSION.SDK_INT < 35) return
+        val prefs = getSharedPreferences("widget_previews", MODE_PRIVATE)
+        if (System.currentTimeMillis() - prefs.getLong("at", 0L) < 86_400_000L) return
+        lifecycleScope.launch {
+            runCatching {
+                val categories = intSetOf(AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN)
+                val manager = GlanceAppWidgetManager(this@MainActivity)
+                val todayOk = manager.setWidgetPreviews(TodayReceiver::class, categories) ==
+                    GlanceAppWidgetManager.SET_WIDGET_PREVIEWS_RESULT_SUCCESS
+                val weekOk = manager.setWidgetPreviews(WeekReceiver::class, categories) ==
+                    GlanceAppWidgetManager.SET_WIDGET_PREVIEWS_RESULT_SUCCESS
+                if (todayOk && weekOk) prefs.edit().putLong("at", System.currentTimeMillis()).apply()
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -235,19 +258,65 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     val scope = rememberCoroutineScope()
     val notificationManager = remember { context.getSystemService(NotificationManager::class.java) }
     val exactAlarms = remember { context.getSystemService(AlarmManager::class.java) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val permissionPrefs = remember {
+        context.getSharedPreferences("permission_intro", Context.MODE_PRIVATE)
+    }
 
     var url by remember { mutableStateOf(repo.widgetUrl) }
     var snapshot by remember { mutableStateOf(repo.cached()) }
     var invalid by remember { mutableStateOf(LinkState.isInvalid(context)) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    var showExactDialog by remember { mutableStateOf(false) }
-    var showLiveGuide by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.Timetable) }
+    var pagePulse by remember { mutableIntStateOf(0) }
+    var notificationsOk by remember { mutableStateOf(Reminders.canNotify(context)) }
+    var exactOk by remember {
+        mutableStateOf(Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true)
+    }
+    var promotedOk by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < 36 || notificationManager?.canPostPromotedNotifications() == true,
+        )
+    }
+    var showPermissions by remember {
+        mutableStateOf(
+            !permissionPrefs.getBoolean("seen", false) &&
+                (!notificationsOk || !exactOk || !promotedOk),
+        )
+    }
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { }
+    ) { granted ->
+        notificationsOk = granted
+        Reminders.reschedule(context)
+    }
+
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsOk = Reminders.canNotify(context)
+                exactOk = Build.VERSION.SDK_INT < 31 ||
+                    exactAlarms?.canScheduleExactAlarms() == true
+                promotedOk = Build.VERSION.SDK_INT < 36 ||
+                    notificationManager?.canPostPromotedNotifications() == true
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+
+    fun markPermissionsSeen() {
+        showPermissions = false
+        permissionPrefs.edit().putBoolean("seen", true).apply()
+    }
+
+    LaunchedEffect(notificationsOk, exactOk, promotedOk) {
+        if (showPermissions && notificationsOk && exactOk && promotedOk) {
+            markPermissionsSeen()
+        }
+    }
 
     fun openSite() {
         val site = repo.siteUrl() ?: SITE_URL
@@ -335,21 +404,6 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         save(link)
     }
 
-    LaunchedEffect(url) {
-        if (url == null) return@LaunchedEffect
-        if (Build.VERSION.SDK_INT >= 33 && !Reminders.canNotify(context)) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        if (Build.VERSION.SDK_INT >= 31 && exactAlarms?.canScheduleExactAlarms() == false) {
-            showExactDialog = true
-        }
-        if (Build.VERSION.SDK_INT >= 36 && repo.liveUpdateEnabled &&
-            notificationManager?.canPostPromotedNotifications() != true
-        ) {
-            showLiveGuide = true
-        }
-    }
-
     AppBackground {
         if (url == null || invalid) {
             SetupScreen(
@@ -362,107 +416,155 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         } else {
             Box(Modifier.fillMaxSize()) {
                 AnimatedContent(
-                    targetState = tab,
+                    targetState = tab to pagePulse,
                     modifier = Modifier.fillMaxSize(),
                     transitionSpec = {
-                        fadeIn(tween(220)) togetherWith fadeOut(tween(150))
+                        val forward = targetState.first.ordinal > initialState.first.ordinal
+                        val springSpec = spring<IntOffset>(dampingRatio = 0.72f, stiffness = 360f)
+                        (slideInHorizontally(springSpec) { if (forward) -it / 18 else it / 18 } +
+                            slideInVertically(springSpec) { it / 16 } +
+                            fadeIn(tween(160))) togetherWith fadeOut(tween(120))
                     },
                     label = "tab-page",
-                ) { target ->
-                    PageReveal {
-                        when (target) {
-                            Tab.Timetable -> HomeScreen(
-                                repo = repo,
-                                snapshot = snapshot,
-                                busy = busy,
-                                message = message,
-                                onRefresh = ::refresh,
-                                onOpenSite = ::openSite,
-                            )
-                            Tab.Mine -> MineScreen(
-                                repo = repo,
-                                snapshot = snapshot,
-                                onOpenSite = ::openSite,
-                                onRemove = ::removeLink,
-                            )
-                            Tab.About -> AboutScreen()
-                        }
+                ) { (target, _) ->
+                    when (target) {
+                        Tab.Timetable -> HomeScreen(
+                            repo = repo,
+                            snapshot = snapshot,
+                            busy = busy,
+                            message = message,
+                            onRefresh = ::refresh,
+                            onOpenSite = ::openSite,
+                        )
+                        Tab.Mine -> MineScreen(
+                            repo = repo,
+                            snapshot = snapshot,
+                            onOpenSite = ::openSite,
+                            onRemove = ::removeLink,
+                        )
+                        Tab.About -> AboutScreen()
                     }
                 }
-                GlassNav(tab, { tab = it }, Modifier.align(Alignment.BottomCenter))
+                GlassNav(
+                    tab,
+                    { next ->
+                        if (next != tab) {
+                            pagePulse++
+                            tab = next
+                        }
+                    },
+                    Modifier.align(Alignment.BottomCenter),
+                )
             }
         }
     }
 
-    if (showExactDialog) {
-        AlertDialog(
-            onDismissRequest = { showExactDialog = false },
-            title = { Text("允许准时提醒") },
-            text = { Text("课前提醒需要“闹钟和提醒”权限；不使用精准闹钟时，系统可能晚几分钟。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showExactDialog = false
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                            Uri.parse("package:${context.packageName}"),
-                        ),
-                    )
-                }) { Text("去允许") }
+    if (showPermissions) {
+        PermissionSetupDialog(
+            liveName = liveUpdateName(),
+            notificationsOk = notificationsOk,
+            exactOk = exactOk,
+            promotedOk = promotedOk,
+            onAllowNotifications = {
+                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             },
-            dismissButton = { TextButton(onClick = { showExactDialog = false }) { Text("稍后") } },
-        )
-    }
-
-    if (showLiveGuide) {
-        val name = liveUpdateName()
-        AlertDialog(
-            onDismissRequest = { showLiveGuide = false },
-            title = { Text("允许系统实时提醒") },
-            text = {
-                Text(
-                    "系统还没允许本应用的${name}提醒。请到系统设置 → 通知与控制中心 → $name 里允许。" +
-                        if (name == "实时动态") "超级岛需要小米企业开发者与上架 App ID；当前是标准实时通知。" else "",
+            onOpenExactAlarm = {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                        Uri.parse("package:${context.packageName}"),
+                    ),
                 )
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    showLiveGuide = false
-                    context.startActivity(
-                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                    )
-                }) { Text("去通知设置") }
+            onOpenPromoted = {
+                context.startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                )
             },
-            dismissButton = { TextButton(onClick = { showLiveGuide = false }) { Text("知道了") } },
+            onDismiss = { markPermissionsSeen() },
         )
     }
 }
 
 @Composable
-private fun PageReveal(content: @Composable () -> Unit) {
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        progress.animateTo(1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
-    }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                val p = progress.value
-                alpha = 0.2f + 0.8f * p
-                translationX = (1f - p) * -10.dp.toPx()
-                rotationY = (1f - p) * -8f
-                transformOrigin = TransformOrigin(0f, 0.5f)
-                cameraDistance = 32f * density
-            }
-            .drawWithContent {
-                clipRect(right = size.width * progress.value) {
-                    this@drawWithContent.drawContent()
+private fun PermissionSetupDialog(
+    liveName: String,
+    notificationsOk: Boolean,
+    exactOk: Boolean,
+    promotedOk: Boolean,
+    onAllowNotifications: () -> Unit,
+    onOpenExactAlarm: () -> Unit,
+    onOpenPromoted: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("先开启提醒权限") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "开启后，课前提醒、桌面小组件和${liveName}才能准时工作。系统会直接打开对应授权页。",
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                )
+                if (Build.VERSION.SDK_INT >= 33) {
+                    PermissionDialogRow(
+                        title = "通知",
+                        detail = "上课提醒和实时提醒",
+                        allowed = notificationsOk,
+                        action = "允许",
+                        onClick = onAllowNotifications,
+                    )
                 }
-            },
+                if (Build.VERSION.SDK_INT >= 31) {
+                    PermissionDialogRow(
+                        title = "准时提醒",
+                        detail = "避免系统晚几分钟",
+                        allowed = exactOk,
+                        action = "去设置",
+                        onClick = onOpenExactAlarm,
+                    )
+                }
+                if (Build.VERSION.SDK_INT >= 36) {
+                    PermissionDialogRow(
+                        title = "${liveName}提醒",
+                        detail = "课前显示倒计时卡片",
+                        allowed = promotedOk,
+                        action = "去设置",
+                        onClick = onOpenPromoted,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("稍后") } },
+    )
+}
+
+@Composable
+private fun PermissionDialogRow(
+    title: String,
+    detail: String,
+    allowed: Boolean,
+    action: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        content()
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (allowed) {
+            Text("已允许", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Text(action, fontSize = 12.sp)
+            }
+        }
     }
 }
 
@@ -640,6 +742,7 @@ private fun HeaderBlock() {
         fontSize = 34.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = (-0.5).sp,
+        color = MaterialTheme.colorScheme.onBackground,
     )
     Spacer(Modifier.height(4.dp))
     Text(
@@ -665,9 +768,10 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
         State.NEXT -> "准备上课 · ${remainText(remain)}后"
         else -> return
     }
+    val dark = isSystemInDarkTheme()
     Surface(
-        color = MaterialTheme.colorScheme.onBackground,
-        contentColor = MaterialTheme.colorScheme.background,
+        color = if (dark) Color(0xFF2B2B30) else MaterialTheme.colorScheme.onBackground,
+        contentColor = if (dark) Color(0xFFDADAE0) else MaterialTheme.colorScheme.background,
         shape = RoundedCornerShape(50),
     ) {
         Row(
@@ -697,7 +801,6 @@ private fun TodayCardView(
         ?.let { annotate(it.lessons, now.minutes) }
         .orEmpty()
     val hiddenPast = fullSlots.count { it.state == State.PAST }
-    val slots = if (showAll && fullSlots.isNotEmpty()) fullSlots else plan?.slots.orEmpty()
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -721,24 +824,51 @@ private fun TodayCardView(
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) { Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp) }
         }
+        if (plan != null && plan.slots.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "还有 ${plan.slots.size} 门课要上",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
         Spacer(Modifier.height(12.dp))
         if (snapshot == null || plan == null) {
             Text("正在获取课表…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@SectionCard
         }
-        if (slots.isEmpty()) {
-            Text(plan.empty, fontSize = 14.sp)
-            val preview = plan.preview
-            if (preview != null) {
-                Spacer(Modifier.height(12.dp))
-                Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(8.dp))
-                preview.slots.firstOrNull()?.let { LessonRow(it) }
-            }
-        } else {
-            slots.forEachIndexed { index, slot ->
-                LessonRow(slot)
-                if (index != slots.lastIndex) Spacer(Modifier.height(12.dp))
+        AnimatedContent(
+            targetState = showAll,
+            transitionSpec = {
+                (expandVertically(
+                    expandFrom = Alignment.Bottom,
+                    animationSpec = tween(320, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(200))) togetherWith
+                    (shrinkVertically(
+                        shrinkTowards = Alignment.Bottom,
+                        animationSpec = tween(240, easing = FastOutSlowInEasing),
+                    ) + fadeOut(tween(120)))
+            },
+            label = "today-expand",
+        ) { expanded ->
+            val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
+            if (shown.isEmpty()) {
+                Text(plan.empty, fontSize = 14.sp)
+                val preview = plan.preview
+                if (preview != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    preview.slots.firstOrNull()?.let { LessonRow(it) }
+                }
+            } else {
+                Column {
+                    shown.forEachIndexed { index, slot ->
+                        LessonRow(slot)
+                        if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
+                    }
+                }
             }
         }
         if (plan.cancelled.isNotEmpty()) {
@@ -758,7 +888,20 @@ private fun TodayCardView(
                 TextButton(
                     onClick = { showAll = !showAll },
                     contentPadding = PaddingValues(0.dp),
-                ) { Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp) }
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            painter = painterResource(R.drawable.ic_chevron_down),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .rotate(if (showAll) 180f else 0f),
+                        )
+                    }
+                }
             }
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenSite, contentPadding = PaddingValues(0.dp)) {
@@ -838,7 +981,7 @@ private fun WidgetSection() {
     val manager = remember { AppWidgetManager.getInstance(context) }
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var expanded by remember { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
     var lastPinAt by remember { mutableLongStateOf(0L) }
     var showGuide by remember { mutableStateOf(false) }
 
@@ -864,31 +1007,32 @@ private fun WidgetSection() {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .animateContentSize(),
+                .clickable { showPicker = true },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("添加课表小组件到桌面", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(3.dp))
-                Hint("今天 / 明天 / 本周，点开选择一种。")
-            }
-            Text(if (expanded) "收起" else "展开", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "添加课表小组件到桌面",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
         }
-        AnimatedVisibility(expanded) {
-            Column {
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-                )
-                WidgetOption("今天", "正在上课 / 下一节，课上完预告下次", TodayReceiver::class.java, ::pin)
-                WidgetOption("明天", "明天的全部课程", TomorrowReceiver::class.java, ::pin)
-                WidgetOption("本周", "按节次排，写准确起止时间", WeekReceiver::class.java, ::pin)
-                WidgetOption("本周 · 按时长", "纵轴按真实时间，课越长越高", FullWeekReceiver::class.java, ::pin)
-                Spacer(Modifier.height(8.dp))
-                Hint("点了没反应？$MANUAL_ADD")
-            }
-        }
+    }
+
+    if (showPicker) {
+        WidgetPickerDialog(
+            onDismiss = { showPicker = false },
+            onPick = { receiver ->
+                showPicker = false
+                pin(receiver)
+            },
+        )
     }
 
     if (showGuide) {
@@ -898,6 +1042,28 @@ private fun WidgetSection() {
             text = { Text("有的桌面（比如 OPPO、一加、vivo、华为）不让 App 直接添加小组件。请手动添加：$MANUAL_ADD") },
             confirmButton = { TextButton(onClick = { showGuide = false }) { Text("知道了") } },
         )
+    }
+}
+
+@Composable
+private fun WidgetPickerDialog(onDismiss: () -> Unit, onPick: (Class<*>) -> Unit) {
+    PopupCard(onDismissRequest = onDismiss) {
+        Text("添加课表小组件", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Hint("选择一种放到桌面。")
+        Spacer(Modifier.height(10.dp))
+        WidgetOption("今天", "正在上课 / 下一节，课后自动切到明天", TodayReceiver::class.java, onPick)
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        )
+        WidgetOption("本周", "按节次排，写准确起止时间", WeekReceiver::class.java, onPick)
+        Spacer(Modifier.height(4.dp))
+        TextButton(
+            onClick = onDismiss,
+            contentPadding = PaddingValues(horizontal = 8.dp),
+            modifier = Modifier.align(Alignment.End),
+        ) { Text("取消", fontSize = 12.sp) }
     }
 }
 
@@ -959,7 +1125,12 @@ private fun ReminderSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text("⌄", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
         }
         if (Build.VERSION.SDK_INT >= 36) {
             HorizontalDivider(
@@ -1038,7 +1209,13 @@ private fun MineScreen(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
-        Text("我的", fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
+        Text(
+            "我的",
+            fontSize = 34.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = (-0.5).sp,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
         Spacer(Modifier.height(4.dp))
         Text("个人信息、链接和提醒。", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
@@ -1046,8 +1223,8 @@ private fun MineScreen(
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
-                    color = MaterialTheme.colorScheme.onBackground,
-                    contentColor = MaterialTheme.colorScheme.background,
+                    color = if (isSystemInDarkTheme()) Color(0xFF2B2B30) else MaterialTheme.colorScheme.onBackground,
+                    contentColor = if (isSystemInDarkTheme()) Color(0xFFDADAE0) else MaterialTheme.colorScheme.background,
                     shape = CircleShape,
                     modifier = Modifier.size(48.dp),
                 ) {
@@ -1221,7 +1398,13 @@ private fun AboutScreen() {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
-        Text("关于", fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
+        Text(
+            "关于",
+            fontSize = 34.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = (-0.5).sp,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
         Spacer(Modifier.height(4.dp))
         Text("南财课表 · 非官方工具", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
@@ -1248,6 +1431,11 @@ private fun AboutScreen() {
             }
             AboutRow("许可证", "GPL-3.0-or-later")
             AboutRow("版本", version.ifBlank { "1.0.0" })
+            AboutRow("图标", "IconPark · Apache-2.0") {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),
+                )
+            }
             AboutRow("数据来源", "/widget/<token>.json")
         }
         Spacer(Modifier.height(110.dp))
@@ -1304,7 +1492,12 @@ private fun AboutRow(title: String, value: String, onClick: (() -> Unit)? = null
         Text(value, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (onClick != null) {
             Spacer(Modifier.width(4.dp))
-            Text("›", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }
@@ -1427,66 +1620,17 @@ private fun NavIndicator(visible: Boolean, direction: Int) {
 
 @Composable
 private fun NavIcon(tab: Tab, color: Color) {
-    Canvas(Modifier.size(20.dp)) {
-        val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
-        val w = size.width
-        val h = size.height
-        when (tab) {
-            Tab.Timetable -> {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(w * 0.12f, h * 0.18f),
-                    size = Size(w * 0.76f, h * 0.68f),
-                    cornerRadius = CornerRadius(w * 0.12f),
-                    style = stroke,
-                )
-                drawLine(
-                    color,
-                    Offset(w * 0.12f, h * 0.42f),
-                    Offset(w * 0.88f, h * 0.42f),
-                    strokeWidth = 1.7.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-                drawLine(
-                    color,
-                    Offset(w * 0.38f, h * 0.12f),
-                    Offset(w * 0.38f, h * 0.3f),
-                    strokeWidth = 1.7.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-                drawLine(
-                    color,
-                    Offset(w * 0.62f, h * 0.12f),
-                    Offset(w * 0.62f, h * 0.3f),
-                    strokeWidth = 1.7.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-            }
-            Tab.Mine -> {
-                drawCircle(color, radius = w * 0.16f, center = Offset(w * 0.5f, h * 0.34f), style = stroke)
-                drawArc(
-                    color = color,
-                    startAngle = 200f,
-                    sweepAngle = 140f,
-                    useCenter = false,
-                    topLeft = Offset(w * 0.2f, h * 0.42f),
-                    size = Size(w * 0.6f, h * 0.5f),
-                    style = stroke,
-                )
-            }
-            Tab.About -> {
-                drawCircle(color, radius = w * 0.38f, center = Offset(w * 0.5f, h * 0.5f), style = stroke)
-                drawCircle(color, radius = w * 0.045f, center = Offset(w * 0.5f, h * 0.32f))
-                drawLine(
-                    color,
-                    Offset(w * 0.5f, h * 0.45f),
-                    Offset(w * 0.5f, h * 0.68f),
-                    strokeWidth = 1.7.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-            }
-        }
+    val icon = when (tab) {
+        Tab.Timetable -> R.drawable.ic_nav_calendar
+        Tab.Mine -> R.drawable.ic_nav_user
+        Tab.About -> R.drawable.ic_nav_info
     }
+    Icon(
+        painter = painterResource(icon),
+        contentDescription = null,
+        tint = color,
+        modifier = Modifier.size(20.dp),
+    )
 }
 
 @Composable
@@ -1498,63 +1642,85 @@ private fun TimeWheelDialog(
     val options = (listOf(0, 5, 10, 15, 20, 30) + initial).distinct().sorted()
     var selected by remember { mutableIntStateOf(initial) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    PopupCard(onDismissRequest = onDismiss) {
+        Text("选择提前时间", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(2.dp))
+        Text("课前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
+        Spacer(Modifier.height(8.dp))
+        AndroidView(
+            factory = { ctx ->
+                NumberPicker(
+                    android.view.ContextThemeWrapper(ctx, android.R.style.Theme_Material_Light),
+                ).apply {
+                    minValue = 0
+                    maxValue = options.lastIndex
+                    displayedValues = options.map {
+                        if (it == 0) "关闭" else "提前 $it 分钟"
+                    }.toTypedArray()
+                    value = options.indexOf(initial).coerceAtLeast(0)
+                    wrapSelectorWheel = true
+                    descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                    setOnValueChangedListener { _, _, newValue ->
+                        options.getOrNull(newValue)?.let { selected = it }
+                    }
+                }
+            },
+            update = { picker ->
+                val index = options.indexOf(selected)
+                if (index >= 0 && picker.value != index) picker.value = index
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        ) {
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF111111)),
+            ) { Text("取消") }
+            Button(
+                onClick = { onConfirm(selected) },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF111111),
+                    contentColor = Color.White,
+                ),
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("确定") }
+        }
+    }
+}
+
+/** 页面弹窗统一从下向上展开；慢-快-慢的缓动，和页面内的展开动画一致。 */
+@Composable
+private fun PopupCard(
+    onDismissRequest: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Dialog(onDismissRequest = onDismissRequest) {
+        val progress = remember { Animatable(0f) }
+        LaunchedEffect(Unit) {
+            progress.animateTo(1f, tween(300, easing = FastOutSlowInEasing))
+        }
         Surface(
             shape = RoundedCornerShape(28.dp),
             color = Color.White,
             contentColor = Color(0xFF111111),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer {
+                    val p = progress.value
+                    translationY = (1f - p) * 42.dp.toPx()
+                    scaleX = 0.98f + 0.02f * p
+                    scaleY = 0.92f + 0.08f * p
+                    transformOrigin = TransformOrigin(0.5f, 1f)
+                    alpha = 0.5f + 0.5f * p
+                },
         ) {
-            Column(Modifier.padding(22.dp)) {
-                Text("选择提前时间", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(2.dp))
-                Text("课前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
-                Spacer(Modifier.height(8.dp))
-                AndroidView(
-                    factory = { ctx ->
-                        NumberPicker(
-                            android.view.ContextThemeWrapper(ctx, android.R.style.Theme_Material_Light),
-                        ).apply {
-                            minValue = 0
-                            maxValue = options.lastIndex
-                            displayedValues = options.map {
-                                if (it == 0) "关闭" else "提前 $it 分钟"
-                            }.toTypedArray()
-                            value = options.indexOf(initial).coerceAtLeast(0)
-                            wrapSelectorWheel = true
-                            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                            setOnValueChangedListener { _, _, newValue ->
-                                options.getOrNull(newValue)?.let { selected = it }
-                            }
-                        }
-                    },
-                    update = { picker ->
-                        val index = options.indexOf(selected)
-                        if (index >= 0 && picker.value != index) picker.value = index
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp),
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF111111)),
-                    ) { Text("取消") }
-                    Button(
-                        onClick = { onConfirm(selected) },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF111111),
-                            contentColor = Color.White,
-                        ),
-                        shape = RoundedCornerShape(14.dp),
-                    ) { Text("确定") }
-                }
-            }
+            Column(Modifier.padding(22.dp), content = content)
         }
     }
 }
