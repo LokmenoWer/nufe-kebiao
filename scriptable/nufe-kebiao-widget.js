@@ -573,15 +573,21 @@ function needsReminderResync(payload, state, remindMinutes) {
   return payload.changed_at > state.remindSyncedAt;
 }
 
+/** 自动刷新停了、要用户自己登录一次才会恢复。error 只是暂时失败，服务器会自己重试。 */
+function needsLogin(payload) {
+  return Boolean(payload) && (payload.status === "needs_rebind" || payload.status === "captcha");
+}
+
 /**
  * 标题栏右侧只放一条最要紧的提示：
- * 登录失效 > 数据过旧 > 离线 > 更新中 > 提醒要重排 > 有调课 > 脚本可更新 > 周次。
+ * 登录失效 > 数据过旧 > 刷新失败 > 离线 > 更新中 > 提醒要重排 > 有调课 > 脚本可更新 > 周次。
  */
 function headerNote(payload, offline, day, family, extra = {}) {
-  if (payload && payload.status && payload.status !== "ok") return { text: "需重新登录", tone: "warn" };
+  if (needsLogin(payload)) return { text: "需重新登录", tone: "warn" };
   const nowSec = (extra.nowMs || Date.now()) / 1000;
   const age = payload && payload.updated_at ? nowSec - payload.updated_at : 0;
   if (age > STALE_SECONDS) return { text: `${Math.floor(age / 86400)} 天未更新`, tone: "warn" };
+  if (payload && payload.status === "error") return { text: "刷新失败", tone: "warn" };
   if (offline) return { text: "离线", tone: "faint" };
   if (payload && payload.refresh && (payload.refresh.pending || payload.refresh.due)) {
     return { text: "更新中", tone: "accent" };
@@ -1735,8 +1741,10 @@ async function refreshNow() {
   got.data = await withDelegation(got.data);
   writeJsonFile(CACHE_FILE(), got.data);
   const refresh = got.data.refresh || {};
-  if (got.data.status && got.data.status !== "ok") {
+  if (needsLogin(got.data)) {
     await say("需要重新登录", "自动刷新已暂停。打开网站登录一次后，小组件才能继续更新。");
+  } else if (got.data.status === "error") {
+    await say("刷新失败", "这次没能从学校拿到课表，服务器稍后会自动重试。");
   } else if (delegated && !refresh.pending) {
     await say("已更新", "这台手机刚从学校拿到了最新课表。");
   } else if (refresh.pending) {

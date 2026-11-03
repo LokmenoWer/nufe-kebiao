@@ -517,6 +517,10 @@ test("周末的 week 模式改看下周；工作日看本周", () => {
 test("标题栏提示的优先级：登录失效 > 数据过旧 > 离线 > 更新中 > 可更新 > 周次", () => {
   const d = PAYLOAD.today;
   assert.equal(W.headerNote({ ...PAYLOAD, status: "captcha" }, true, d, "medium").text, "需重新登录");
+  assert.equal(W.headerNote({ ...PAYLOAD, status: "needs_rebind" }, true, d, "medium").text, "需重新登录");
+  // 暂时失败服务器会自己重试，不叫用户重新登录；数据太旧时先说数据旧
+  assert.equal(W.headerNote({ ...PAYLOAD, status: "error", updated_at: Date.now() / 1000 }, false, d, "medium").text, "刷新失败");
+  assert.equal(W.headerNote({ ...PAYLOAD, status: "error", updated_at: Date.now() / 1000 - 3 * 86400 }, false, d, "medium").text, "3 天未更新");
   const old = { ...PAYLOAD, updated_at: Date.now() / 1000 - 3 * 86400 };
   assert.equal(W.headerNote(old, true, d, "medium").text, "3 天未更新");
   const fresh = { ...PAYLOAD, updated_at: Date.now() / 1000 };

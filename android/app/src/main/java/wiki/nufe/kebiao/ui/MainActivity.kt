@@ -130,6 +130,8 @@ import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Profile
+import wiki.nufe.kebiao.data.AppUpdate
+import wiki.nufe.kebiao.data.AppUpdater
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Slot
@@ -281,6 +283,9 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     var url by remember { mutableStateOf(repo.widgetUrl) }
     var snapshot by remember { mutableStateOf(repo.cached()) }
     var profile by remember { mutableStateOf<Profile?>(null) }
+    val updater = remember { AppUpdater(context) }
+    var update by remember { mutableStateOf(updater.cached()) }
+    var updateDismissed by remember { mutableStateOf(update?.let(updater::isDismissed) == true) }
     var bound by remember { mutableStateOf(repo.deviceId != null) }
     var invalid by remember { mutableStateOf(LinkState.isInvalid(context)) }
     var busy by remember { mutableStateOf(false) }
@@ -444,6 +449,18 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         profile = repo.cachedProfile()
     }
 
+    // 打开 App 时一天最多查一次新版本；查不到不打扰，“关于”里可以手动查
+    LaunchedEffect(Unit) {
+        if (updater.checkDue) {
+            runCatching { updater.check() }
+                .onSuccess {
+                    update = it
+                    updateDismissed = it?.let(updater::isDismissed) == true
+                }
+                .onFailure { Diag.w("update check failed: ${it.javaClass.simpleName}") }
+        }
+    }
+
     // 打开“我的”时取一次最新个人信息；设备被撤销时这里会清掉本机绑定
     LaunchedEffect(tab, url) {
         if (tab == Tab.Mine) {
@@ -489,6 +506,11 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                             message = message,
                             onRefresh = ::refresh,
                             onOpenSite = ::openSite,
+                            update = update.takeUnless { updateDismissed },
+                            onDismissUpdate = {
+                                update?.let(updater::dismiss)
+                                updateDismissed = true
+                            },
                         )
                         Tab.Mine -> MineScreen(
                             repo = repo,
@@ -499,7 +521,16 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                             onPair = ::save,
                             onRemove = ::removeLink,
                         )
-                        Tab.About -> AboutScreen()
+                        Tab.About -> AboutScreen(
+                            currentVersion = updater.currentVersion,
+                            update = update,
+                            onCheckUpdate = {
+                                val found = updater.check()
+                                update = found
+                                updateDismissed = found?.let(updater::isDismissed) == true
+                                found
+                            },
+                        )
                     }
                 }
                 GlassNav(
@@ -718,6 +749,26 @@ private fun SetupScreen(
     }
 }
 
+@Composable
+private fun UpdateBanner(update: AppUpdate, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    SectionCard {
+        Text("发现新版本 ${update.version}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Hint("到发布页下载安装包，覆盖安装即可，课表链接和设置都会保留。")
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(
+                onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url))) },
+                contentPadding = PaddingValues(horizontal = 4.dp),
+            ) { Text("查看", fontSize = 13.sp) }
+            TextButton(onClick = onDismiss, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Text("先不更新", fontSize = 13.sp)
+            }
+        }
+    }
+}
+
 /** 自动刷新停了：小字标题栏容易看漏，这里写清楚怎么恢复。 */
 @Composable
 private fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit, onOpenSite: () -> Unit) {
@@ -750,6 +801,8 @@ private fun HomeScreen(
     message: String?,
     onRefresh: () -> Unit,
     onOpenSite: () -> Unit,
+    update: AppUpdate?,
+    onDismissUpdate: () -> Unit,
 ) {
     val context = LocalContext.current
     var now by remember { mutableStateOf(Now.current()) }
@@ -783,6 +836,10 @@ private fun HomeScreen(
         if (message != null) {
             Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             Spacer(Modifier.height(10.dp))
+        }
+        update?.let {
+            UpdateBanner(it, onDismissUpdate)
+            Spacer(Modifier.height(14.dp))
         }
         snapshot?.payload?.takeIf { it.needsLogin }?.let { payload ->
             LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
@@ -1589,13 +1646,20 @@ private fun MineScreen(
 }
 
 @Composable
-private fun AboutScreen() {
+private fun AboutScreen(
+    currentVersion: String,
+    update: AppUpdate?,
+    onCheckUpdate: suspend () -> AppUpdate?,
+) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val version = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull().orEmpty()
     }
+    var checkResult by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1638,7 +1702,29 @@ private fun AboutScreen() {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(REPO_URL)))
             }
             AboutRow("许可证", "GPL-3.0-or-later")
-            AboutRow("版本", version.ifBlank { "1.1.1" })
+            AboutRow("版本", version.ifBlank { currentVersion })
+            AboutRow(
+                "检查更新",
+                when {
+                    checking -> "检查中…"
+                    update != null -> "新版本 ${update.version}"
+                    else -> checkResult ?: "点按检查"
+                },
+            ) {
+                if (update != null) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url)))
+                } else if (!checking) {
+                    checking = true
+                    scope.launch {
+                        checkResult = try {
+                            if (onCheckUpdate() == null) "已是最新" else null
+                        } catch (_: Exception) {
+                            "检查失败，稍后再试"
+                        }
+                        checking = false
+                    }
+                }
+            }
             AboutRow("图标", "IconPark · Apache-2.0") {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),
