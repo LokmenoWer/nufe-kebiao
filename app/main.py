@@ -15,13 +15,13 @@ from urllib.parse import quote
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin, cas, crypto, db, ics, mailer, mobile_devices, notify, presence, scheduler, service, widget
+from . import admin, android_releases, cas, crypto, db, ics, mailer, mobile_devices, notify, presence, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -1070,6 +1070,34 @@ async def versioned_asset(version: str, path: str, request: Request):
         resp.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if version == _asset_version()
                                          else "no-cache")
     return resp
+
+
+@app.get("/android/releases.json")
+def android_release_feed():
+    """给连不上 GitHub 的 App 查新版本：不需要登录，也不含任何个人信息。"""
+    return JSONResponse(android_releases.feed(), headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/android/latest.apk")
+def android_latest_apk():
+    tag = android_releases.latest_stable_tag()
+    if not tag:
+        raise HTTPException(404, "暂时没有可下载的版本")
+    return RedirectResponse(f"apk/{tag}.apk", 302)
+
+
+@app.get("/android/apk/{tag}.apk")
+def android_apk(tag: str):
+    try:
+        found = android_releases.apk_path(tag)
+    except android_releases.MirrorError as e:
+        raise HTTPException(502, str(e)) from e
+    if not found:
+        raise HTTPException(404)
+    path, name = found
+    # 安装包本来就压缩过：标明 identity，GZip 中间件不再白压一遍
+    return FileResponse(path, media_type="application/vnd.android.package-archive", filename=name,
+                        headers={"Cache-Control": "public, max-age=86400", "Content-Encoding": "identity"})
 
 
 @app.get("/health")

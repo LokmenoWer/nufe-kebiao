@@ -1,14 +1,17 @@
 """Web 层端到端测试：上游（CAS/教务）全部打桩，不访问学校服务器。"""
 import base64
+import hashlib
 import time
+from types import SimpleNamespace
 
 import pytest
+import requests
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from app import admin, cas, db, jwxt, main, mobile_devices, scheduler, service
+from app import admin, android_releases, cas, db, jwxt, main, mobile_devices, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -1862,6 +1865,116 @@ def widget_user(up):
 
 def _upload(path, body, **kw):
     return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
+
+
+APK = b"fake-apk-bytes"
+
+
+def _github_release(tag, pre=False, data=APK, **over):
+    return {"tag_name": tag, "prerelease": pre, "draft": False, "assets": [{
+        "name": f"app-{tag}.apk", "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+        "browser_download_url": f"https://github.com/LokmenoWer/nufe-kebiao/releases/download/{tag}/app-{tag}.apk",
+    }], **over}
+
+
+@pytest.fixture
+def github(monkeypatch, tmp_path):
+    """假的 GitHub：测试改 state 里的内容；calls 记请求，broken 模拟连不上。"""
+    state = SimpleNamespace(releases=[_github_release("1.3.0-beta.1", pre=True), _github_release("1.2.0")],
+                            apk=APK, calls=[], broken=False)
+
+    class Reply:
+        def __init__(self, url):
+            self.url = url
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return state.releases
+
+        def iter_content(self, _size):
+            yield state.apk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def get(url, **_kw):
+        state.calls.append(url)
+        if state.broken:
+            raise requests.ConnectionError
+        return Reply(url)
+
+    monkeypatch.setattr(android_releases.requests, "get", get)
+    monkeypatch.setattr(android_releases, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(android_releases, "_releases", [])
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    return state
+
+
+def test_android_release_feed_mirrors_github(github, up):
+    r = TestClient(app).get("/android/releases.json")
+    assert r.status_code == 200 and "public" in r.headers["cache-control"]
+    feed = r.json()
+    assert [x["tag_name"] for x in feed] == ["1.3.0-beta.1", "1.2.0"]
+    assert feed[0]["prerelease"] is True and feed[0]["assets"][0]["name"].endswith(".apk")
+    assert feed[1]["html_url"].endswith("/android/apk/1.2.0.apk")
+    # 不是每个请求都去问 GitHub
+    TestClient(app).get("/android/releases.json")
+    assert len(github.calls) == 1
+
+
+def test_android_release_feed_skips_unusable_and_survives_outage(github, up, monkeypatch):
+    bad_host = _github_release("9.0.0")
+    bad_host["assets"][0]["browser_download_url"] = "https://evil.example/app.apk"
+    no_digest = _github_release("9.0.1")
+    no_digest["assets"][0].pop("digest")
+    github.releases = [bad_host, no_digest, _github_release("android-v1.0.0-preview"),
+                       _github_release("9.0.2", draft=True), _github_release("1.2.0")]
+    assert [x["tag_name"] for x in TestClient(app).get("/android/releases.json").json()] == ["1.2.0"]
+    # GitHub 连不上：继续给旧结果，隔一会儿才再试
+    github.broken = True
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    calls = len(github.calls)
+    assert [x["tag_name"] for x in TestClient(app).get("/android/releases.json").json()] == ["1.2.0"]
+    TestClient(app).get("/android/releases.json")
+    assert len(github.calls) == calls + 1
+
+
+def test_android_apk_mirror_downloads_once_and_verifies(github, up, tmp_path):
+    c = TestClient(app)
+    r = c.get("/android/apk/1.2.0.apk")
+    assert r.status_code == 200 and r.content == APK
+    assert r.headers["content-type"] == "application/vnd.android.package-archive"
+    assert "app-1.2.0.apk" in r.headers["content-disposition"] and "content-encoding" not in {
+        k for k, v in r.headers.items() if v == "gzip"}
+    downloads = [u for u in github.calls if u.endswith(".apk")]
+    assert len(downloads) == 1
+    c.get("/android/apk/1.2.0.apk")
+    assert len([u for u in github.calls if u.endswith(".apk")]) == 1
+    # 只认发布列表里的版本，路径里塞不进别的东西
+    assert c.get("/android/apk/6.6.6.apk").status_code == 404
+    assert c.get("/android/apk/..%2F..%2Fkebiao.apk").status_code == 404
+    # 校验不过：不留文件，不发给用户
+    github.apk = b"tampered"
+    assert c.get("/android/apk/1.3.0-beta.1.apk").status_code == 502
+    assert not (tmp_path / "1.3.0-beta.1.apk").exists() and not list(tmp_path.glob("*.tmp"))
+    # 从发布列表里消失的版本：缓存删掉
+    (tmp_path / "0.0.1.apk").write_bytes(b"old")
+    android_releases._next_refresh = 0.0
+    c.get("/android/releases.json")
+    assert not (tmp_path / "0.0.1.apk").exists() and (tmp_path / "1.2.0.apk").exists()
+
+
+def test_android_latest_apk_points_at_stable(github, up):
+    r = TestClient(app).get("/android/latest.apk", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "apk/1.2.0.apk"
+    github.releases = [_github_release("1.3.0-beta.1", pre=True)]
+    android_releases._next_refresh = 0.0
+    assert TestClient(app).get("/android/latest.apk", follow_redirects=False).status_code == 404
 
 
 def test_mobile_feed_shares_token_without_fetch_task(widget_user, up):

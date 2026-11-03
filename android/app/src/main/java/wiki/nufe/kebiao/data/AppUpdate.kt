@@ -50,9 +50,9 @@ object UpdateCheck {
 
     /**
      * 从 Releases 列表里挑最新的一个。正式版用户只看正式版，预发布版用户两种都看。
-     * 没带 apk 的、草稿、地址不在本仓库发布页下的都不算。
+     * 没带 apk 的、草稿、地址不在 [pagePrefix] 下的都不算；本站镜像传自己的下载地址前缀。
      */
-    fun pick(json: String, current: String): AppUpdate? {
+    fun pick(json: String, current: String, pagePrefix: String = RELEASE_PAGE): AppUpdate? {
         val releases = JSONArray(json)
         val allowPre = isPrerelease(current)
         var best: AppUpdate? = null
@@ -60,7 +60,7 @@ object UpdateCheck {
             val r = releases.getJSONObject(i)
             val tag = r.optString("tag_name")
             val url = r.optString("html_url")
-            if (r.optBoolean("draft") || !url.startsWith(RELEASE_PAGE)) continue
+            if (r.optBoolean("draft") || !url.startsWith(pagePrefix)) continue
             if (r.optBoolean("prerelease") && !allowPre) continue
             val assets = r.optJSONArray("assets") ?: continue
             if ((0 until assets.length()).none { assets.getJSONObject(it).optString("name").endsWith(".apk") }) continue
@@ -71,7 +71,10 @@ object UpdateCheck {
     }
 }
 
-/** 检查更新：打开 App 时一天最多查一次，“关于”里可以手动查。只请求 GitHub，不带课表链接等任何个人信息。 */
+/**
+ * 检查更新：打开 App 时一天最多查一次，“关于”里可以手动查。先问 GitHub，连不上再问本站镜像，
+ * 这样下载地址也是用户连得上的。不带课表链接等任何个人信息。
+ */
 class AppUpdater(context: Context) {
     private val app = context.applicationContext
     private val prefs = app.getSharedPreferences("app_update", Context.MODE_PRIVATE)
@@ -89,23 +92,32 @@ class AppUpdater(context: Context) {
 
     val checkDue get() = System.currentTimeMillis() - prefs.getLong(KEY_LAST, 0) >= CHECK_EVERY_MS
 
-    /** 查一次；网络或解析失败抛异常，上次的结果不动。 */
+    /** 查一次；两边都失败才抛异常，上次的结果不动。 */
     suspend fun check(): AppUpdate? = withContext(Dispatchers.IO) {
-        val conn = URL(UpdateCheck.RELEASES_API).openConnection() as HttpURLConnection
+        val update = try {
+            UpdateCheck.pick(read(UpdateCheck.RELEASES_API), currentVersion)
+        } catch (_: Exception) {
+            val site = (Repository(app).siteUrl() ?: DEFAULT_SITE).trimEnd('/')
+            UpdateCheck.pick(read("$site/android/releases.json"), currentVersion, "$site/android/apk/")
+        }
+        prefs.edit()
+            .putLong(KEY_LAST, System.currentTimeMillis())
+            .putString(KEY_VERSION, update?.version)
+            .putString(KEY_URL, update?.url)
+            .apply()
+        update
+    }
+
+    private fun read(url: String): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
         try {
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 15_000
-            conn.setRequestProperty("Accept", "application/vnd.github+json")
+            conn.connectTimeout = 6_000
+            conn.readTimeout = 10_000
+            conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("User-Agent", "nufe-kebiao-android/1")
             val status = conn.responseCode
             if (status !in 200..299) throw IOException("HTTP $status")
-            val update = UpdateCheck.pick(conn.inputStream.bufferedReader().use { it.readText() }, currentVersion)
-            prefs.edit()
-                .putLong(KEY_LAST, System.currentTimeMillis())
-                .putString(KEY_VERSION, update?.version)
-                .putString(KEY_URL, update?.url)
-                .apply()
-            update
+            return conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
         }
@@ -117,6 +129,7 @@ class AppUpdater(context: Context) {
 
     private companion object {
         const val CHECK_EVERY_MS = 24 * 60 * 60_000L
+        const val DEFAULT_SITE = "https://kebiao.nufe.wiki"
         const val KEY_LAST = "last_check"
         const val KEY_VERSION = "version"
         const val KEY_URL = "url"

@@ -755,7 +755,7 @@ private fun UpdateBanner(update: AppUpdate, onDismiss: () -> Unit) {
     SectionCard {
         Text("发现新版本 ${update.version}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Hint("到发布页下载安装包，覆盖安装即可，课表链接和设置都会保留。")
+        Hint("下载安装包后覆盖安装即可，课表链接和设置都会保留。")
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(

@@ -31,7 +31,8 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
 
   const steps = h("ol", { class: "widget-steps" },
     h("li", {}, "下载安装最新版 ",
-      h("a", { href: RELEASE_URL, target: "_blank", rel: "noopener noreferrer" }, "nufe课表 安卓 App"), "。"),
+      h("a", { href: RELEASE_URL, target: "_blank", rel: "noopener noreferrer" }, "nufe课表 安卓 App"),
+      "；打不开 GitHub 时用", h("a", { href: "android/latest.apk" }, "本站下载"), "。"),
     h("li", {}, "在手机浏览器里点上面的“在安卓 App 中打开”，或“复制配对链接”后在 App 里粘贴。"),
     h("li", {}, "在 App 里点“添加课表小组件到桌面”，或长按桌面 → 小组件 → nufe课表。本周课表建议 4×3 以上。"),
     h("li", {}, "上课提醒在 App 里选提前几分钟，并允许通知；国产系统请允许 App 自启动、后台运行。"));

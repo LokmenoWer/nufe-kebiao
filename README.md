@@ -203,6 +203,14 @@ MAIL_FROM_NAME=南财课表
 - **撤销**：设置里能查看和撤销设备（`/api/mobile/devices`）；撤销后课表仍可读，手机丢失请重新生成链接——重新生成 / 停用会让所有设备和配对码失效。
 - **防不住的**：手机被 root 或完全控制；课表本身的课程、教师、教室也可能让人推断出身份，这一层靠重新生成链接补救。
 
+### 安卓安装包镜像
+
+不是每个用户都能直连 GitHub，所以服务器也提供版本信息和安装包，不需要登录，也不用人工维护：
+
+- `GET /android/releases.json`：每 30 分钟读一次 GitHub Releases（只取最新 5 个版本），字段和 GitHub 接口一致，GitHub 连不上时继续给旧结果。App 先问 GitHub，失败才问这里。
+- `GET /android/apk/<版本>.apk`：第一次被要时下载到 `data/android-apk/`，校验 GitHub 给的 sha256 后才发给用户，版本下架后自动清理。`GET /android/latest.apk` 跳到最新正式版。
+- 服务器要能连上 GitHub，否则新版本不会出现在镜像里，已缓存的结果仍然可用。镜像再可信，最后也由系统把关：签名不同的安装包无法覆盖安装。
+
 ### iOS 桌面小组件（Scriptable）
 
 设置 → “iOS 桌面小组件”：生成只读链接 → “复制脚本”（脚本里已填好本人链接）→ 粘进免费的 [Scriptable](https://apps.apple.com/cn/app/scriptable/id1405459188) → 桌面添加 Scriptable 小组件并选这个脚本。Parameter 填 `today`（默认）/ `tomorrow` / `week` / `full`（也可写 `铺满`），后面可加提前分钟数（`today 15`、`week 20`；`today 0` 关闭上课提醒，不写则提前 10 分钟）。也可以在 Scriptable 里运行脚本 →“提醒时间”直接选（Parameter 里写了数字时以 Parameter 为准）。

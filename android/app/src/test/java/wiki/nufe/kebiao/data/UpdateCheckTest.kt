@@ -48,6 +48,14 @@ class UpdateCheckTest {
     }
 
     @Test
+    fun mirrorOnlyTrustsItsOwnDownloadPath() {
+        val site = "https://kebiao.nufe.wiki/android/apk/"
+        val json = list(release("2.0.0", url = "${site}2.0.0.apk"), release("3.0.0"))
+        assertEquals("${site}2.0.0.apk", UpdateCheck.pick(json, "1.1.1", site)?.url)
+        assertNull(UpdateCheck.pick(list(release("3.0.0", url = "https://evil.example/a.apk")), "1.1.1", site))
+    }
+
+    @Test
     fun ignoresUnusableReleases() {
         assertNull(UpdateCheck.pick(list(release("2.0.0", apk = false)), "1.1.1"))
         assertNull(UpdateCheck.pick(list(release("2.0.0", draft = true)), "1.1.1"))
