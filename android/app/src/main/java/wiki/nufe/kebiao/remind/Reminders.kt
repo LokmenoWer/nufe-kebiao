@@ -77,7 +77,7 @@ object Reminders {
                 val changed = if (lesson.changed) " · 已调课${lesson.was?.let { "（$it）" } ?: ""}" else ""
                 out += Item(
                     atMs = at,
-                    title = "$lead 分钟后：${lesson.name}",
+                    title = "${if (lead % 60 == 0) "${lead / 60} 小时" else "$lead 分钟"}后：${lesson.name}",
                     text = "${lesson.start}–${lesson.end} · $place$changed",
                     date = day.date,
                     start = lesson.start,

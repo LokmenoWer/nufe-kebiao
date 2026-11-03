@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * `/widget/<token>.json` 的内容（服务端 app/widget.py 的 build()）。
+ * `/mobile/<token>.json` 的内容（服务端 app/widget.py 的 build()）。
  * 周次、缺失时间的兜底、课程颜色都由服务端算好，这里只解析，不重算。
  */
 data class Payload(
@@ -21,8 +21,6 @@ data class Payload(
     val upcoming: Day?,
     val changedAt: Long?,
     val refresh: Refresh,
-    val student: StudentInfo?,
-    val mail: MailInfo?,
 ) {
     companion object {
         fun parse(text: String): Payload {
@@ -43,6 +41,17 @@ data class Payload(
                 refresh = o.optJSONObject("refresh").let {
                     Refresh(pending = it?.optBoolean("pending") == true, due = it?.optBoolean("due") == true)
                 },
+            )
+        }
+    }
+}
+
+/** `/mobile/<token>/profile` 的内容：个人信息只给配对过的设备，不在课表 JSON 里。 */
+data class Profile(val student: StudentInfo?, val mail: MailInfo?) {
+    companion object {
+        fun parse(text: String): Profile {
+            val o = JSONObject(text)
+            return Profile(
                 student = o.optJSONObject("student")?.let(StudentInfo::parse)?.takeIf { it.hasData },
                 mail = o.optJSONObject("mail")?.let {
                     MailInfo(bound = it.optBoolean("bound"), email = it.str("email"))

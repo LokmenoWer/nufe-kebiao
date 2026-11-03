@@ -93,8 +93,7 @@ object Diagnostics {
             appendLine("缓存：${snapshot?.fetchedAtMs?.let(::time) ?: "无"}")
             appendLine("离线：${snapshot?.offline == true}")
             appendLine("服务状态：${payload?.status ?: "无"}")
-            appendLine("已获取学生信息：${payload?.student?.code != null}")
-            appendLine("提醒邮箱已绑定：${payload?.mail?.bound == true}")
+            appendLine("设备已绑定：${repo.deviceId != null}")
             appendLine("提醒：提前 ${repo.remindMinutes} 分钟，闹钟 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
             appendLine("准时提醒：${Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true}")
@@ -127,7 +126,7 @@ object Diagnostics {
     }.getOrElse { "读取日志失败：${it.javaClass.simpleName}" }
 
     private fun redact(text: String): String = text
-        .replace(Regex("""/widget/[A-Za-z0-9_-]+\.json"""), "/widget/<redacted>")
+        .replace(Regex("""/(mobile|widget)/[A-Za-z0-9_-]{16,}(\.json)?"""), "/$1/<redacted>")
         .replace(Regex("""nufekebiao://setup\?url=[^\s]+"""), "nufekebiao://setup?url=<redacted>")
         .replace(Regex("""[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"""), "<email>")
 

@@ -1,4 +1,4 @@
-/** 设置里的“桌面小组件”：生成只读链接，iOS 复制 Scriptable 脚本、安卓交给 App，使用步骤。 */
+/** 设置里的“iOS 桌面小组件”：生成只读链接、复制 Scriptable 脚本、使用步骤。安卓见 settings-android.js。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -34,11 +34,6 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     h("span", {}, "用这台手机的网络直接向学校获取课表（推荐）",
       h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件，"
         + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新）")));
-  // 安卓 App（android/）直接读同一条链接：nufekebiao:// 能一键带过去，没装 App 时也可以复制链接手动粘贴
-  const androidOpen = h("a", { class: "btn btn-sm", href: "#" }, "在安卓 App 中打开");
-  const androidCopy = h("button", { type: "button", class: "btn btn-sm btn-ghost", onClick: () => copyLink() },
-    icon("copy"), h("span", {}, "复制链接"));
-  const androidRow = h("div", { class: "button-row" }, androidOpen, androidCopy);
   const manual = h("textarea", {
     class: "widget-script", readonly: "", rows: "6", hidden: true, "aria-label": "小组件脚本，手动全选复制",
   });
@@ -61,12 +56,6 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
       + "在 Scriptable 里运行脚本，选“刷新课表”可以马上更新。"),
     h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
 
-  const androidSteps = h("ol", { class: "widget-steps" },
-    h("li", {}, "安装“nufe课表”安卓 App（源码在项目仓库的 android/ 目录）。"),
-    h("li", {}, "在手机浏览器里点上面的“在安卓 App 中打开”，或“复制链接”后在 App 里粘贴。"),
-    h("li", {}, "在 App 里点“添加‘今天’ / ‘本周’”，或长按桌面 → 小组件 → nufe课表。本周课表建议 4×3 以上。"),
-    h("li", {}, "上课提醒在 App 里选提前几分钟，并允许通知；国产系统请允许 App 自启动、后台运行。"));
-
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "借助免费的 Scriptable App，在 iPhone / iPad 桌面和锁屏上显示今天、明天或本周的课。"
       + "课表过期或快上课时，小组件会主动请服务器更新，并在上课前发本地通知。"
@@ -74,11 +63,8 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
     fetchRow,
     manual,
-    h("p", { class: "hint" }, "安卓：用“nufe课表”App 在桌面显示今天和本周的课，并在课前提醒。"),
-    androidRow,
     status,
-    h("details", { class: "widget-help" }, h("summary", {}, "iOS 安装步骤"), steps),
-    h("details", { class: "widget-help" }, h("summary", {}, "安卓安装步骤"), androidSteps));
+    h("details", { class: "widget-help" }, h("summary", {}, "安装步骤"), steps));
 
   function render() {
     createBtn.hidden = Boolean(url);
@@ -86,27 +72,19 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     rotateBtn.hidden = !url;
     disableBtn.hidden = !url;
     fetchRow.hidden = !url;
-    androidRow.hidden = !url;
-    androidOpen.href = url ? `nufekebiao://setup?url=${encodeURIComponent(url)}` : "#";
     if (!url) manual.hidden = true;
-  }
-
-  function set(next) {
-    url = next;
-    onChange?.(url);
-    render();
   }
 
   async function rotate() {
     if (url && !await confirmDialog({
       title: "重新生成小组件链接？",
-      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本（安卓 App 里重新粘贴链接）。",
+      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本。安卓 App 共用这个凭证，也要重新粘贴链接。",
       confirmText: "重新生成",
     })) return;
     try {
       const result = await api.post("api/widget/rotate");
       const had = Boolean(url);
-      set(result.widget_url);
+      onChange?.(result);
       manual.hidden = true;
       status.textContent = had ? "已生成新链接：请重新复制脚本，替换 Scriptable 里的旧脚本。" : "链接已生成，下一步：复制脚本。";
     } catch (error) {
@@ -151,30 +129,16 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     }
   }
 
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(url);
-      status.textContent = "链接已复制，打开 nufe课表 App 粘贴即可。";
-      showToast("链接已复制", { type: "success" });
-    } catch {
-      manual.value = url;
-      manual.hidden = false;
-      manual.focus();
-      manual.select();
-      status.textContent = "浏览器没允许自动复制：链接已选中，请手动复制。";
-    }
-  }
-
   async function disable() {
     if (!await confirmDialog({
       title: "停用桌面小组件？",
-      message: "链接会立即失效，已经添加的小组件会提示链接失效。",
+      message: "链接会立即失效，已经添加的小组件和安卓 App 都会提示链接失效。",
       confirmText: "停用",
       danger: true,
     })) return;
     try {
       await api.post("api/widget/disable");
-      set(null);
+      onChange?.({ widget_url: null, mobile_url: null });
       status.textContent = "已停用。";
     } catch (error) {
       showToast(error.message, { type: "error" });
@@ -182,5 +146,12 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   }
 
   render();
-  return { el };
+  return {
+    el,
+    update(next) {
+      url = next;
+      status.textContent = "";
+      render();
+    },
+  };
 }

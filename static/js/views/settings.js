@@ -1,4 +1,4 @@
-/** 设置抽屉：账号、自动刷新、邮件通知、日历订阅、桌面小组件、外观、删除数据。 */
+/** 设置抽屉：账号、自动刷新、邮件通知、日历订阅、iOS 小组件、安卓 App、外观、删除数据。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -10,6 +10,7 @@ import { initialOf } from "../courses.js";
 import { getThemeMode, setThemeMode } from "../theme.js";
 import { createEmailSection } from "./settings-email.js";
 import { createWidgetSection } from "./settings-widget.js";
+import { createAndroidSection } from "./settings-android.js";
 
 const STATUS = {
   ok: { label: "正常", tone: "ok" },
@@ -143,15 +144,21 @@ export function openSettings({
     })
     : null;
 
+  // iOS 和安卓共用一个 token：一边生成 / 停用，另一边跟着变
+  const onLinksChange = (links) => {
+    current.widget_url = links.widget_url;
+    current.mobile_url = links.mobile_url;
+    widgetSection.update(links.widget_url);
+    androidSection.update(links.mobile_url);
+    onUpdated?.(current);
+  };
   const widgetSection = createWidgetSection({
     widgetUrl: current.widget_url,
     widgetFetch: current.widget_fetch !== false,
     onFetchChange: (enabled) => { current.widget_fetch = enabled; },
-    onChange: (url) => {
-      current.widget_url = url;
-      onUpdated?.(current);
-    },
+    onChange: onLinksChange,
   });
+  const androidSection = createAndroidSection({ mobileUrl: current.mobile_url, onChange: onLinksChange });
 
   const content = h("div", { class: "settings-body" },
     h("header", { class: "settings-head" },
@@ -185,7 +192,9 @@ export function openSettings({
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
       icsInfo),
 
-    section("桌面小组件（iOS / 安卓）", widgetSection.el),
+    section("iOS 桌面小组件", widgetSection.el),
+
+    section("安卓 App", androidSection.el),
 
     section("外观", themeButtons),
 

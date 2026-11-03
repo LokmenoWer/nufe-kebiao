@@ -1,8 +1,14 @@
 """Web 层端到端测试：上游（CAS/教务）全部打桩，不访问学校服务器。"""
+import base64
+import time
+
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from app import admin, cas, db, jwxt, scheduler, service
+from app import admin, cas, db, jwxt, main, mobile_devices, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -210,6 +216,7 @@ def up(monkeypatch):
     from app import security
     security.login_by_ip._hits.clear()
     security.login_by_student._hits.clear()
+    main.mobile_pair_by_user._hits.clear()
     fake = FakeUpstream()
     monkeypatch.setattr(cas, "login", fake.login)
     FakeFlow.up = fake
@@ -1170,6 +1177,7 @@ def test_ics_access_log_and_error_paths_are_redacted():
     assert "secret-token" not in record.getMessage() and "<redacted>" in record.getMessage()
     assert _safe_log_path("/ics/secret-token.ics") == "/ics/<redacted>"
     assert _safe_log_path("/widget/secret-token.json?x=1") == "/widget/<redacted>"
+    assert _safe_log_path("/mobile/secret-token.json") == "/mobile/<redacted>"
     assert _safe_log_path("/api/me") == "/api/me"
 
 
@@ -1379,8 +1387,8 @@ def test_widget_link_lifecycle(up):
     r = anon.get(path)
     payload = r.json()
     assert r.status_code == 200 and payload["v"] == 1 and payload["semester"] == "2026-2027-1"
-    assert payload["student"] == {"name": "学生1", "code": "2023001"}
-    assert payload["mail"] == {"bound": False, "email": None}
+    # 个人信息不随只读链接走：只有配对过的设备能读（见 test_mobile_profile_*）
+    assert "student" not in payload and "mail" not in payload and "学生1" not in r.text
     assert r.headers["x-robots-tag"].startswith("noindex") and "private" in r.headers["cache-control"]
     script = c.get("/api/widget/script")
     assert script.status_code == 200 and url in script.text and "__WIDGET_URL__" not in script.text
@@ -1398,10 +1406,10 @@ def test_widget_feed_returns_only_masked_email(up, outbox):
     _login(c, "2023001")
     _bind_email(c, outbox, "Me.Name@Example.com")
     path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
-    r = TestClient(app).get(path)
-    assert r.status_code == 200
-    assert r.json()["mail"] == {"bound": True, "email": "M***e@example.com"}
-    assert "Me.Name@example.com" not in r.text
+    for feed in (path, path.replace("/widget/", "/mobile/")):
+        r = TestClient(app).get(feed)
+        assert r.status_code == 200
+        assert "mail" not in r.json() and "@example.com" not in r.text
 
 
 def test_widget_script_self_update_by_token(up):
@@ -1854,6 +1862,158 @@ def widget_user(up):
 
 def _upload(path, body, **kw):
     return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
+
+
+def test_mobile_feed_shares_token_without_fetch_task(widget_user, up):
+    c, path = widget_user
+    links = c.get("/api/me").json()
+    token = path.removeprefix("/widget/").removesuffix(".json")
+    assert links["mobile_url"] == f"http://testserver/mobile/{token}.json"
+    feed = TestClient(app).get(f"/mobile/{token}.json")
+    assert feed.status_code == 200
+    data = feed.json()
+    assert data["today"] == TestClient(app).get(path).json()["today"]
+    # 代抓任务（含教务 cookie）只给 Scriptable 脚本，安卓 App 不交回，发了只会记失败
+    assert data["refresh"]["pending"] is True and "no-store" in feed.headers["cache-control"]
+    assert "fetch" not in data and "delegate" not in data and "SESSION=jw-1" not in feed.text
+    assert TestClient(app).get("/mobile/nope.json").status_code == 404
+    c.post("/api/widget/disable", headers=_csrf(c))
+    assert TestClient(app).get(f"/mobile/{token}.json").status_code == 404
+    assert c.get("/api/me").json()["mobile_url"] is None
+
+
+def rsa_key():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+class _Phone:
+    """测试里的安卓 App：一把 P-256 设备密钥，会配对、会签名。"""
+
+    def __init__(self, c):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.token = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].split("/")[-1][:-5]
+        self.device_id = None
+
+    def public(self):
+        der = self.key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        return base64.b64encode(der).decode()
+
+    def pair(self, code, **kw):
+        r = TestClient(app).post(f"/mobile/{self.token}/pair", json={
+            "code": code, "public_key": kw.pop("public_key", self.public()), "name": "Test Phone"}, **kw)
+        if r.status_code == 200:
+            self.device_id = r.json()["device_id"]
+        return r
+
+    def profile(self, at=None, key=None, device_id=None):
+        device_id = device_id or self.device_id
+        ts = str(int(at if at is not None else time.time()))
+        message = mobile_devices.signed_message(self.token, device_id, ts)
+        sig = (key or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
+        return TestClient(app).get(f"/mobile/{self.token}/profile", headers={
+            "X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()})
+
+
+def _pair_code(c):
+    r = c.post("/api/mobile/pair", headers=_csrf(c))
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    url = r.json()["pair_url"]
+    assert url.startswith("nufekebiao://setup?url=http%3A%2F%2Ftestserver%2Fmobile%2F")
+    return url.split("&pair=")[1]
+
+
+def test_mobile_profile_needs_paired_device(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    phone = _Phone(c)
+    anon = TestClient(app)
+    # 只拿到链接：课表能读，个人信息读不到，也绑不上
+    assert anon.get(f"/mobile/{phone.token}.json").status_code == 200
+    assert anon.get(f"/mobile/{phone.token}/profile").status_code == 401
+    assert phone.pair("guess-" * 8).status_code == 400
+    code = _pair_code(c)
+    assert TestClient(app).post("/mobile/nope/pair", json={"code": code, "public_key": phone.public()}).status_code == 404
+    assert phone.pair(code, public_key="bm90LWEta2V5").status_code == 400  # 公钥不对不消耗配对码
+    rsa = base64.b64encode(rsa_key().public_key().public_bytes(
+        Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+    assert phone.pair(code, public_key=rsa).status_code == 400
+    assert phone.pair(code, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert phone.pair(code).status_code == 200
+    assert phone.pair(code).status_code == 400  # 配对码只能用一次
+    r = phone.profile()
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    assert r.json()["student"]["name"] == "学生1" and r.json()["student"]["code"] == "2023001"
+    assert "credits" not in r.json()["student"] and r.json()["mail"] == {"bound": False, "email": None}
+    # 别的密钥冒充、请求里没签名：都不行
+    assert phone.profile(key=ec.generate_private_key(ec.SECP256R1())).status_code == 401
+    assert "server_time" not in phone.profile(key=ec.generate_private_key(ec.SECP256R1()), at=1).json()
+    # 手机时钟不准：真设备才告诉它校正
+    stale = phone.profile(at=time.time() - mobile_devices.SIG_SKEW - 60)
+    assert stale.status_code == 401 and abs(stale.json()["server_time"] - time.time()) < 5
+
+
+def test_mobile_pair_code_expires_and_is_per_user(up):
+    c, other = TestClient(app), TestClient(app)
+    _login(c, "2023001")
+    _login(other, "2023002")
+    phone, stranger = _Phone(c), _Phone(other)
+    code = _pair_code(c)
+    assert stranger.pair(code).status_code == 400  # 别人的配对码
+    old = code
+    code = _pair_code(c)
+    assert phone.pair(old).status_code == 400  # 新码发出后旧码作废
+    with db.tx() as conn:
+        conn.execute("UPDATE mobile_pairings SET expires_at=?", (time.time() - 1,))
+    assert phone.pair(code).status_code == 400
+    assert phone.pair(_pair_code(c)).status_code == 200
+    assert stranger.profile(device_id=phone.device_id).status_code == 401  # 别人的设备 id
+
+
+def test_mobile_device_management_and_revocation(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    phone = _Phone(c)
+    assert c.post("/api/mobile/pair", headers=ORIGIN).status_code == 403  # 没带 CSRF
+    assert phone.pair(_pair_code(c)).status_code == 200
+    devices = c.get("/api/mobile/devices").json()["devices"]
+    assert [d["name"] for d in devices] == ["Test Phone"] and "public_key" not in devices[0]
+    # 同一把钥匙重新配对只留一条
+    assert phone.pair(_pair_code(c)).status_code == 200
+    assert len(c.get("/api/mobile/devices").json()["devices"]) == 1
+    # 撤销：个人信息读不到了，课表还能读
+    assert c.post("/api/mobile/devices/nope/revoke", headers=_csrf(c)).status_code == 404
+    device = phone.device_id
+    assert c.post(f"/api/mobile/devices/{device}/revoke", headers=_csrf(c)).status_code == 200
+    assert phone.profile().status_code == 401
+    assert TestClient(app).get(f"/mobile/{phone.token}.json").status_code == 200
+    # 数量上限，满了不消耗配对码
+    phones = []
+    for _ in range(mobile_devices.MAX_DEVICES):
+        extra = _Phone.__new__(_Phone)
+        extra.key, extra.token, extra.device_id = ec.generate_private_key(ec.SECP256R1()), phone.token, None
+        assert extra.pair(_pair_code(c)).status_code == 200
+        phones.append(extra)
+    assert phone.pair(_pair_code(c)).status_code == 400
+    # 重新生成 / 停用链接：所有设备和配对码都失效
+    code = _pair_code(c)
+    c.post("/api/widget/rotate", headers=_csrf(c))
+    assert c.get("/api/mobile/devices").json()["devices"] == []
+    with db.tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM mobile_pairings").fetchone()[0] == 0
+    assert phones[0].profile().status_code == 404 and phones[0].pair(code).status_code == 404
+    c.post("/api/widget/disable", headers=_csrf(c))
+    assert c.post("/api/mobile/pair", headers=_csrf(c)).status_code == 404
+
+
+def test_mobile_bind_sends_security_mail(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox, "me@example.com")
+    phone = _Phone(c)
+    assert phone.pair(_pair_code(c)).status_code == 200
+    to, subject, body = outbox[-1]
+    assert to == "me@example.com" and "新设备" in subject and "Test Phone" in body
+    assert phone.profile().json()["mail"] == {"bound": True, "email": "m***@example.com"}
 
 
 def test_widget_delegated_fetch_roundtrip(widget_user, up):

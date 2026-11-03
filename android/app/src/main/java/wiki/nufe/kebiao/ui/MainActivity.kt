@@ -3,6 +3,7 @@ package wiki.nufe.kebiao.ui
 import android.Manifest
 import android.app.AlarmManager
 import android.app.NotificationManager
+import android.content.ClipboardManager
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
 import android.content.ComponentName
@@ -128,6 +129,7 @@ import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
+import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
@@ -226,12 +228,12 @@ class MainActivity : ComponentActivity() {
         linkFrom(intent)?.let { incoming = it }
     }
 
-    /** 网站设置页的“在安卓 App 中打开”（nufekebiao://setup?url=…），或从别的 App 分享来的文字。 */
+    /** 网站设置页的“在安卓 App 中打开”（nufekebiao://setup?url=…&pair=…），或从别的 App 分享来的文字。 */
     private fun linkFrom(intent: Intent?): String? = when (intent?.action) {
-        Intent.ACTION_VIEW -> Repository.extractLink(intent.dataString)
-        Intent.ACTION_SEND -> Repository.extractLink(intent.getStringExtra(Intent.EXTRA_TEXT))
+        Intent.ACTION_VIEW -> intent.dataString
+        Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
         else -> null
-    }
+    }?.takeIf { Repository.extractLink(it) != null }
 }
 
 @Composable
@@ -276,6 +278,8 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
 
     var url by remember { mutableStateOf(repo.widgetUrl) }
     var snapshot by remember { mutableStateOf(repo.cached()) }
+    var profile by remember { mutableStateOf<Profile?>(null) }
+    var bound by remember { mutableStateOf(repo.deviceId != null) }
     var invalid by remember { mutableStateOf(LinkState.isInvalid(context)) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -338,7 +342,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         val link = Repository.extractLink(raw)
         if (link == null) {
             Diag.w("link format invalid")
-            message = "链接格式不对：应是以 /widget/<token>.json 结尾的链接。"
+            message = "链接格式不对：应是以 /mobile/<token>.json 结尾的链接。"
             return
         }
         busy = true
@@ -363,6 +367,13 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 Sync.schedule(context)
                 Sync.redraw(context)
                 Diag.i("link saved")
+                Repository.extractPair(raw)?.let { code ->
+                    val failure = repo.pair(code)
+                    Diag.i(if (failure == null) "device paired" else "device pair failed")
+                    message = failure ?: "已绑定这台设备。"
+                }
+                profile = repo.fetchProfile()
+                bound = repo.deviceId != null
             } catch (_: LinkInvalidException) {
                 Diag.w("link invalid")
                 repo.widgetUrl = previous
@@ -417,9 +428,23 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         scope.launch { Sync.redraw(context) }
         url = null
         snapshot = null
+        profile = null
+        bound = false
         invalid = false
         message = null
         LinkState.markInvalid(context, false)
+    }
+
+    LaunchedEffect(Unit) {
+        profile = repo.cachedProfile()
+    }
+
+    // 打开“我的”时取一次最新个人信息；设备被撤销时这里会清掉本机绑定
+    LaunchedEffect(tab, url) {
+        if (tab == Tab.Mine) {
+            profile = repo.fetchProfile() ?: if (repo.deviceId != null) profile else null
+            bound = repo.deviceId != null
+        }
     }
 
     LaunchedEffect(incoming) {
@@ -463,7 +488,10 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                         Tab.Mine -> MineScreen(
                             repo = repo,
                             snapshot = snapshot,
+                            profile = profile,
+                            bound = bound,
                             onOpenSite = ::openSite,
+                            onPair = ::save,
                             onRemove = ::removeLink,
                         )
                         Tab.About -> AboutScreen()
@@ -625,7 +653,7 @@ private fun SetupScreen(
                         error = null
                     },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("https://…/widget/….json", fontSize = 13.sp) },
+                    placeholder = { Text("https://…/mobile/….json", fontSize = 13.sp) },
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
                     keyboardOptions = KeyboardOptions(
@@ -1273,7 +1301,10 @@ private fun ReminderSection(
 private fun MineScreen(
     repo: Repository,
     snapshot: Snapshot?,
+    profile: Profile?,
+    bound: Boolean,
     onOpenSite: () -> Unit,
+    onPair: (String) -> Unit,
     onRemove: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -1282,8 +1313,8 @@ private fun MineScreen(
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
     val host = repo.widgetUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() } ?: "未连接"
-    val student = snapshot?.payload?.student
-    val mail = snapshot?.payload?.mail
+    val student = profile?.student
+    val mail = profile?.mail
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
 
@@ -1347,7 +1378,7 @@ private fun MineScreen(
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        student?.code?.let { "学号 $it" } ?: "刷新课表后显示",
+                        student?.code?.let { "学号 $it" } ?: if (bound) "正在同步…" else "这台设备还没绑定",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1356,13 +1387,36 @@ private fun MineScreen(
             Spacer(Modifier.height(14.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             Spacer(Modifier.height(4.dp))
+            if (!bound) {
+                Spacer(Modifier.height(6.dp))
+                Hint("姓名、学号等个人信息不随课表链接传输，只发给绑定过的设备。到网站“账号与设置 → 安卓 App”点“绑定新设备”，再回到这里。")
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        Text("打开网站", fontSize = 12.sp)
+                    }
+                    TextButton(
+                        onClick = {
+                            val text = context.getSystemService(ClipboardManager::class.java)
+                                ?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                                ?.coerceToText(context)?.toString()
+                            if (Repository.extractPair(text) != null && text != null) {
+                                onPair(text)
+                            } else {
+                                Toast.makeText(context, "剪贴板里没有配对链接", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                    ) { Text("粘贴配对链接", fontSize = 12.sp) }
+                }
+            }
             if (student != null) {
                 ProfileRow("学院", student.department)
                 ProfileRow("专业", student.major)
                 ProfileRow("班级", student.adminclass)
                 ProfileRow("年级", student.grade)
             }
-            Row(
+            if (profile != null) Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1385,8 +1439,8 @@ private fun MineScreen(
                     }
                 }
             }
-            Hint(
-                if (mail?.bound == true) "链接里只显示打码邮箱，完整地址请到网站账号设置查看。"
+            if (profile != null) Hint(
+                if (mail?.bound == true) "这里只显示打码邮箱，完整地址请到网站账号设置查看。"
                 else "绑定后，自动刷新暂停或连续失败时会发邮件提醒。",
             )
         }
@@ -1556,7 +1610,7 @@ private fun AboutScreen() {
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),
                 )
             }
-            AboutRow("数据来源", "/widget/<token>.json")
+            AboutRow("数据来源", "/mobile/<token>.json")
         }
         Spacer(Modifier.height(110.dp))
     }
@@ -1930,7 +1984,12 @@ private fun liveUpdateName(): String {
 
 private fun remainText(ms: Long): String {
     val total = (ms / 1000).coerceAtLeast(0)
-    val minutes = total / 60
-    val seconds = total % 60
-    return if (minutes >= 1) "$minutes 分钟" else "$seconds 秒"
+    val hours = total / 3600
+    val minutes = total % 3600 / 60
+    return when {
+        hours >= 1 && minutes >= 1 -> "$hours 小时 $minutes 分钟"
+        hours >= 1 -> "$hours 小时"
+        minutes >= 1 -> "$minutes 分钟"
+        else -> "$total 秒"
+    }
 }

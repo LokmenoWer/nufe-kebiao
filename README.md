@@ -193,9 +193,18 @@ MAIL_FROM_NAME=南财课表
   - 课表变动：与上次保存的同一学期课表比较（课程名、星期、节次与时间、地点、周次），列出新增和取消的条目。首次抓取不算变动。
 - 每封信末尾都说明可在设置里关闭或解绑。
 
+### 安卓 App 与个人信息保护
+
+设置 → “安卓 App”：生成配对链接 → “在安卓 App 中打开”。课表读 `GET /mobile/<token>.json`，**不含姓名、学号、学院、专业、班级、邮箱**；这条链接泄露时别人只能看到课表，也拿不到代抓任务里的教务 cookie。`/widget/<token>.json` 同样不含个人信息。
+
+- **绑定设备**：App 在 Android Keystore 里生成不可导出的 P-256 密钥；网站发 10 分钟有效、只能用一次的配对码（`POST /api/mobile/pair`，只存哈希），App 凭它 `POST /mobile/<token>/pair` 登记公钥。只拿到链接的人没有配对码，绑不上。每人最多 5 台；绑了邮箱会收到新设备提醒。
+- **读个人信息**：`GET /mobile/<token>/profile`，请求头带设备 id、时间戳和私钥签名（ECDSA-SHA256，内容 `nufe-kebiao-profile-v1\n<token>\n<设备 id>\n<时间戳>`），误差不超过 5 分钟，手机时钟不准时服务器返回 `server_time` 供校正。响应不缓存，只给打码邮箱。App 用 Keystore 里的 AES-GCM 密钥加密落盘。
+- **撤销**：设置里能查看和撤销设备（`/api/mobile/devices`）；撤销后课表仍可读，手机丢失请重新生成链接——重新生成 / 停用会让所有设备和配对码失效。
+- **防不住的**：手机被 root 或完全控制；课表本身的课程、教师、教室也可能让人推断出身份，这一层靠重新生成链接补救。
+
 ### iOS 桌面小组件（Scriptable）
 
-设置 → “桌面小组件（iOS）”：生成只读链接 → “复制脚本”（脚本里已填好本人链接）→ 粘进免费的 [Scriptable](https://apps.apple.com/cn/app/scriptable/id1405459188) → 桌面添加 Scriptable 小组件并选这个脚本。Parameter 填 `today`（默认）/ `tomorrow` / `week` / `full`（也可写 `铺满`），后面可加提前分钟数（`today 15`、`week 20`；`today 0` 关闭上课提醒，不写则提前 10 分钟）。也可以在 Scriptable 里运行脚本 →“提醒时间”直接选（Parameter 里写了数字时以 Parameter 为准）。
+设置 → “iOS 桌面小组件”：生成只读链接 → “复制脚本”（脚本里已填好本人链接）→ 粘进免费的 [Scriptable](https://apps.apple.com/cn/app/scriptable/id1405459188) → 桌面添加 Scriptable 小组件并选这个脚本。Parameter 填 `today`（默认）/ `tomorrow` / `week` / `full`（也可写 `铺满`），后面可加提前分钟数（`today 15`、`week 20`；`today 0` 关闭上课提醒，不写则提前 10 分钟）。也可以在 Scriptable 里运行脚本 →“提醒时间”直接选（Parameter 里写了数字时以 Parameter 为准）。
 
 - 数据来自 `GET /widget/<token>.json`：服务端按北京时间算好今天、明天、本周（以及两周内下一个有课的日子），周次、缺失时间的兜底、课程颜色都和网页 / ICS 用同一套规则，脚本只负责排版。
 - token 与日历订阅分开，可单独重新生成 / 停用；库里只存 SHA-256，访问日志对 `/widget/` 脱敏；删号即失效。
