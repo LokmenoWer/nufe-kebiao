@@ -137,7 +137,7 @@ internal fun ReminderSection(
                     .weight(1f)
                     .alpha(if (alarmEnabled) 1f else 0.45f),
             ) {
-                Text("流体云显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("灵动显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(2.dp))
                 Hint(
                     if (Build.VERSION.SDK_INT >= 36) {
