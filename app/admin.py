@@ -1,4 +1,4 @@
-"""服务器管理员页：日志、在线人数、后台刷新排期。
+"""服务器管理员页：日志、在线人数、后台刷新排期、手机代抓与安卓 App。
 
 - 密码只以 PBKDF2 哈希的形式放在 .env 的 ADMIN_PASSWORD_HASH 里；没配就整个后台不开放（404）。
   生成：python -m app.admin hash
@@ -22,7 +22,7 @@ import time
 
 from fastapi import Depends, HTTPException, Request, Response
 
-from . import db, polite, presence, refresh_policy, scheduler, service
+from . import android_releases, db, mobile_devices, polite, presence, refresh_policy, scheduler, service
 from .config import COOKIE_PATH, COOKIE_SECURE, DB_PATH, SCHEDULER_ENABLED, SCHEDULER_TICK
 
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
@@ -161,14 +161,27 @@ def mask_name(name: str | None) -> str:
     return (name[0] + "*" * (len(name) - 1)) if name else ""
 
 
+def _scheduler_state() -> dict:
+    penalty, cooldown = polite.health()
+    b = scheduler._budget
+    return {
+        "enabled": SCHEDULER_ENABLED, "alive": scheduler.alive(), "tick_seconds": SCHEDULER_TICK,
+        "budget_rps": round(b.rate, 3), "max_rps": b.max_rate, "tokens": round(b.tokens, 2),
+        "upstream_penalty": round(penalty, 2), "upstream_cooldown": round(cooldown, 1),
+        "last_tick": scheduler.last_tick,
+    }
+
+
 def schedule(now: float | None = None) -> dict:
     now = db.now() if now is None else now
     conn = db.connect()
     rows = conn.execute(
         f"""SELECT id, student_id, name, cred_mode, status, fail_count, last_error, last_refresh_at, next_refresh_at,
                    refresh_request_reason, sso_session_only, keepalive_at, sso_touched_at, sso_lost_at,
-                   {service._SIGNAL_COLS} FROM users""").fetchall()
+                   next_class_slots, current_semester_id, widget_token_hash IS NOT NULL AS linked,
+                   {service._WIDGET_COLS}, {service._SIGNAL_COLS} FROM users""").fetchall()
     queue = {uid: score for score, uid in service.candidates(now=now, limit=1_000_000)}
+    devices = dict(conn.execute("SELECT user_id, COUNT(*) FROM mobile_devices GROUP BY user_id").fetchall())
     items = []
     for r in rows:
         sig = service.signals_of(r)
@@ -191,39 +204,79 @@ def schedule(now: float | None = None) -> dict:
             "score": round(queue[r["id"]], 2) if r["id"] in queue else None,
             "last_refresh_at": r["last_refresh_at"], "last_success_at": r["last_success_at"],
             "last_seen_at": r["last_seen_at"], "next_class_at": r["next_class_at"],
+            "password_saved": r["cred_mode"] == "password", "devices": devices.get(r["id"], 0),
+            "phone": {
+                "linked": bool(r["linked"]), "enabled": bool(r["widget_fetch"]), "ok_at": r["widget_fetch_ok_at"],
+                "fails": r["widget_fetch_fails"], "running": (r["widget_fetch_pending_until"] or 0) > now,
+                "waiting": r["id"] not in queue and service.waiting_for_phone(conn, r, now),
+            },
         })
     # 已在队里的按逾期程度排最前，其余按预计时间；暂停的（无下次时间）放最后
     items.sort(key=lambda i: (i["score"] is None, -(i["score"] or 0), i["next_refresh_at"] is None,
                               i["next_refresh_at"] or 0))
-    penalty, cooldown = polite.health()
-    b = scheduler._budget
+    return {"now": now, "scheduler": _scheduler_state(), "due": len(queue), "items": items}
+
+
+def recent_refreshes(limit: int = 60, trigger: str | None = None, failed_only: bool = False) -> list[dict]:
+    where, args = [], []
+    if trigger:
+        where.append("l.trigger = ?")
+        args.append(trigger)
+    if failed_only:
+        where.append("l.ok = 0")
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = db.connect().execute(
+        f"""SELECT l.at, l.trigger, l.ok, l.message, u.student_id FROM refresh_log l
+            JOIN users u ON u.id = l.user_id {clause} ORDER BY l.at DESC LIMIT ?""", (*args, limit)).fetchall()
+    return [{"at": r["at"], "trigger": r["trigger"], "ok": bool(r["ok"]), "message": r["message"],
+             "student": mask_id(r["student_id"])} for r in rows]
+
+
+# ---------- 手机代抓与安卓 App ----------
+
+def _phone_stats(conn, now: float) -> dict:
+    """手机代抓只统计生成了只读链接的人：没链接的人 widget_fetch 也默认是 1，但根本没有手机来领任务。"""
+    rows = conn.execute(f"SELECT {service._WIDGET_COLS} FROM users WHERE widget_token_hash IS NOT NULL").fetchall()
+    enabled = [r for r in rows if r["widget_fetch"]]
     return {
-        "now": now,
-        "scheduler": {
-            "enabled": SCHEDULER_ENABLED, "alive": scheduler.alive(), "tick_seconds": SCHEDULER_TICK,
-            "budget_rps": round(b.rate, 3), "max_rps": b.max_rate, "tokens": round(b.tokens, 2),
-            "upstream_penalty": round(penalty, 2), "upstream_cooldown": round(cooldown, 1),
-            "last_tick": scheduler.last_tick,
-        },
-        "due": len(queue),
-        "items": items,
+        "linked": len(rows), "enabled": len(enabled),
+        "healthy": sum(service.widget_fetch_healthy(r, now) for r in enabled),
+        "failing": sum(1 for r in enabled if r["widget_fetch_fails"]),
+        "running": sum(1 for r in enabled if (r["widget_fetch_pending_until"] or 0) > now),
     }
 
 
-def recent_refreshes(limit: int = 60) -> list[dict]:
-    rows = db.connect().execute(
-        """SELECT l.at, l.trigger, l.ok, l.message, u.student_id FROM refresh_log l
-           JOIN users u ON u.id = l.user_id ORDER BY l.at DESC LIMIT ?""", (limit,)).fetchall()
-    return [{"at": r["at"], "trigger": r["trigger"], "ok": bool(r["ok"]), "message": r["message"],
-             "student": mask_id(r["student_id"])} for r in rows]
+def _device_stats(conn, now: float) -> dict:
+    row = conn.execute("""SELECT COUNT(*) AS devices, COUNT(DISTINCT user_id) AS users,
+                                 COALESCE(SUM(last_seen_at >= ?), 0) AS active_7d FROM mobile_devices""",
+                       (now - 7 * 86400,)).fetchone()
+    return dict(row)
+
+
+def android() -> dict:
+    now = db.now()
+    conn = db.connect()
+    rows = conn.execute(
+        """SELECT d.name, d.created_at, d.last_seen_at, u.student_id FROM mobile_devices d
+           JOIN users u ON u.id = d.user_id ORDER BY d.last_seen_at DESC LIMIT 200""").fetchall()
+    return {
+        "now": now, "phone": _phone_stats(conn, now), "device_stats": _device_stats(conn, now),
+        "max_devices": mobile_devices.MAX_DEVICES,
+        "pending_pairings": conn.execute("SELECT COUNT(*) FROM mobile_pairings WHERE expires_at > ?",
+                                         (now,)).fetchone()[0],
+        "devices": [{"student": mask_id(r["student_id"]), "name": r["name"], "created_at": r["created_at"],
+                     "last_seen_at": r["last_seen_at"]} for r in rows],
+        "releases": android_releases.status(),
+    }
 
 
 # ---------- 概况 ----------
 
 def overview() -> dict:
     conn = db.connect()
+    now = time.time()
     status = {r["status"]: r["n"] for r in conn.execute("SELECT status, COUNT(*) AS n FROM users GROUP BY status")}
-    since = time.time() - 86400
+    since = now - 86400
     refresh_24h = {f"{r['trigger']}_{'ok' if r['ok'] else 'fail'}": r["n"] for r in conn.execute(
         "SELECT trigger, ok, COUNT(*) AS n FROM refresh_log WHERE at >= ? GROUP BY trigger, ok", (since,))}
     db_bytes = sum(os.path.getsize(p) for p in (DB_PATH, DB_PATH + "-wal") if os.path.exists(p))
@@ -233,7 +286,7 @@ def overview() -> dict:
     else:
         rss = None
     return {
-        "started_at": STARTED_AT, "now": time.time(),
+        "started_at": STARTED_AT, "now": now,
         "python": sys.version.split()[0], "platform": platform.platform(terse=True),
         "pid": os.getpid(),
         # resource 为 None 时内存探测一并置空
@@ -244,8 +297,15 @@ def overview() -> dict:
         "ics_subscribers": conn.execute("SELECT COUNT(*) FROM users WHERE ics_token_hash IS NOT NULL").fetchone()[0],
         "widget_users": conn.execute("SELECT COUNT(*) FROM users WHERE widget_token_hash IS NOT NULL").fetchone()[0],
         "email_users": conn.execute("SELECT COUNT(*) FROM users WHERE enc_email IS NOT NULL").fetchone()[0],
+        "password_users": conn.execute("SELECT COUNT(*) FROM users WHERE cred_mode='password'").fetchone()[0],
+        "sso_short_users": conn.execute(
+            "SELECT COUNT(*) FROM users WHERE sso_session_only=1 AND cred_mode<>'password'").fetchone()[0],
         "refresh_24h": refresh_24h,
         "online": presence.online(),
+        "scheduler": _scheduler_state(),
+        "phone": _phone_stats(conn, now),
+        "device_stats": _device_stats(conn, now),
+        "release_sync": android_releases.sync_state(),
     }
 
 

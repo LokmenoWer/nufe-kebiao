@@ -1078,16 +1078,28 @@ def _score(conn, row, now: float) -> float:
     手机正在代抓、或这个人的小组件最近都能代抓时，到期后先给手机留一段宽限（见 refresh_policy），
     宽限内返回 0：服务器不碰学校。
     """
+    sig, score = _overdue(conn, row, now)
+    if score >= 1 and _waiting_for_widget(row, sig, now):
+        return 0.0
+    return score
+
+
+def _overdue(conn, row, now: float) -> tuple[refresh_policy.Signals, float]:
     sig = signals_of(row)
     cp = refresh_policy.checkpoint(sig, now)
     if cp and now >= cp[0] and not refresh_policy.requested(sig):
         peer = _peer_checked_at(conn, row["id"], row["current_semester_id"], row["next_class_slots"])
         if peer:
             sig = signals_of(row, peer)
-    score = refresh_policy.overdue(sig, now)
-    if score >= 1 and _waiting_for_widget(row, sig, now):
-        return 0.0
-    return score
+    return sig, refresh_policy.overdue(sig, now)
+
+
+def waiting_for_phone(conn, row, now: float) -> bool:
+    """已经到期，但服务器正让给手机代抓（管理员页展示用）。"""
+    if row["status"] != "ok":
+        return False
+    sig, score = _overdue(conn, row, now)
+    return score >= 1 and _waiting_for_widget(row, sig, now)
 
 
 def _waiting_for_widget(row, sig: refresh_policy.Signals, now: float) -> bool:

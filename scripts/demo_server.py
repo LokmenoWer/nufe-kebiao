@@ -186,8 +186,42 @@ cas.LoginFlow = DemoFlow
 cas.login = lambda *a, **k: None
 jwxt.fetch_timetable = demo_fetch
 
+
+def seed_admin_demo():
+    """给管理员页塞几个假用户，看得到排队、等手机、失败和设备这些状态。全是虚构数据。"""
+    from app import db
+    db.init()
+    now = time.time()
+    # (学号, 姓名, 状态, 上次成功距今, 手机代抓成功距今, 代抓失败次数, 绑定的设备)
+    users = [
+        ("2099000101", "张三", "ok", 600, 600, 0, "Xiaomi 2312DRA50C"),
+        ("2099000102", "李四", "ok", 6 * 3600, 3600, 0, "HUAWEI ALN-AL00"),
+        ("2099000103", "王五", "ok", 9 * 3600, None, 0, None),
+        ("2099000104", "赵六", "error", 12 * 3600, 90000, 3, "OnePlus PJZ110"),
+        ("2099000105", "钱七", "needs_rebind", 3 * 86400, None, 0, None),
+    ]
+    with db.tx() as c:
+        for n, (sid, name, status, ok_ago, fetch_ago, fails, device) in enumerate(users):
+            uid = c.execute(
+                """INSERT INTO users(student_id, name, created_at, status, fail_count, last_error, last_success_at,
+                                     last_seen_at, next_refresh_at, widget_token_hash, widget_fetch_ok_at,
+                                     widget_fetch_fails)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (sid, name, now - 30 * 86400, status, 1 if status == "error" else 0,
+                 "学校服务器暂时无法访问" if status == "error" else None, now - ok_ago, now - 3600,
+                 now + 900 if status == "error" else None, f"demo-{n}" if n < 4 else None,
+                 now - fetch_ago if fetch_ago else None, fails)).lastrowid
+            if device:
+                c.execute("INSERT INTO mobile_devices(id, user_id, public_key, name, created_at, last_seen_at) "
+                          "VALUES(?,?,?,?,?,?)", (f"demo-{n}", uid, b"demo", device, now - 7 * 86400, now - ok_ago))
+            for k, (trigger, ok) in enumerate((("widget", 1), ("scheduled", 1), ("widget", 1), ("scheduled", n != 3))):
+                c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,?,?)",
+                          (uid, now - (k + 1) * 1800 - n * 60, trigger, ok, "演示数据" if ok else "学校服务器暂时无法访问"))
+
+
 if __name__ == "__main__":
     import uvicorn
 
     from app.main import app
+    seed_admin_demo()
     uvicorn.run(app, host="127.0.0.1", port=8765, log_level="warning")

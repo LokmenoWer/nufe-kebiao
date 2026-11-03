@@ -1881,7 +1881,7 @@ def _github_release(tag, pre=False, data=APK, **over):
 def github(monkeypatch, tmp_path):
     """假的 GitHub：测试改 state 里的内容；calls 记请求，broken 模拟连不上。"""
     state = SimpleNamespace(releases=[_github_release("1.3.0-beta.1", pre=True), _github_release("1.2.0")],
-                            apk=APK, calls=[], broken=False)
+                            apk=APK, calls=[], broken=False, tmp_cache=tmp_path)
 
     class Reply:
         def __init__(self, url):
@@ -1912,7 +1912,79 @@ def github(monkeypatch, tmp_path):
     monkeypatch.setattr(android_releases, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(android_releases, "_releases", [])
     monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    monkeypatch.setattr(android_releases, "_last_ok_at", None)
+    monkeypatch.setattr(android_releases, "_last_error_at", None)
+    monkeypatch.setattr(android_releases, "_last_error", None)
     return state
+
+
+def test_admin_android_view(github, up):
+    user = TestClient(app)
+    assert _login(user, "2023001").status_code == 200
+    uid = db.connect().execute("SELECT id FROM users").fetchone()["id"]
+    now = db.now()
+    with db.tx() as c:
+        c.execute("UPDATE users SET widget_token_hash='t', widget_fetch_ok_at=?, widget_fetch_fails=0 WHERE id=?",
+                  (now - 60, uid))
+        c.execute("INSERT INTO mobile_devices(id, user_id, public_key, name, created_at, last_seen_at) "
+                  "VALUES('d1',?,?,'Pixel 9',?,?)", (uid, b"secret-key", now, now))
+    c = TestClient(app)
+    assert c.get("/api/admin/android").status_code == 401
+    assert _admin(c).status_code == 200
+
+    (github.tmp_cache / "1.2.0.apk").write_bytes(APK)
+    a = c.get("/api/admin/android").json()
+    assert a["phone"] == {"linked": 1, "enabled": 1, "healthy": 1, "failing": 0, "running": 0}
+    assert a["device_stats"] == {"devices": 1, "users": 1, "active_7d": 1}
+    assert a["devices"][0]["name"] == "Pixel 9" and a["devices"][0]["student"] == "2023*01"
+    assert "2023001" not in str(a) and "d1" not in str(a) and "secret-key" not in str(a)
+    assert a["releases"]["latest_stable"] == "1.2.0" and a["releases"]["failing"] is False
+    assert {r["tag"]: r["mirrored"] for r in a["releases"]["releases"]} == {"1.3.0-beta.1": False, "1.2.0": True}
+
+    item = c.get("/api/admin/schedule").json()["items"][0]
+    assert item["devices"] == 1 and item["phone"]["linked"] is True and item["phone"]["waiting"] is False
+
+    o = c.get("/api/admin/overview").json()
+    assert o["device_stats"]["devices"] == 1 and o["phone"]["healthy"] == 1 and "alive" in o["scheduler"]
+
+
+def test_admin_release_sync_failure_keeps_old_list(github, up, monkeypatch):
+    c = TestClient(app)
+    assert _admin(c).status_code == 200
+    assert c.get("/api/admin/android").json()["releases"]["failing"] is False
+    github.broken = True
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    rel = c.get("/api/admin/android").json()["releases"]
+    assert rel["failing"] is True and rel["last_error"] == "ConnectionError" and len(rel["releases"]) == 2
+    assert c.get("/api/admin/overview").json()["release_sync"]["failing"] is True
+    github.broken = False
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    assert c.get("/api/admin/android").json()["releases"]["failing"] is False
+
+
+def test_admin_shows_user_waiting_for_phone(up):
+    assert _login(TestClient(app), "2023001").status_code == 200
+    uid = db.connect().execute("SELECT id FROM users").fetchone()["id"]
+    with db.tx() as c:
+        c.execute("UPDATE users SET widget_token_hash='t', widget_fetch_pending_until=? WHERE id=?",
+                  (db.now() + 300, uid))
+    service.request_refresh(uid, "测试")
+    item = admin.schedule()["items"][0]
+    assert item["phone"]["running"] is True and item["phone"]["waiting"] is True and item["score"] is None
+
+
+def test_admin_refreshes_filter(up):
+    assert _login(TestClient(app), "2023001").status_code == 200
+    uid = db.connect().execute("SELECT id FROM users").fetchone()["id"]
+    with db.tx() as c:
+        c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,'widget',0,'x')",
+                  (uid, db.now()))
+    c = TestClient(app)
+    assert _admin(c).status_code == 200
+    assert {r["trigger"] for r in c.get("/api/admin/refreshes").json()} == {"login", "widget"}
+    assert [r["trigger"] for r in c.get("/api/admin/refreshes", params={"trigger": "login"}).json()] == ["login"]
+    assert [r["trigger"] for r in c.get("/api/admin/refreshes", params={"failed": "true"}).json()] == ["widget"]
+    assert c.get("/api/admin/refreshes", params={"trigger": "nope"}).status_code == 422
 
 
 def test_android_release_feed_mirrors_github(github, up):

@@ -1,14 +1,12 @@
-/** 服务器管理员页：概况 / 排期 / 刷新记录 / 日志。只用 dom.js 构建节点（CSP 开了 Trusted Types）。 */
+/** 服务器管理员页：概况 / 排期 / 手机与安卓 / 刷新记录 / 日志。只用 dom.js 构建节点（CSP 开了 Trusted Types）。 */
+import { showToast } from "../js/components/toast.js";
 import { h, replace } from "../js/dom.js";
+import { icon } from "../js/icons.js";
 
 const POLL_MS = 10_000;
 const app = document.getElementById("app");
 let csrf = null;
-let tab = "overview";
 let timer = null;
-let logSeq = 0;
-let logFollow = true;
-const logFilter = { level: "", q: "" };
 
 // ---------- 请求 ----------
 
@@ -66,6 +64,11 @@ function fmtDuration(sec) {
   return d ? `${d} 天 ${hr} 小时` : hr ? `${hr} 小时 ${m} 分` : `${m} 分`;
 }
 
+const fmtInterval = (min) => (min < 60 ? `${min} 分钟` : min < 1440 ? `${+(min / 60).toFixed(1)} 小时` : `${+(min / 1440).toFixed(1)} 天`);
+const fmtSize = (bytes) => (bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : "—");
+
+const VIA = { web: "网页", widget: "iOS 小组件", mobile: "安卓 App", ics: "日历" };
+const TRIGGER = { widget: "手机代抓", scheduled: "后台", manual: "手动", login: "登录" };
 const STATUS_PILL = {
   ok: ["正常", "pill-ok"],
   error: ["出错退避", "pill-warn"],
@@ -73,16 +76,13 @@ const STATUS_PILL = {
   needs_rebind: ["需重新登录", "pill-danger"],
 };
 
-function keepaliveText(i) {
-  const sso = i.sso_lost_at
-    ? `认证中心已不认（${fmtRel(i.sso_lost_at)}发现，最后一次认是 ${fmtRel(i.sso_touched_at)}）`
-    : i.sso_touched_at ? `认证中心最后确认 ${fmtRel(i.sso_touched_at)}` : "认证中心未确认";
-  return `保活：${i.keepalive_at ? `上次 ${fmtRel(i.keepalive_at)}` : "还没保活过"} · ${sso}`;
-}
+// ---------- 小部件 ----------
+
+const pill = (label, cls = "", title) => h("span", { class: `pill ${cls}`, title }, label);
 
 function statusPill(status) {
   const [label, cls] = STATUS_PILL[status] || [status, ""];
-  return h("span", { class: `pill ${cls}` }, label);
+  return pill(label, cls);
 }
 
 const tile = (label, value, sub) => h("div", { class: "adm-tile" },
@@ -90,12 +90,22 @@ const tile = (label, value, sub) => h("div", { class: "adm-tile" },
   h("div", { class: "adm-tile-value" }, String(value)),
   sub ? h("div", { class: "adm-tile-sub" }, sub) : null);
 
+const tiles = (...items) => h("div", { class: "adm-tiles" }, items);
+const section = (title) => h("h2", { class: "adm-section-title" }, title);
+
+/** 单元格带列名：窄屏上表格变成卡片，列名由 CSS 从 data-label 取。 */
+const td = (label, cls, ...children) => h("td", { class: cls, attrs: { "data-label": label } }, children);
+
 function table(head, rows, empty = "暂无数据") {
   if (!rows.length) return h("div", { class: "adm-table-wrap" }, h("div", { class: "adm-empty" }, empty));
   return h("div", { class: "adm-table-wrap" },
     h("table", { class: "adm-table" },
       h("thead", h("tr", head.map((c) => h("th", c)))),
       h("tbody", rows)));
+}
+
+function kv(...pairs) {
+  return h("dl", { class: "adm-kv" }, pairs.map(([k, v]) => [h("dt", k), h("dd", v)]));
 }
 
 // ---------- 登录 ----------
@@ -127,21 +137,350 @@ function showLogin() {
   input.focus();
 }
 
+// ---------- 概况 ----------
+
+function attention(o) {
+  const out = [];
+  const sc = o.scheduler;
+  const st = o.user_status;
+  if (!sc.enabled) out.push(["warn", "后台刷新已在配置中关闭（SCHEDULER_ENABLED=false）"]);
+  else if (!sc.alive["refresh-scheduler"]) out.push(["danger", "后台刷新线程没有在运行，需要重启服务"]);
+  if (sc.upstream_cooldown > 0) out.push(["danger", `学校要求暂停，还剩 ${sc.upstream_cooldown} 秒`]);
+  else if (sc.upstream_penalty > 0) out.push(["warn", `学校响应不稳，请求额外间隔 ${sc.upstream_penalty} 秒`]);
+  const paused = (st.captcha || 0) + (st.needs_rebind || 0);
+  if (paused) out.push(["warn", `${paused} 人的自动刷新已暂停，要等本人重新登录`]);
+  if (st.error) out.push(["warn", `${st.error} 人刷新出错，正在退避重试`]);
+  if (o.phone.failing) out.push(["warn", `${o.phone.failing} 人的手机代抓最近失败，由服务器兜底刷新`]);
+  if (o.release_sync.failing) out.push(["warn", `读取 GitHub 发布列表失败（${o.release_sync.last_error}），正在给旧结果`]);
+  return out;
+}
+
+function attentionBox(o) {
+  const items = attention(o);
+  if (!items.length) {
+    return h("div", { class: "adm-alert adm-alert-ok", attrs: { role: "status" } }, icon("check"), "运行正常，没有需要处理的事");
+  }
+  return h("div", { class: "adm-alerts", attrs: { role: "status" } }, items.map(([kind, text]) =>
+    h("div", { class: `adm-alert adm-alert-${kind}` }, icon("alert"), text)));
+}
+
+function refreshBars(r) {
+  const rows = ["widget", "scheduled", "manual", "login"].map((t) => ({
+    key: t, ok: r[`${t}_ok`] || 0, fail: r[`${t}_fail`] || 0,
+  }));
+  const max = Math.max(1, ...rows.map((x) => x.ok + x.fail));
+  return h("div", { class: "adm-bars" }, rows.map((x) => {
+    const text = `成功 ${x.ok} · 失败 ${x.fail}`;
+    return h("div", { class: "adm-bar-row", title: `${TRIGGER[x.key]}：${text}` },
+      h("span", { class: "adm-bar-label" }, TRIGGER[x.key]),
+      h("span", { class: "adm-bar-track" },
+        x.ok ? h("span", { class: "adm-bar-ok", style: { width: `${(x.ok / max) * 100}%` } }) : null,
+        x.fail ? h("span", { class: "adm-bar-fail", style: { width: `${(x.fail / max) * 100}%` } }) : null),
+      h("span", { class: "adm-bar-value" }, text));
+  }));
+}
+
+/** 手机代抓占后台两种刷新的比例：越高，服务器 IP 打学校越少。 */
+function phoneShare(r) {
+  const phone = r.widget_ok || 0;
+  const server = (r.scheduled_ok || 0) + (r.scheduled_fail || 0);
+  return phone + server ? `${Math.round((phone / (phone + server)) * 100)}%` : "—";
+}
+
+function renderOverview(o) {
+  const on = o.online;
+  const via = Object.entries(on.by_via).map(([k, v]) => `${VIA[k] || k} ${v}`).join(" · ");
+  const st = o.user_status;
+  const r = o.refresh_24h;
+  const count = (suffix) => Object.entries(r).filter(([k]) => k.endsWith(suffix)).reduce((a, [, v]) => a + v, 0);
+  return [
+    attentionBox(o),
+    section(`在线（${Math.round(on.window_seconds / 60)} 分钟内有请求）`),
+    tiles(
+      tile("在线用户", on.users, via || "—"),
+      tile("访客（不同 IP）", on.visitors, "含未登录"),
+      tile("1 小时内活跃", on.active_1h),
+      tile("24 小时内活跃", on.active_24h),
+      tile("7 天内活跃", on.active_7d),
+      tile("有效登录会话", on.sessions)),
+    section("用户与渠道"),
+    tiles(
+      tile("注册用户", o.users, `正常 ${st.ok || 0} · 退避 ${st.error || 0} · 暂停 ${(st.captcha || 0) + (st.needs_rebind || 0)}`),
+      tile("存了密码", o.password_users, `扫码短效 ${o.sso_short_users}`),
+      tile("小组件 / App 链接", o.widget_users, `允许代抓 ${o.phone.enabled}`),
+      tile("绑定的安卓设备", o.device_stats.devices, `${o.device_stats.users} 人 · 7 天内活跃 ${o.device_stats.active_7d} 台`),
+      tile("日历订阅", o.ics_subscribers),
+      tile("邮件通知", o.email_users)),
+    section("24 小时刷新"),
+    tiles(
+      tile("刷新次数", count("_ok") + count("_fail"), `成功 ${count("_ok")} · 失败 ${count("_fail")}`),
+      tile("手机代抓占比", phoneShare(r), "手机代抓 ÷（手机代抓 + 后台）")),
+    refreshBars(r),
+    section("服务器"),
+    kv(
+      ["已运行", `${fmtDuration(o.now - o.started_at)}（启动于 ${fmtTime(o.started_at)}）`],
+      // Windows 上没有峰值内存（max_rss_mb 为 null），只显示 PID
+      ["进程", `PID ${o.pid}${o.max_rss_mb == null ? "" : ` · 峰值内存 ${o.max_rss_mb} MB`}`],
+      ["数据库", `${o.db_mb} MB`],
+      ["Python", `${o.python} · ${o.platform}`]),
+  ];
+}
+
+// ---------- 排期 ----------
+
+const SCHEDULE_FILTERS = [
+  ["all", "全部", () => true],
+  ["queued", "排队中", (i) => i.score !== null],
+  ["phone", "等手机", (i) => i.phone.waiting || i.phone.running],
+  ["problem", "有异常", (i) => i.status !== "ok" || i.phone.fails > 0 || !!i.sso_lost_at],
+];
+const scheduleView = { filter: "all", q: "", data: null, list: null, seg: null };
+
+function keepaliveText(i) {
+  const sso = i.sso_lost_at
+    ? `认证中心已不认（${fmtRel(i.sso_lost_at)}发现，最后一次认是 ${fmtRel(i.sso_touched_at)}）`
+    : i.sso_touched_at ? `认证中心最后确认 ${fmtRel(i.sso_touched_at)}` : "认证中心未确认";
+  return `保活：${i.keepalive_at ? `上次 ${fmtRel(i.keepalive_at)}` : "还没保活过"} · ${sso}`;
+}
+
+function nextRefreshCell(i) {
+  if (i.score !== null) return pill(`排队中 ${i.score}`, "pill-warn");
+  if (i.phone.running) return pill("手机正在抓", "pill-ok", "任务已交给手机，这段时间服务器不抢着刷");
+  if (i.phone.waiting) return pill("等手机代抓", "pill-ok", "已到期，先给手机留一段宽限，过了服务器再自己刷");
+  return i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停";
+}
+
+function phoneCell(p) {
+  if (!p.linked) return "没有链接";
+  if (!p.enabled) return "用户已关闭";
+  return [
+    p.fails ? pill(`失败 ×${p.fails}`, "pill-warn") : null,
+    p.fails ? " " : null,
+    p.ok_at ? `成功 ${fmtRel(p.ok_at)}` : p.fails ? null : "还没成功过",
+  ];
+}
+
+function requestRefresh(i) {
+  return h("button", { class: "btn btn-sm", type: "button", onclick: async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      await api("api/admin/request-refresh", { method: "POST", body: { uid: i.uid } });
+      showToast("已排到队首，仍受全站预算限制", { type: "success" });
+      load();
+    } catch (err) {
+      showToast(err.message, { type: "error" });
+    }
+  } }, "排队刷新");
+}
+
+function scheduleRow(i) {
+  return h("tr",
+    td("用户", "mono", i.student, i.name ? ` ${i.name}` : ""),
+    td("状态", "adm-badges", statusPill(i.status), i.fail_count ? h("span", { class: "muted" }, `×${i.fail_count}`) : null,
+      i.sso_short ? pill("扫码·短效", "pill-warn", "扫码登录只有会话级 CASTGC，几小时后无法静默续期") : null,
+      i.devices ? pill(`安卓 ${i.devices} 台`) : null),
+    td("下次刷新", "num", nextRefreshCell(i)),
+    td("原因", "wrap", i.pending_reason ? `${i.reason}（${i.pending_reason}）` : i.reason,
+      ` · 约每 ${fmtInterval(i.target_minutes)}`,
+      i.last_error && i.status !== "ok" ? h("div", `上次错误：${i.last_error}`) : null,
+      i.keepalive_at || i.sso_lost_at ? h("div", { class: "muted" }, keepaliveText(i)) : null),
+    td("手机代抓", "num", phoneCell(i.phone)),
+    td("上次成功", "num", fmtRel(i.last_success_at)),
+    td("下一节课", "num", i.next_class_at ? fmtTime(i.next_class_at) : "—"),
+    td("最近使用", "num", fmtRel(i.last_seen_at)),
+    td("", "adm-action", i.status === "ok" && i.score === null && !i.phone.running ? requestRefresh(i) : null));
+}
+
+function renderScheduleList() {
+  const v = scheduleView;
+  if (!v.data || !v.list) return;
+  const q = v.q.toLowerCase();
+  const items = v.data.items.filter((i) => !q || `${i.student} ${i.name} ${i.reason} ${i.last_error || ""}`.toLowerCase().includes(q));
+  for (const [key, label, match] of SCHEDULE_FILTERS) {
+    const b = v.seg.querySelector(`[data-filter="${key}"]`);
+    b.textContent = `${label} ${items.filter(match).length}`;
+    b.setAttribute("aria-pressed", String(key === v.filter));
+  }
+  const match = SCHEDULE_FILTERS.find(([key]) => key === v.filter)[2];
+  replace(v.list, table(["用户", "状态", "下次刷新", "原因", "手机代抓", "上次成功", "下一节课", "最近使用", ""],
+    items.filter(match).map(scheduleRow), v.data.items.length ? "没有符合条件的用户" : "还没有用户"));
+}
+
+function buildSchedule() {
+  const v = scheduleView;
+  const summary = h("div");
+  v.list = h("div");
+  v.seg = h("div", { class: "seg" }, SCHEDULE_FILTERS.map(([key, label]) =>
+    h("button", { type: "button", dataset: { filter: key }, onclick: () => { v.filter = key; renderScheduleList(); } }, label)));
+  const search = h("input", { type: "search", placeholder: "搜索学号、原因、错误…", value: v.q, attrs: { "aria-label": "搜索" }, oninput: (e) => {
+    v.q = e.target.value.trim();
+    renderScheduleList();
+  } });
+  replace(body, summary, section("每个人的下次刷新"), h("div", { class: "adm-toolbar" }, v.seg, search), v.list);
+  return (s) => {
+    const sc = s.scheduler;
+    const threads = Object.entries(sc.alive).map(([k, a]) => `${k} ${a ? "运行中" : "已停止"}`).join(" · ") || "未启动";
+    const lt = sc.last_tick;
+    replace(summary, kv(
+      ["后台刷新", sc.enabled ? threads : "已在配置中关闭（SCHEDULER_ENABLED=false）"],
+      ["预算", `${sc.budget_rps} 次/秒（上限 ${sc.max_rps}）· 令牌 ${sc.tokens} · 每 ${sc.tick_seconds} 秒一轮`],
+      ["学校健康", sc.upstream_cooldown > 0 ? `暂停中，还剩 ${sc.upstream_cooldown} 秒`
+        : sc.upstream_penalty > 0 ? `额外间隔 ${sc.upstream_penalty} 秒` : "正常"],
+      ["上一轮", lt ? `${fmtTime(lt.at)}：到期 ${lt.due} 人，刷新 ${lt.refreshed} 人，保活 ${lt.kept_alive ?? 0} 人` : "还没跑过"],
+      ["当前排队", `${s.due} 人`]));
+    v.data = s;
+    renderScheduleList();
+  };
+}
+
+// ---------- 手机与安卓 ----------
+
+function renderAndroid(a) {
+  const p = a.phone;
+  const d = a.device_stats;
+  const rel = a.releases;
+  return [
+    section("手机代抓"),
+    tiles(
+      tile("有链接的用户", p.linked, `允许代抓 ${p.enabled}`),
+      tile("代抓正常", p.healthy, "24 小时内成功且之后没失败"),
+      tile("最近失败", p.failing, "由服务器兜底刷新"),
+      tile("正在代抓", p.running)),
+    section("绑定的设备"),
+    tiles(
+      tile("设备", d.devices, `${d.users} 人 · 每人最多 ${a.max_devices} 台`),
+      tile("7 天内活跃", d.active_7d),
+      tile("等待配对", a.pending_pairings, "配对码还没过期")),
+    table(["用户", "设备", "绑定时间", "最近使用"], a.devices.map((x) => h("tr",
+      td("用户", "mono", x.student),
+      td("设备", "wrap", x.name),
+      td("绑定时间", "num", fmtTime(x.created_at)),
+      td("最近使用", "num", fmtRel(x.last_seen_at)))), "还没有绑定的设备"),
+    section("安装包镜像"),
+    kv(
+      ["GitHub 同步", rel.failing ? `最后一次失败（${rel.last_error}，${fmtRel(rel.last_error_at)}），正在给旧结果`
+        : rel.last_ok_at ? `正常，${fmtRel(rel.last_ok_at)}读取` : "还没读取过"],
+      ["最新正式版", rel.latest_stable || "—"]),
+    h("div", { class: "adm-gap" }),
+    table(["版本", "类型", "文件", "大小", "本站镜像"], rel.releases.map((x) => h("tr",
+      td("版本", "mono", x.tag),
+      td("类型", null, x.prerelease ? pill("预发布", "pill-warn") : pill("正式版", "pill-ok")),
+      td("文件", "wrap", x.name),
+      td("大小", "num", fmtSize(x.size)),
+      td("本站镜像", null, x.mirrored ? pill("已下载", "pill-ok") : pill("首次下载时获取")))), "没有可用的发布"),
+    h("p", { class: "hint adm-gap" }, "设备名是 App 上报的机型；这里只读，撤销设备由用户本人在设置页操作。"),
+  ];
+}
+
+// ---------- 刷新记录 ----------
+
+const refreshFilter = { trigger: "", failed: false };
+
+function buildRefreshes() {
+  const list = h("div");
+  const trigger = h("select", { class: "select", attrs: { "aria-label": "触发方式" }, onchange: (e) => { refreshFilter.trigger = e.target.value; load(); } },
+    h("option", { value: "" }, "全部来源"),
+    Object.entries(TRIGGER).map(([v, l]) => h("option", { value: v, selected: v === refreshFilter.trigger }, l)));
+  const failed = h("label", { class: "check" },
+    h("input", { type: "checkbox", checked: refreshFilter.failed, onchange: (e) => { refreshFilter.failed = e.target.checked; load(); } }), "只看失败");
+  replace(body, h("div", { class: "adm-toolbar" }, trigger, failed), list);
+  return (rows) => replace(list, table(["时间", "用户", "来源", "结果", "说明"], rows.map((r) => h("tr",
+    td("时间", "num", fmtTime(r.at)),
+    td("用户", "mono", r.student),
+    td("来源", null, TRIGGER[r.trigger] || r.trigger),
+    td("结果", null, pill(r.ok ? "成功" : "失败", r.ok ? "pill-ok" : "pill-danger")),
+    td("说明", "wrap", r.message || ""))), "没有符合条件的刷新记录"));
+}
+
+function refreshesUrl() {
+  const params = new URLSearchParams({ limit: "200" });
+  if (refreshFilter.trigger) params.set("trigger", refreshFilter.trigger);
+  if (refreshFilter.failed) params.set("failed", "true");
+  return `api/admin/refreshes?${params}`;
+}
+
+// ---------- 日志 ----------
+
+const logFilter = { level: "", q: "" };
+let logFollow = true;
+let logSeq = 0;
+let logBox = null;
+
+function logLine(r) {
+  return h("div", { class: `adm-log-line lv-${r.level}` },
+    h("time", fmtTime(r.at)), h("span", { class: "lg" }, `${r.level[0]} ${r.logger || "root"}`), r.message);
+}
+
+function buildLogs() {
+  const restart = () => { logSeq = 0; load(); };
+  const level = h("select", { class: "select", attrs: { "aria-label": "级别" }, onchange: (e) => {
+    logFilter.level = e.target.value;
+    restart();
+  } }, [["", "全部级别"], ["WARNING", "警告及以上"], ["ERROR", "仅错误"]].map(([v, l]) =>
+    h("option", { value: v, selected: v === logFilter.level }, l)));
+  let debounce;
+  const search = h("input", { type: "search", placeholder: "搜索日志…", value: logFilter.q, attrs: { "aria-label": "搜索日志" }, oninput: (e) => {
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => { logFilter.q = e.target.value.trim(); restart(); }, 300);
+  } });
+  const follow = h("label", { class: "check" },
+    h("input", { type: "checkbox", checked: logFollow, onchange: (e) => { logFollow = e.target.checked; } }), "跟随最新");
+  logSeq = 0;
+  logBox = h("div", { class: "adm-log", attrs: { role: "log", "aria-live": "off" } });
+  replace(body, h("div", { class: "adm-toolbar" }, level, search, follow),
+    logBox, h("p", { class: "hint adm-gap" }, "进程内只保留最近的日志，服务重启后清空；更早的请在服务器上运行 journalctl -u kebiao 查看。"));
+  return (data) => {
+    if (logSeq === 0 || data.seq < logSeq) logBox.replaceChildren();
+    logBox.querySelector(".adm-empty")?.remove();
+    logBox.append(...data.items.map(logLine));
+    while (logBox.childElementCount > 2000) logBox.firstElementChild.remove();
+    if (!logBox.childElementCount) logBox.append(h("div", { class: "adm-empty" }, "没有匹配的日志"));
+    logSeq = data.seq;
+    if (logFollow) logBox.scrollTop = logBox.scrollHeight;
+  };
+}
+
+function logsUrl() {
+  const params = new URLSearchParams({ after: String(logSeq), limit: "1000" });
+  if (logFilter.level) params.set("level", logFilter.level);
+  if (logFilter.q) params.set("q", logFilter.q);
+  return `api/admin/logs?${params}`;
+}
+
 // ---------- 主界面 ----------
 
-const TABS = [["overview", "概况"], ["schedule", "排期计划"], ["refreshes", "刷新记录"], ["logs", "服务器日志"]];
+/** url：每次加载请求什么；build：搭好不随轮询重建的部分（筛选框等），返回填数据的函数；没有 build 的整页重画。 */
+const TABS = {
+  overview: { label: "概况", url: () => "api/admin/overview", render: renderOverview },
+  schedule: { label: "排期计划", url: () => "api/admin/schedule", build: buildSchedule },
+  android: { label: "手机与安卓", url: () => "api/admin/android", render: renderAndroid },
+  refreshes: { label: "刷新记录", url: refreshesUrl, build: buildRefreshes },
+  logs: { label: "服务器日志", url: logsUrl, build: buildLogs },
+};
+
+let tab = TABS[window.location.hash.slice(1)] ? window.location.hash.slice(1) : "overview";
 let body;
 let stamp;
+let fill;
+let latestLoad = 0;
+let inFlight = 0;
+
+function enterTab(key) {
+  tab = key;
+  window.history.replaceState(null, "", `#${key}`);
+  const view = TABS[key];
+  fill = view.build ? view.build() : (data) => replace(body, view.render(data));
+  if (!view.build) replace(body, h("div", { class: "adm-empty" }, "加载中…"));
+  load();
+}
 
 function showDashboard() {
   body = h("div");
-  stamp = h("span", { class: "muted" });
-  const tabs = h("div", { class: "tabs", attrs: { role: "tablist" } }, TABS.map(([key, label]) =>
+  stamp = h("span", { class: "muted adm-stamp", attrs: { "aria-live": "polite" } });
+  const tabs = h("div", { class: "adm-tabs tabs", attrs: { role: "tablist" } }, Object.entries(TABS).map(([key, { label }]) =>
     h("button", { type: "button", attrs: { role: "tab", "aria-selected": String(key === tab) }, onclick: (e) => {
-      tab = key;
       for (const b of tabs.children) b.setAttribute("aria-selected", String(b === e.currentTarget));
-      logSeq = 0;
-      load();
+      enterTab(key);
     } }, label)));
   const logout = h("button", { class: "btn btn-sm", type: "button", onclick: async () => {
     try { await api("api/admin/logout", { method: "POST" }); } catch { /* 已失效也回登录页 */ }
@@ -151,7 +490,7 @@ function showDashboard() {
   replace(app, h("div", { class: "adm" },
     h("header", { class: "adm-head" }, h("h1", "服务器管理"), stamp, refresh, logout),
     tabs, body));
-  load();
+  enterTab(tab);
   startPolling();
 }
 
@@ -165,152 +504,25 @@ function stopPolling() {
   timer = null;
 }
 
-let loading = false;
-
 async function load(background = false) {
-  if (loading) return;
-  loading = true;
-  const current = tab;
+  // 上一次还没回来时，轮询不叠加；用户切换标签或筛选要立刻生效，旧响应回来后丢弃
+  if (background && inFlight) return;
+  const id = ++latestLoad;
+  const render = fill;
+  inFlight += 1;
   try {
-    if (current === "overview") renderOverview(await api("api/admin/overview"));
-    else if (current === "schedule") renderSchedule(await api("api/admin/schedule"));
-    else if (current === "refreshes") renderRefreshes(await api("api/admin/refreshes"));
-    else await loadLogs(background);
+    const data = await api(TABS[tab].url());
+    if (id !== latestLoad || !csrf) return;
+    render(data);
     stamp.textContent = `更新于 ${fmtTime(Date.now() / 1000, false)} · 每 ${POLL_MS / 1000} 秒自动刷新`;
   } catch (err) {
-    if (err.status !== 401) stamp.textContent = `加载失败：${err.message}`;
+    if (id === latestLoad && err.status !== 401) stamp.textContent = `加载失败：${err.message}`;
   } finally {
-    loading = false;
+    inFlight -= 1;
   }
 }
 
-function renderOverview(o) {
-  if (tab !== "overview") return;
-  const on = o.online;
-  const via = Object.entries(on.by_via).map(([k, v]) => `${{ web: "网页", widget: "小组件", ics: "日历" }[k] || k} ${v}`).join(" · ");
-  const st = o.user_status;
-  const r = o.refresh_24h;
-  const sum = (suffix) => Object.entries(r).filter(([k]) => k.endsWith(suffix)).reduce((a, [, v]) => a + v, 0);
-  const triggers = ["widget", "scheduled", "manual", "login"].map((t) =>
-    `${TRIGGER[t]} ${r[`${t}_ok`] || 0}/${(r[`${t}_ok`] || 0) + (r[`${t}_fail`] || 0)}`).join(" · ");
-  replace(body,
-    h("div", { class: "adm-section-title" }, `在线（${Math.round(on.window_seconds / 60)} 分钟内有请求）`),
-    h("div", { class: "adm-tiles" },
-      tile("在线用户", on.users, via || "—"),
-      tile("访客（不同 IP）", on.visitors, "含未登录"),
-      tile("1 小时内活跃", on.active_1h),
-      tile("24 小时内活跃", on.active_24h),
-      tile("7 天内活跃", on.active_7d),
-      tile("有效登录会话", on.sessions)),
-    h("div", { class: "adm-section-title" }, "用户与刷新"),
-    h("div", { class: "adm-tiles" },
-      tile("注册用户", o.users, `正常 ${st.ok || 0} · 退避 ${st.error || 0} · 暂停 ${(st.captcha || 0) + (st.needs_rebind || 0)}`),
-      tile("24 小时刷新", sum("_ok") + sum("_fail"), `成功 ${sum("_ok")} · 失败 ${sum("_fail")}`),
-      tile("日历订阅", o.ics_subscribers),
-      tile("小组件", o.widget_users),
-      tile("邮件通知", o.email_users)),
-    h("div", { class: "adm-section-title" }, "服务器"),
-    h("dl", { class: "adm-kv" },
-      h("dt", "已运行"), h("dd", `${fmtDuration(o.now - o.started_at)}（启动于 ${fmtTime(o.started_at)}）`),
-      h("dt", "24 小时刷新成功/总数"), h("dd", triggers),
-      // Windows 上没有峰值内存（max_rss_mb 为 null），只显示 PID
-      h("dt", "进程"), h("dd", `PID ${o.pid}${o.max_rss_mb == null ? "" : ` · 峰值内存 ${o.max_rss_mb} MB`}`),
-      h("dt", "数据库"), h("dd", `${o.db_mb} MB`),
-      h("dt", "Python"), h("dd", `${o.python} · ${o.platform}`)));
-}
-
-function renderSchedule(s) {
-  if (tab !== "schedule") return;
-  const sc = s.scheduler;
-  const threads = Object.entries(sc.alive).map(([k, v]) => `${k} ${v ? "运行中" : "已停止"}`).join(" · ") || "未启动";
-  const lt = sc.last_tick;
-  const rows = s.items.map((i) => h("tr",
-    h("td", { class: "mono" }, i.student, i.name ? ` ${i.name}` : ""),
-    h("td", statusPill(i.status), i.fail_count ? h("span", { class: "muted" }, ` ×${i.fail_count}`) : null,
-      i.sso_short ? " " : null,
-      i.sso_short ? h("span", { class: "pill pill-warn", title: "扫码登录只有会话级 CASTGC，几小时后无法静默续期" }, "扫码·短效") : null),
-    h("td", { class: "num" }, i.score !== null ? h("span", { class: "pill pill-warn" }, `排队中 ${i.score}`)
-      : i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停"),
-    h("td", { class: "wrap" }, i.pending_reason ? `${i.reason}（${i.pending_reason}）` : i.reason,
-      i.last_error && i.status !== "ok" ? h("div", `上次错误：${i.last_error}`) : null,
-      i.keepalive_at || i.sso_lost_at ? h("div", { class: "muted" }, keepaliveText(i)) : null),
-    h("td", { class: "num" }, `${i.target_minutes} 分钟`),
-    h("td", { class: "num" }, fmtRel(i.last_success_at)),
-    h("td", { class: "num" }, i.next_class_at ? fmtTime(i.next_class_at) : "—"),
-    h("td", { class: "num" }, fmtRel(i.last_seen_at)),
-    h("td", i.status === "ok" && i.score === null
-      ? h("button", { class: "btn btn-sm", type: "button", onclick: async (e) => {
-        e.currentTarget.disabled = true;
-        try { await api("api/admin/request-refresh", { method: "POST", body: { uid: i.uid } }); load(); } catch (err) { window.alert(err.message); }
-      } }, "排队刷新") : null)));
-  replace(body,
-    h("dl", { class: "adm-kv" },
-      h("dt", "后台刷新"), h("dd", sc.enabled ? threads : "已在配置中关闭（SCHEDULER_ENABLED=false）"),
-      h("dt", "预算"), h("dd", `${sc.budget_rps} 次/秒（上限 ${sc.max_rps}）· 令牌 ${sc.tokens} · 每 ${sc.tick_seconds} 秒一轮`),
-      h("dt", "学校健康"), h("dd", sc.upstream_cooldown > 0 ? `暂停中，还剩 ${sc.upstream_cooldown} 秒`
-        : sc.upstream_penalty > 0 ? `额外间隔 ${sc.upstream_penalty} 秒` : "正常"),
-      h("dt", "上一轮"), h("dd", lt ? `${fmtTime(lt.at)}：到期 ${lt.due} 人，刷新 ${lt.refreshed} 人，保活 ${lt.kept_alive ?? 0} 人` : "还没跑过"),
-      h("dt", "当前排队"), h("dd", `${s.due} 人`)),
-    h("div", { class: "adm-section-title" }, `每个人的下次刷新（共 ${s.items.length} 人）`),
-    table(["用户", "状态", "下次刷新", "原因", "目标间隔", "上次成功", "下一节课", "最近使用", ""], rows, "还没有用户"));
-}
-
-const TRIGGER = { widget: "手机代抓", scheduled: "后台", manual: "手动", login: "登录" };
-
-function renderRefreshes(list) {
-  if (tab !== "refreshes") return;
-  replace(body, table(["时间", "用户", "触发", "结果", "说明"], list.map((r) => h("tr",
-    h("td", { class: "num" }, fmtTime(r.at)),
-    h("td", { class: "mono" }, r.student),
-    h("td", TRIGGER[r.trigger] || r.trigger),
-    h("td", h("span", { class: `pill ${r.ok ? "pill-ok" : "pill-danger"}` }, r.ok ? "成功" : "失败")),
-    h("td", { class: "wrap" }, r.message || ""))), "还没有刷新记录"));
-}
-
-// ---------- 日志 ----------
-
-let logBox = null;
-
-function logLine(r) {
-  return h("div", { class: `adm-log-line lv-${r.level}` },
-    h("time", fmtTime(r.at)), h("span", { class: "lg" }, `${r.level[0]} ${r.logger || "root"}`), r.message);
-}
-
-function buildLogView() {
-  const level = h("select", { class: "select", attrs: { "aria-label": "级别" }, onchange: (e) => {
-    logFilter.level = e.target.value; logSeq = 0; load();
-  } }, [["", "全部级别"], ["WARNING", "警告及以上"], ["ERROR", "仅错误"]].map(([v, l]) =>
-    h("option", { value: v, selected: v === logFilter.level }, l)));
-  let debounce;
-  const search = h("input", { type: "search", placeholder: "搜索日志…", value: logFilter.q, oninput: (e) => {
-    window.clearTimeout(debounce);
-    debounce = window.setTimeout(() => { logFilter.q = e.target.value.trim(); logSeq = 0; load(); }, 300);
-  } });
-  const follow = h("label", { class: "check" },
-    h("input", { type: "checkbox", checked: logFollow, onchange: (e) => { logFollow = e.target.checked; } }), "跟随最新");
-  logBox = h("div", { class: "adm-log", attrs: { role: "log", "aria-live": "off" } });
-  replace(body, h("div", { class: "adm-toolbar" }, level, search, follow),
-    logBox, h("p", { class: "hint" }, "进程内只保留最近的日志，服务重启后清空；更早的请在服务器上运行 journalctl -u kebiao 查看。"));
-}
-
-async function loadLogs(background) {
-  if (!background || !logBox || !body.contains(logBox) || logSeq === 0) {
-    if (!logBox || !body.contains(logBox)) buildLogView();
-    logSeq = 0;
-  }
-  const params = new URLSearchParams({ after: String(logSeq), limit: "1000" });
-  if (logFilter.level) params.set("level", logFilter.level);
-  if (logFilter.q) params.set("q", logFilter.q);
-  const data = await api(`api/admin/logs?${params}`);
-  if (tab !== "logs") return;
-  if (logSeq === 0) logBox.replaceChildren();
-  logBox.append(...data.items.map(logLine));
-  while (logBox.childElementCount > 2000) logBox.firstElementChild.remove();
-  if (!logBox.childElementCount) logBox.append(h("div", { class: "adm-empty" }, "没有匹配的日志"));
-  else logBox.querySelector(".adm-empty")?.remove();
-  logSeq = data.seq;
-  if (logFollow) logBox.scrollTop = logBox.scrollHeight;
-}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && timer) load(true); });
 
 // ---------- 启动 ----------
 

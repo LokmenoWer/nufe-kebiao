@@ -33,6 +33,9 @@ CACHE_DIR = Path(DB_PATH).parent / "android-apk"
 
 _releases: list[dict] = []
 _next_refresh = 0.0
+_last_ok_at: float | None = None
+_last_error_at: float | None = None
+_last_error: str | None = None
 _refresh_lock = threading.Lock()
 _download_lock = threading.Lock()
 
@@ -58,18 +61,21 @@ def _parse(items) -> list[dict]:
 
 def _load() -> list[dict]:
     """最新的版本列表。别的请求正在读 GitHub 时不排队，先用旧结果。"""
-    global _releases, _next_refresh
+    global _releases, _next_refresh, _last_ok_at, _last_error_at, _last_error
     if time.time() >= _next_refresh and _refresh_lock.acquire(blocking=False):
         try:
             r = requests.get(RELEASES_API, timeout=TIMEOUT, headers={
                 "Accept": "application/vnd.github+json", "User-Agent": "nufe-kebiao-server"})
             r.raise_for_status()
             _releases = _parse(r.json())
-            _next_refresh = time.time() + REFRESH_EVERY
+            _next_refresh = _last_ok_at = time.time()
+            _next_refresh += REFRESH_EVERY
             _prune()
         except (requests.RequestException, ValueError) as e:
             log.warning("android releases refresh failed: %s", type(e).__name__)
-            _next_refresh = time.time() + RETRY_AFTER
+            _next_refresh = _last_error_at = time.time()
+            _next_refresh += RETRY_AFTER
+            _last_error = type(e).__name__
         finally:
             _refresh_lock.release()
     return _releases
@@ -84,6 +90,21 @@ def feed() -> list[dict]:
 
 def latest_stable_tag() -> str | None:
     return next((r["tag"] for r in _load() if not r["prerelease"]), None)
+
+
+def sync_state() -> dict:
+    """最近一次读 GitHub 的结果（不发请求）：failing 表示最后一次读失败，正在给旧结果。"""
+    failing = bool(_last_error_at and _last_error_at > (_last_ok_at or 0))
+    return {"last_ok_at": _last_ok_at, "last_error_at": _last_error_at,
+            "last_error": _last_error if failing else None, "failing": failing}
+
+
+def status() -> dict:
+    """管理员页：镜像了哪些版本、安装包是否已下载到本地。"""
+    releases = _load()  # 可能刚读过 GitHub，同步状态要在这之后取
+    return {**sync_state(), "latest_stable": latest_stable_tag(), "releases": [
+        {"tag": r["tag"], "prerelease": r["prerelease"], "name": r["name"], "size": r["size"],
+         "mirrored": (CACHE_DIR / f"{r['tag']}.apk").exists()} for r in releases]}
 
 
 def _prune() -> None:

@@ -1038,8 +1038,15 @@ def admin_schedule(_csrf=Depends(admin.current_admin)):
 
 
 @app.get("/api/admin/refreshes")
-def admin_refreshes(_csrf=Depends(admin.current_admin)):
-    return admin.recent_refreshes()
+def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|scheduled|manual|login)$"),
+                    failed: bool = False, limit: int = Query(100, ge=1, le=500),
+                    _csrf=Depends(admin.current_admin)):
+    return admin.recent_refreshes(limit, trigger, failed)
+
+
+@app.get("/api/admin/android")
+def admin_android(_csrf=Depends(admin.current_admin)):
+    return admin.android()
 
 
 class AdminRefreshIn(BaseModel):
