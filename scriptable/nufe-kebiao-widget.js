@@ -101,12 +101,13 @@ function validLead(n) {
 }
 
 /**
- * 实际用的提前分钟数：Parameter 里写的数字 > 本机记下的（小组件刷新时记的 / 菜单里选的）> 默认 10。
- * 在 Scriptable 里运行脚本时拿不到 Parameter，全靠本机记下的那个数。
+ * 实际用的提前分钟数：Parameter 里写的数字 > 本机记下的（小组件刷新时记的 / 菜单里选的）
+ * > 上次排提醒用的 > 默认 10。在 Scriptable 里运行脚本时拿不到 Parameter，全靠本机记下的那个数。
  */
 function remindLead(remindMinutes, state) {
   if (validLead(remindMinutes)) return remindMinutes;
   if (state && validLead(state.want)) return state.want;
+  if (state && validLead(state.lead)) return state.lead;
   return DEFAULT_REMIND_MINUTES;
 }
 
@@ -1433,13 +1434,13 @@ function buildWidget(payload, { family, mode, offline, resync = false, nowMs = D
 // 读写数据：课表 JSON、离线缓存、本机状态
 // ======================================================================
 
-function localFile(name) {
+function localFile(name, durable) {
   const fm = FileManager.local();
-  return { fm, path: fm.joinPath(fm.cacheDirectory(), name) };
+  return { fm, path: fm.joinPath(durable ? fm.libraryDirectory() : fm.cacheDirectory(), name) };
 }
 
-function readJsonFile(name) {
-  const { fm, path } = localFile(name);
+function readJsonFile(name, durable) {
+  const { fm, path } = localFile(name, durable);
   if (!fm.fileExists(path)) return null;
   try {
     return JSON.parse(fm.readString(path));
@@ -1448,13 +1449,24 @@ function readJsonFile(name) {
   }
 }
 
-function writeJsonFile(name, data) {
-  const { fm, path } = localFile(name);
+function writeJsonFile(name, data, durable) {
+  const { fm, path } = localFile(name, durable);
   fm.writeString(path, JSON.stringify(data));
 }
 
 const CACHE_FILE = () => cacheName(WIDGET_URL);
-const STATE_FILE = () => cacheName(WIDGET_URL).replace(/\.json$/, ".state.json");
+// 本机状态（提醒分钟数等）要熬过更新脚本：缓存目录系统随时会清，所以放 Library；
+// 文件名按网站算而不是带 token 的链接，重新生成链接、粘贴新脚本后还是同一份。
+const STATE_FILE = () => cacheName(siteUrl()).replace(/\.json$/, ".state.json");
+const LEGACY_STATE_FILE = () => cacheName(WIDGET_URL).replace(/\.json$/, ".state.json"); // 旧脚本放在缓存目录的
+
+function readState() {
+  return readJsonFile(STATE_FILE(), true) || readJsonFile(LEGACY_STATE_FILE());
+}
+
+function updateState(changes) {
+  writeJsonFile(STATE_FILE(), { ...readState(), ...changes }, true);
+}
 
 /** 只请求一次：快上课时的确认由服务器按“出门前检查点”安排，脚本不必再追加请求。 */
 async function readFeed(url) {
@@ -1664,7 +1676,7 @@ async function syncReminders(payload, now, leadMinutes, base) {
     n.setTriggerDate(new Date(item.when));
     await n.schedule();
   }
-  writeJsonFile(STATE_FILE(), { ...readJsonFile(STATE_FILE()), remindSyncedAt: leadMinutes > 0 ? now.ms / 1000 : null, lead: leadMinutes });
+  updateState({ remindSyncedAt: leadMinutes > 0 ? now.ms / 1000 : null, lead: leadMinutes });
   return { scheduled: plan.length, created: create.length, removed: remove.length };
 }
 
@@ -1774,7 +1786,7 @@ async function chooseLead(result, current, fromParam) {
   const index = await sheet.presentSheet();
   if (index < 0 || index >= LEAD_CHOICES.length) return;
   const lead = LEAD_CHOICES[index];
-  writeJsonFile(STATE_FILE(), { ...readJsonFile(STATE_FILE()), want: lead });
+  updateState({ want: lead });
   const synced = await syncReminders(result.data, shanghaiNow(), lead, siteUrl());
   await say("已设置", remindSummary(lead, synced));
 }
@@ -1819,14 +1831,14 @@ async function main() {
     return;
   }
   const result = await load();
-  const state = readJsonFile(STATE_FILE());
+  const state = readState();
   const lead = remindLead(param.remindMinutes, state);
   // 先把小组件交出去再结束。桌面进程里调用 Notification 经常不返回，
   // 系统会杀掉脚本，桌面就留下 “Call Script.setWidget()”。
   if (inWidget()) {
     // 提醒要到 Scriptable 里运行脚本时才排，那时拿不到 Parameter：把这里写的分钟数记到本机
     if (validLead(param.remindMinutes) && (!state || state.want !== param.remindMinutes)) {
-      writeJsonFile(STATE_FILE(), { ...state, want: param.remindMinutes });
+      updateState({ want: param.remindMinutes });
     }
     const resync = needsReminderResync(result.data, state, lead);
     Script.setWidget(result.error ? errorWidget(result.error)

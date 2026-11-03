@@ -250,6 +250,7 @@ export async function runWidgetScript({
 
   const fm = {
     cacheDirectory: () => "/cache",
+    libraryDirectory: () => "/library",
     joinPath: (a, b) => `${a}/${b}`,
     writeString: (p, s) => files.set(p, s),
     readString: (p) => files.get(p),

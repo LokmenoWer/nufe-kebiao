@@ -7,8 +7,7 @@ import { createSliderCaptcha } from "../components/slider-captcha.js";
 
 const INTRO = {
   pwd: "服务器代你登录统一身份认证，只读取课表。密码不会明文落库。",
-  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。"
-    + "扫码登录的登录态比账号密码短，本站会定时替你保持；想最稳定地自动刷新，推荐账号密码登录。",
+  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。",
 };
 
 function field(id, labelText, input) {
@@ -54,6 +53,10 @@ export function mountLogin(root, { onSuccess } = {}) {
   tabs.append(tabPwd, tabQr);
 
   const introEl = h("p", { class: "auth-intro" }, INTRO.pwd);
+  const qrRiskNote = h("div", { class: "callout callout-warn", hidden: true },
+    h("strong", {}, "扫码登录有很大风险掉登录。"),
+    "学校给扫码登录的登录态很短，本站会定时替你保持，但仍可能随时失效；掉登录后课表不再自动更新，要回来重新扫码。"
+    + "想稳定地自动刷新，请用账号密码登录。");
 
   // ---- 账号密码 ----
   const studentInput = h("input", {
@@ -197,6 +200,7 @@ export function mountLogin(root, { onSuccess } = {}) {
       h("p", { class: "muted" }, "用南京财经大学统一身份认证账号登录，自动同步你的课表。")),
     tabs,
     introEl,
+    qrRiskNote,
     passwordForm,
     qrPanel,
     options,
@@ -250,6 +254,7 @@ export function mountLogin(root, { onSuccess } = {}) {
     const formStage = stage === "form";
     tabs.hidden = !formStage;
     introEl.hidden = !formStage;
+    qrRiskNote.hidden = !(formStage && mode === "qr");
     passwordForm.hidden = !(formStage && mode === "pwd");
     qrPanel.hidden = !(formStage && mode === "qr");
     options.hidden = !formStage;
