@@ -800,6 +800,35 @@ test("在 Scriptable 里运行 → 提醒时间：选好记到本机并马上重
   assert.ok(!broken.alerts[0].actions.includes("提醒时间"));
 });
 
+test("更新脚本后提醒时间不变：缓存被清、重新生成链接都不回到默认 10 分钟", async () => {
+  const cache = new Map();
+  await runWidgetScript({
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true, choose: ["提醒时间", "提前 30 分钟"],
+  });
+  const remembered = async (url) => (await runWidgetScript({
+    payload: PAYLOAD, url, nowMs: NOW, cache, inApp: true, version: "sha-000000000002",
+  })).alerts[0].message;
+  assert.match(await remembered(URL_OK), /上课提醒：提前 30 分钟/);
+  for (const key of [...cache.keys()]) if (key.startsWith("/cache/")) cache.delete(key);
+  assert.match(await remembered(URL_OK), /上课提醒：提前 30 分钟/);
+  assert.match(await remembered(URL_OK.replace(/[^/]+\.json$/, "rotated.json")), /上课提醒：提前 30 分钟/);
+});
+
+test("旧脚本放在缓存目录的提醒时间：更新后接着用，并搬到不会被清的地方", async () => {
+  const legacy = `/cache/${W.cacheName(URL_OK).replace(/\.json$/, ".state.json")}`;
+  const cases = [[{ want: 25, lead: 10 }, 25], [{ lead: 20 }, 20], [{ lead: 0 }, null]];
+  for (const [state, minutes] of cases) {
+    const cache = new Map([[legacy, JSON.stringify(state)]]);
+    const run = async () => (await runWidgetScript({
+      payload: PAYLOAD, url: URL_OK, nowMs: NOW, cache, inApp: true,
+    })).alerts[0].message;
+    const expected = minutes ? new RegExp(`上课提醒：提前 ${minutes} 分钟`) : /上课提醒：已关闭/;
+    assert.match(await run(), expected);
+    cache.delete(legacy);
+    assert.match(await run(), expected);
+  }
+});
+
 test("在 Scriptable 里运行：菜单可预览，也能更新脚本", async () => {
   const preview = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, choose: ["预览本周（大号）"] });
   assert.equal(preview.presented.length, 1);
