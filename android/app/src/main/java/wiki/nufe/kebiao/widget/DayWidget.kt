@@ -54,7 +54,7 @@ open class DayWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         provideContent {
             val data = rememberWidgetData(context)
-            GlanceTheme {
+            GlanceTheme(colors = WidgetColors) {
                 val message = placeholderMessage(data)
                 if (message != null) Placeholder(context, message) else DayContent(context, data)
             }
@@ -62,7 +62,7 @@ open class DayWidget : GlanceAppWidget() {
     }
 
     override suspend fun providePreview(context: Context, widgetCategory: Int) {
-        provideContent { GlanceTheme { DayPreview(context) } }
+        provideContent { GlanceTheme(colors = WidgetColors) { DayPreview(context) } }
     }
 }
 
@@ -101,7 +101,9 @@ private fun DayContent(context: Context, data: WidgetData) {
     val now = Now.current()
     val plan = buildTodayPlan(snapshot.payload, now)
     val size = LocalSize.current
-    val small = size.width < 200.dp
+    val tablet = context.resources.configuration.smallestScreenWidthDp >= 600
+    // 平板只把 1×1 当小号；1×2 / 2×2 用列表。手机沿用原来的宽度判断，避免改坏手机上正常的版面。
+    val small = if (tablet) size.width < 220.dp && size.height < 220.dp else size.width < 200.dp
     val changed = plan.slots.any { it.lesson.changed } || plan.cancelled.isNotEmpty()
     val note = headerNote(snapshot, plan.day, now, compact = small, changed = changed)
     val dateText = plan.day?.let { "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}" }.orEmpty()

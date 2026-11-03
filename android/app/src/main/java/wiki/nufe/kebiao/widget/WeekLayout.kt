@@ -313,7 +313,7 @@ private fun solve(ideal: FloatArray, gap: BooleanArray, cons: List<Triple<Int, I
 }
 
 /** 拉大了字也跟着放大；最多缩到 0.8 倍，再小就看不清。 */
-val FONT_SCALES = floatArrayOf(1.2f, 1.1f, 1f, 0.9f, 0.8f)
+val FONT_SCALES = floatArrayOf(1.5f, 1.35f, 1.2f, 1.1f, 1f, 0.9f, 0.8f)
 const val LEVELS = 7  // 排版时只试 0–6 档（课名、教室都在）；都摆不下就纯按比例，卡片自己能写多少写多少
 
 /** 纵轴：segs 是相邻两条分界线之间的一段（ideal 按比例分高度，gap 是固定的 GAP）；startIdx / endIdx 是每节课的上下分界线。 */

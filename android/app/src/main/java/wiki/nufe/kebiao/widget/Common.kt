@@ -20,6 +20,7 @@ import androidx.glance.GlanceModifier
 import androidx.glance.GlanceTheme
 import androidx.glance.Image
 import androidx.glance.ImageProvider
+import androidx.glance.color.colorProviders
 import androidx.glance.action.Action
 import androidx.glance.action.ActionParameters
 import androidx.glance.action.clickable
@@ -104,7 +105,42 @@ fun mix(a: Color, b: Color, t: Float) = Color(
     blue = a.blue + (b.blue - a.blue) * t,
 )
 
-private val NIGHT_BG = Color(0xFF16181D)
+private fun widgetColor(day: Long, night: Long) =
+    ColorProvider(day = Color(day.toInt()), night = Color(night.toInt()))
+
+private val DAY_BG = Color(0xFFF6F5F2)   // 不是纯白，避免桌面太刺眼
+private val NIGHT_BG = Color(0xFF1C1C1E) // 浅黑，不跟随壁纸偏蓝
+
+/** 小组件固定配色：不跟随系统动态取色，避免 HyperOS / MIUI 用壁纸颜色把卡片染绿。 */
+internal val WidgetColors = colorProviders(
+    primary = widgetColor(0xFF111111, 0xFFF5F5F7),
+    onPrimary = widgetColor(0xFFFFFFFF, 0xFF111111),
+    primaryContainer = widgetColor(0xFFF0F0F2, 0xFF2A2A2E),
+    onPrimaryContainer = widgetColor(0xFF111111, 0xFFF5F5F7),
+    secondary = widgetColor(0xFF4B63E0, 0xFFB9C3FF),
+    onSecondary = widgetColor(0xFFFFFFFF, 0xFF111111),
+    secondaryContainer = widgetColor(0xFFE8ECFF, 0xFF2B3550),
+    onSecondaryContainer = widgetColor(0xFF111111, 0xFFE8ECFF),
+    tertiary = widgetColor(0xFF4B63E0, 0xFFB9C3FF),
+    onTertiary = widgetColor(0xFFFFFFFF, 0xFF111111),
+    tertiaryContainer = widgetColor(0xFFE8ECFF, 0xFF2B3550),
+    onTertiaryContainer = widgetColor(0xFF111111, 0xFFE8ECFF),
+    error = widgetColor(0xFFD64545, 0xFFFF8A8A),
+    errorContainer = widgetColor(0xFFFFE3E3, 0xFF4A1D1D),
+    onError = widgetColor(0xFFFFFFFF, 0xFF111111),
+    onErrorContainer = widgetColor(0xFF5F1A1A, 0xFFFFDAD6),
+    background = widgetColor(0xFFF6F5F2, 0xFF1C1C1E),
+    onBackground = widgetColor(0xFF111111, 0xFFF5F5F7),
+    surface = widgetColor(0xFFF6F5F2, 0xFF1C1C1E),
+    onSurface = widgetColor(0xFF111111, 0xFFF5F5F7),
+    surfaceVariant = widgetColor(0xFFF2F2F4, 0xFF2A2A2E),
+    onSurfaceVariant = widgetColor(0xFF6B6B70, 0xFFA6A6AC),
+    outline = widgetColor(0xFFE6E6E9, 0xFF35353A),
+    inverseOnSurface = widgetColor(0xFFF5F5F7, 0xFF111111),
+    inverseSurface = widgetColor(0xFF1A1A1D, 0xFFF5F5F7),
+    inversePrimary = widgetColor(0xFFB9C3FF, 0xFF4B63E0),
+    widgetBackground = widgetColor(0xFFF6F5F2, 0xFF1C1C1E),
+)
 
 /** 课程卡片底色：浅色模式淡淡一层课程色，深色模式压暗。 */
 fun chipBackground(hex: String): ColorProvider {

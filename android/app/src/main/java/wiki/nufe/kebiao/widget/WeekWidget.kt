@@ -51,7 +51,7 @@ class WeekWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         provideContent {
             val data = rememberWidgetData(context)
-            GlanceTheme {
+            GlanceTheme(colors = WidgetColors) {
                 val message = placeholderMessage(data)
                 if (message != null) Placeholder(context, message) else WeekContent(context, data)
             }
@@ -59,7 +59,7 @@ class WeekWidget : GlanceAppWidget() {
     }
 
     override suspend fun providePreview(context: Context, widgetCategory: Int) {
-        provideContent { GlanceTheme { WeekPreview(context) } }
+        provideContent { GlanceTheme(colors = WidgetColors) { WeekPreview(context) } }
     }
 }
 
@@ -145,10 +145,24 @@ private fun WeekContent(context: Context, data: WidgetData) {
     val (title, block) = weekToShow(snapshot.payload, now)
     val size = LocalSize.current
     val m = TextMeasure(context)
-    val axisW = maxOf(m.width("00:00", AXIS_SP, true), m.width("第10节", UNIT_SP, false),
-        m.width("–00:00", END_SP, false)) + 4f
-    val labelH = m.height("00:00", AXIS_SP, true, 100f, 1)
-    val endH = m.height("–00:00", END_SP, false, 100f, 1)
+    val widthScale = when {
+        size.width.value >= 520f -> 1.25f
+        size.width.value >= 360f -> 1.1f
+        else -> 1f
+    }
+    val heightScale = when {
+        size.height.value >= 400f -> 1.25f
+        size.height.value >= 280f -> 1.1f
+        else -> 1f
+    }
+    val uiScale = minOf(widthScale, heightScale)
+    val axisSp = AXIS_SP * uiScale
+    val unitSp = UNIT_SP * uiScale
+    val endSp = END_SP * uiScale
+    val axisW = maxOf(m.width("00:00", axisSp, true), m.width("第10节", unitSp, false),
+        m.width("–00:00", endSp, false)) + 4f
+    val labelH = m.height("00:00", axisSp, true, 100f, 1)
+    val endH = m.height("–00:00", endSp, false, 100f, 1)
     val usableW = size.width.value - PADDING.value * 2 - axisW
     val maxCols = maxOf(1, (usableW / (MIN_COL_W + COL_GAP)).toInt())
     val columns = visibleColumns(weekColumns(block, now), maxCols, now.date)
@@ -176,17 +190,17 @@ private fun WeekContent(context: Context, data: WidgetData) {
                 Spacer(GlanceModifier.width(axisW.dp))
                 // 列间距用左内边距：Glance 的 Row 最多 10 个子元素，周一到周日 + 时间轴已经 8 个
                 for (c in columns) {
-                    Box(modifier = GlanceModifier.width((colW + COL_GAP).dp).padding(start = COL_GAP.dp),
+                    Box(modifier = GlanceModifier.defaultWeight().padding(start = COL_GAP.dp),
                         contentAlignment = Alignment.Center) {
-                        Label("周${WEEKDAY[c.day.weekday]}", size = 11.sp, bold = c.isToday,
+                        Label("周${WEEKDAY[c.day.weekday]}", size = (11f * uiScale).sp, bold = c.isToday,
                             color = if (c.isToday) GlanceTheme.colors.primary else GlanceTheme.colors.onSurfaceVariant)
                     }
                 }
             }
             Row(modifier = GlanceModifier.fillMaxWidth().height(gridH.dp)) {
-                Axis(layout, axisW, gridH, labelH, endH, m)
+                Axis(layout, axisW, gridH, labelH, endH, m, axisSp, unitSp, endSp)
                 columns.forEachIndexed { i, c ->
-                    DayCells(context, data, c, layout, i, colW, m)
+                    DayCells(context, data, c, layout, i, colW, m, GlanceModifier.defaultWeight())
                 }
             }
         }
@@ -202,8 +216,18 @@ private data class AxisItem(val top: Float, val height: Float, val text: String,
  * 排版时已经保证标签之间互不重叠。Glance 的 Column 最多 10 个子元素，标签按 9 个一组装进小 Column 再竖着叠。
  */
 @Composable
-private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, endH: Float, m: TextMeasure) {
-    val unitH = m.height("第1节", UNIT_SP, false, 100f, 1)
+private fun Axis(
+    layout: GridLayout,
+    axisW: Float,
+    gridH: Float,
+    labelH: Float,
+    endH: Float,
+    m: TextMeasure,
+    axisSp: Float,
+    unitSp: Float,
+    endSp: Float,
+) {
+    val unitH = m.height("第1节", unitSp, false, 100f, 1)
     val items = (layout.starts.map { (k, l) -> AxisItem(layout.bounds[k], labelH, l.time, true, l.unit) } +
         layout.ends.map { (k, t) -> AxisItem(layout.bounds[k] - endH, endH, "–$t", false, null) })
         .sortedWith(compareBy({ it.top }, { it.start }))
@@ -216,10 +240,10 @@ private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, 
                     val showUnit = item.start && item.unit != null && next - item.top >= labelH + unitH
                     Column(modifier = GlanceModifier.padding(top = (item.top - cursor).coerceAtLeast(0f).dp)) {
                         if (item.start) {
-                            Label(item.text, size = AXIS_SP.sp, bold = true, color = GlanceTheme.colors.onSurfaceVariant)
-                            if (showUnit) Label("第${item.unit}节", size = UNIT_SP.sp, color = GlanceTheme.colors.outline)
+                            Label(item.text, size = axisSp.sp, bold = true, color = GlanceTheme.colors.onSurfaceVariant)
+                            if (showUnit) Label("第${item.unit}节", size = unitSp.sp, color = GlanceTheme.colors.outline)
                         } else {
-                            Label(item.text, size = END_SP.sp, color = GlanceTheme.colors.outline)
+                            Label(item.text, size = endSp.sp, color = GlanceTheme.colors.outline)
                         }
                     }
                     cursor = maxOf(cursor, item.top) + item.height + if (showUnit) unitH else 0f
@@ -230,13 +254,21 @@ private fun Axis(layout: GridLayout, axisW: Float, gridH: Float, labelH: Float, 
 }
 
 @Composable
-private fun DayCells(context: Context, data: WidgetData, column: DayColumn, layout: GridLayout, col: Int, width: Float,
-                     m: TextMeasure) {
+private fun DayCells(
+    context: Context,
+    data: WidgetData,
+    column: DayColumn,
+    layout: GridLayout,
+    col: Int,
+    width: Float,
+    m: TextMeasure,
+    modifier: GlanceModifier,
+) {
     // 每格叠在 Box 里、各自用上内边距从列顶算起，不接在上一格后面：桌面原地套用更新（reapply）偶尔会丢掉一格，
     // 接着排的话后面的课全跟着往上挪、落到别的节次上；各算各的，最多少一格，不会错位。
     // 每格只占一个子元素，一天最多十节课也不会超出 RemoteViews 的子元素上限。
     val spans = layout.spans.filter { it.col == col }.take(10)
-    Box(modifier = GlanceModifier.width((width + COL_GAP).dp).fillMaxHeight().padding(start = COL_GAP.dp)
+    Box(modifier = modifier.fillMaxHeight().padding(start = COL_GAP.dp)
         .clickable(openDay(context, data, column.day))) {
         for (span in spans) {
             val top = layout.bounds[span.a]
