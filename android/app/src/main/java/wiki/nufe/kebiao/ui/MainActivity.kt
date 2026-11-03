@@ -9,6 +9,7 @@ import android.appwidget.AppWidgetProviderInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -1277,18 +1278,38 @@ private fun ReminderSection(
     val liveName = liveUpdateName()
 
     SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("上课通知", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(2.dp))
+                Hint("开启后会在设定的时间发送通知提醒上课")
+            }
+            Switch(
+                checked = alarmEnabled,
+                onCheckedChange = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    onAlarmToggle(it)
+                },
+            )
+        }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = 12.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onPickTime),
+                .alpha(if (alarmEnabled) 1f else 0.45f)
+                .clickable(enabled = alarmEnabled, onClick = onPickTime),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("上课前提示时间", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(3.dp))
+                Text("上课前提示时间", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
                 Text(
                     if (minutes > 0) "提前 $minutes 分钟" else "未设置",
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -1305,26 +1326,11 @@ private fun ReminderSection(
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("上课通知", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Spacer(Modifier.height(2.dp))
-                Hint("开启后会在设定的时间发一条通知提醒上课，不是闹钟，不会持续响铃。")
-            }
-            Switch(
-                checked = alarmEnabled,
-                onCheckedChange = {
-                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                    onAlarmToggle(it)
-                },
-            )
-        }
-
-        HorizontalDivider(
-            modifier = Modifier.padding(vertical = 12.dp),
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .alpha(if (alarmEnabled) 1f else 0.45f),
+            ) {
                 Text("流体云显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(2.dp))
                 Hint(
@@ -1345,7 +1351,7 @@ private fun ReminderSection(
                     view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                     onLiveUpdateChange(it)
                 },
-                enabled = Build.VERSION.SDK_INT >= 36,
+                enabled = alarmEnabled && Build.VERSION.SDK_INT >= 36,
             )
         }
         if (Build.VERSION.SDK_INT >= 36 && liveUpdate && alarmEnabled &&
@@ -1731,6 +1737,13 @@ private fun AboutScreen(
                 )
             }
             AboutRow("数据来源", "/mobile/<token>.json")
+            if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                AboutRow("开发者选项", "实时提醒测试") {
+                    context.startActivity(
+                        Intent().setClassName(context, "wiki.nufe.kebiao.preview.LiveUpdateTestActivity"),
+                    )
+                }
+            }
         }
         Spacer(Modifier.height(110.dp))
     }
