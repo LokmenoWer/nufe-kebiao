@@ -812,6 +812,15 @@ def widget_refresh_state(uid: int, now: float | None = None) -> dict:
     return {"pending": pending, "due": due, "fresh": fresh}
 
 
+def widget_poll_after(uid: int, now: float | None = None) -> int | None:
+    """小组件 JSON 里的 poll_after（秒）：开了代抓、状态正常的人才给，其余照脚本自己的节奏。"""
+    now = db.now() if now is None else now
+    row = db.connect().execute(f"SELECT status, widget_fetch, {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or row["status"] != "ok" or not row["widget_fetch"]:
+        return None
+    return round(refresh_policy.widget_poll_after(signals_of(row), now))
+
+
 def push_widget_refresh(uid: int, now: float | None = None) -> dict:
     """小组件明确要求刷新：状态正常、没在排队、也不是刚刚同步过，就插到队首。
 
