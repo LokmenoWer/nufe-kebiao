@@ -109,6 +109,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             return Result.success()
         }
         LinkState.markInvalid(applicationContext, false)
+        snapshot?.takeUnless { it.offline }?.let { LoginAlert.update(applicationContext, it.payload) }
         Reminders.reschedule(applicationContext)
         Sync.redraw(applicationContext)
         val payload = snapshot?.payload

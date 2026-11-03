@@ -131,6 +131,7 @@ import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.Repository
+import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.data.State
@@ -146,6 +147,7 @@ import wiki.nufe.kebiao.diag.Diagnostics
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
+import wiki.nufe.kebiao.sync.LoginAlert
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
@@ -359,6 +361,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                     return@launch
                 }
                 snapshot = snap
+                LoginAlert.update(context, snap.payload)
                 url = link
                 invalid = false
                 tab = Tab.Timetable
@@ -402,6 +405,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                     message = "连不上服务器，显示的是缓存。"
                 } else {
                     Diag.i("refresh ok")
+                    snap?.let { LoginAlert.update(context, it.payload) }
                 }
                 Reminders.reschedule(context)
                 Sync.redraw(context)
@@ -422,6 +426,7 @@ private fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     fun removeLink() {
         Diag.i("link removed")
         repo.widgetUrl = null
+        LoginAlert.clear(context)
         Sync.cancelAll(context)
         LiveUpdates.cancel(context)
         Reminders.reschedule(context)
@@ -713,6 +718,30 @@ private fun SetupScreen(
     }
 }
 
+/** 自动刷新停了：小字标题栏容易看漏，这里写清楚怎么恢复。 */
+@Composable
+private fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit, onOpenSite: () -> Unit) {
+    SectionCard {
+        Text(
+            if (captcha) "需要重新验证" else "登录已失效",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Spacer(Modifier.height(4.dp))
+        Hint("课表已暂停更新，现在显示的可能不是最新的。到网站重新登录一次，就会恢复自动更新。")
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Text("去网站登录", fontSize = 13.sp)
+            }
+            TextButton(onClick = onRefresh, enabled = !busy, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Text("已登录，刷新", fontSize = 13.sp)
+            }
+        }
+    }
+}
+
 @Composable
 private fun HomeScreen(
     repo: Repository,
@@ -754,6 +783,10 @@ private fun HomeScreen(
         if (message != null) {
             Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             Spacer(Modifier.height(10.dp))
+        }
+        snapshot?.payload?.takeIf { it.needsLogin }?.let { payload ->
+            LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
+            Spacer(Modifier.height(14.dp))
         }
         TodayCardView(snapshot, plan, note, now, busy, onRefresh, onOpenSite)
         Spacer(Modifier.height(14.dp))
@@ -1450,9 +1483,10 @@ private fun MineScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("当前链接", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
+                val needsLogin = snapshot?.payload?.needsLogin == true
                 Tag(
-                    if (snapshot?.offline == true) "离线" else "已连接",
-                    if (snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.primary,
+                    if (needsLogin) "需重新登录" else if (snapshot?.offline == true) "离线" else "已连接",
+                    if (needsLogin || snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.primary,
                 )
             }
             Spacer(Modifier.height(4.dp))

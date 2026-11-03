@@ -192,13 +192,17 @@ enum class Tone { WARN, ACCENT, FAINT }
 
 data class Note(val text: String, val tone: Tone)
 
+/** 自动刷新停了、要用户自己登录一次才会恢复。error 只是暂时失败，服务器会自己重试。 */
+val Payload.needsLogin get() = status == "needs_rebind" || status == "captcha"
+
 /** 标题栏右侧的一句话：登录失效 > 很久没更新 > 离线 > 更新中 > 有调课 > 第几周。 */
 fun headerNote(snapshot: Snapshot, day: Day?, now: Now, compact: Boolean, changed: Boolean = false): Note? {
     val p = snapshot.payload
-    if (p.status != "ok") return Note("需重新登录", Tone.WARN)
+    if (p.needsLogin) return Note("需重新登录", Tone.WARN)
     val nowSec = now.ms / 1000
     val age = p.updatedAt?.let { nowSec - it } ?: 0
     if (age > STALE_SECONDS) return Note("${age / 86400} 天未更新", Tone.WARN)
+    if (p.status == "error") return Note("刷新失败", Tone.WARN)
     if (snapshot.offline) return Note("离线", Tone.FAINT)
     if (p.refresh.pending || p.refresh.due) return Note("更新中", Tone.ACCENT)
     val recent = p.changedAt != null && nowSec - p.changedAt < CHANGE_NOTE_SECONDS
