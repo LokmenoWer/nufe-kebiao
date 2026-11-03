@@ -18,7 +18,7 @@ android {
         applicationId = "wiki.nufe.kebiao"
         minSdk = 26
         targetSdk = 37
-        versionCode = 10
+        versionCode = 11
         versionName = "1.3.4"
     }
 
