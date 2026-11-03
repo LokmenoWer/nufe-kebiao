@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞或隐私泄露（不要公开提交）
+    url: https://github.com/LokmenoWer/nufe-kebiao/blob/main/.github/SECURITY.md
+    about: 涉及漏洞、账号或个人信息泄露时，请按安全说明私下联系开发者。
+  - name: 下载安卓 App
+    url: https://github.com/LokmenoWer/nufe-kebiao/releases/latest
+    about: 反馈安卓问题前，可以先升级到最新版本确认问题是否还在。
+  - name: 打开南财课表网站
+    url: https://kebiao.nufe.wiki
+    about: 本项目是非官方工具，与南京财经大学无隶属关系；学校系统本身的问题请联系学校。

@@ -1,0 +1,76 @@
+name: 测试或开发任务
+description: 给开发者：测试失败或不稳定、重构、工具链和文档改动
+title: "[开发] "
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 任务类型
+      options:
+        - 测试失败或不稳定
+        - 重构或技术债
+        - 工具链或发布流程
+        - 文档
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及模块
+      multiple: true
+      options:
+        - app/（后端）
+        - static/（网页前端）
+        - android/（安卓 App）
+        - scriptable/（iOS 小组件）
+        - tests/（测试）
+        - deploy/（部署）
+        - scripts/（工具脚本）
+        - 文档
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 说明现状和为什么要处理。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 测试问题请填写。时间相关的失败请写上实际运行时刻和时区。
+      placeholder: |
+        commit:
+        OS:
+        Python / Node / JDK:
+        运行时刻: 2026-11-02 07:46 Asia/Shanghai
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现命令
+      render: bash
+      placeholder: |
+        .venv/bin/python -m pytest -q tests/test_api.py
+        node --test tests/js/*.test.js
+        cd android && ./gradlew :app:testDebugUnitTest
+  - type: textarea
+    id: output
+    attributes:
+      label: 实际输出
+      description: 贴关键片段即可，请先去掉真实的学号、cookie 和 token。
+      render: text
+  - type: textarea
+    id: cause
+    attributes:
+      label: 根因分析
+      description: 可以引用具体的文件和行号；还不清楚可以留空。
+  - type: textarea
+    id: done
+    attributes:
+      label: 修复建议和完成标准
+      description: 说明怎样算完成，例如要补哪些测试、哪些命令必须通过。
+    validations:
+      required: true

@@ -1,0 +1,74 @@
+name: 网站问题
+description: 网页课表、设置页、日历订阅或邮件通知不正常
+title: "[网站] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issue 是公开的。**不要填写**密码、验证码、cookie、学号、姓名、邮箱，也不要贴完整的小组件或日历订阅链接，截图前请先打码。
+        登录失败、掉登录或课表内容不对，请改用“登录或课表同步问题”模板。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题出在哪里
+      multiple: true
+      options:
+        - 周视图
+        - 日视图
+        - 上课进度或当前时间线
+        - 账号与设置
+        - 日历订阅（.ics）
+        - 邮件通知
+        - 深色模式或显示样式
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 设备和浏览器
+      description: 日历订阅问题请写日历 App，例如 ICSx⁵、iOS 日历、Google 日历。
+      placeholder: 例如 iPhone 15 / iOS 18 / Safari
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开周视图
+        2. 切换到第 8 周
+        3. 点击周三第一节课
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 应该是什么样
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际是什么样
+      description: 可以附上打码后的截图，或页面提示的原文。
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: 出现频率
+      options:
+        - 每次都出现
+        - 偶尔出现
+        - 只出现过一次
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 发布前确认
+      options:
+        - label: 内容和截图中没有密码、cookie、学号、姓名、邮箱或完整链接
+          required: true

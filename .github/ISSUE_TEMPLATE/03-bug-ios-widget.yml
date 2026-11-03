@@ -1,0 +1,93 @@
+name: iOS 小组件问题
+description: Scriptable 桌面或锁屏小组件、上课提醒或脚本更新不正常
+title: "[iOS] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issue 是公开的。**不要粘贴整段脚本**：脚本里写着你本人的小组件链接，别人拿到后可以读取课表，也可能拿到教务会话。
+        同样不要填写密码、验证码、cookie、学号、姓名、邮箱，截图前请先打码。
+  - type: input
+    id: device
+    attributes:
+      label: 设备和系统
+      placeholder: 例如 iPhone 15 / iOS 18.1
+    validations:
+      required: true
+  - type: dropdown
+    id: script-version
+    attributes:
+      label: 脚本版本状态
+      description: 小组件标题栏提示“脚本可更新”时，请先在 Scriptable 里运行脚本并选择“更新脚本”。
+      options:
+        - 没有提示“脚本可更新”
+        - 提示了，还没更新
+        - 提示了，但更新失败
+        - 不确定
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题出在哪里
+      multiple: true
+      options:
+        - 课程显示或排版
+        - 上课提醒
+        - 刷新或手机代抓
+        - 点击跳转
+        - 更新脚本
+        - 订阅到日历
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: 小组件尺寸
+      multiple: true
+      options:
+        - 小号
+        - 中号
+        - 大号
+        - 超大号
+        - 锁屏
+        - 与尺寸无关
+    validations:
+      required: true
+  - type: input
+    id: parameter
+    attributes:
+      label: Parameter
+      description: 长按小组件 → 编辑小组件，查看 Parameter。没有填写可以留空。
+      placeholder: 例如 today 15、week、full
+  - type: input
+    id: status-text
+    attributes:
+      label: 标题栏提示
+      description: 小组件显示的状态文字，没有可以留空。
+      placeholder: 例如 需重新登录、3 天未更新、离线、更新中、有调课
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 添加大号小组件，Parameter 填 week
+        2. 回到桌面等待刷新
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 实际和预期
+      description: 分别说明现在是什么样、应该是什么样。可以附上打码后的截图；桌面出现报错文字时请写下原文。
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 发布前确认
+      options:
+        - label: 内容和截图中没有脚本全文、完整链接、密码、cookie、学号、姓名或邮箱
+          required: true
