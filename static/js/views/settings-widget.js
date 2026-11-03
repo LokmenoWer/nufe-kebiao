@@ -32,8 +32,8 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   fetchToggle.checked = widgetFetch;
   const fetchRow = h("label", { class: "check" }, fetchToggle,
     h("span", {}, "用这台手机的网络直接向学校获取课表（推荐）",
-      h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件，"
-        + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新）")));
+      h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件和绑定过的安卓 App，"
+        + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新。这个开关对 iOS 和安卓都生效）")));
   const manual = h("textarea", {
     class: "widget-script", readonly: "", rows: "6", hidden: true, "aria-label": "小组件脚本，手动全选复制",
   });

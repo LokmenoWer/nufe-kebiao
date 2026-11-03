@@ -10,6 +10,7 @@ import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import wiki.nufe.kebiao.diag.Diag
 
 /** 一次读到的课表：offline 表示这次没连上服务器，用的是本机缓存。 */
 data class Snapshot(val payload: Payload, val fetchedAtMs: Long, val offline: Boolean)
@@ -71,9 +72,10 @@ class Repository(context: Context) {
      * 连不上时退回缓存并标记 offline；链接失效（404）抛 [LinkInvalidException]。
      */
     suspend fun fetch(refresh: Boolean = false): Snapshot? = withContext(Dispatchers.IO) {
-        val url = widgetUrl ?: return@withContext null
+        // 绑定过的设备走 /mobile（旧的 /widget 链接也换过来），带签名才领得到代抓任务
+        val url = (if (deviceId != null) deviceBase()?.let { "$it.json" } else null) ?: widgetUrl ?: return@withContext null
         try {
-            val text = download(if (refresh) "$url${if ('?' in url) '&' else '?'}refresh=1" else url)
+            val text = withLocalFetch(download(if (refresh) "$url${if ('?' in url) '&' else '?'}refresh=1" else url))
             val payload = Payload.parse(text)
             val tmp = File(app.filesDir, "widget.json.tmp")
             tmp.writeText(text)
@@ -87,12 +89,49 @@ class Repository(context: Context) {
         }
     }
 
+    /**
+     * 有代抓任务就做，换成服务器入库后的最新数据；任务本身含 cookie，绝不写进缓存。
+     * 抓不到或交不回去都不影响显示，服务器到期会兜底。
+     */
+    private fun withLocalFetch(text: String): String {
+        val data = JSONObject(text)
+        val task = data.optJSONObject("fetch") ?: return text
+        data.remove("fetch")
+        val plain = data.toString()
+        val base = deviceBase() ?: return plain
+        return try {
+            val agent = "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}) AppleWebKit/537.36 Mobile"
+            val result = LocalFetch(agent).run(task)
+            Diag.i("local fetch: ${result.optString("error").ifEmpty { "ok" }}")
+            uploadFetch("$base/upload", result) ?: plain
+        } catch (e: Exception) {
+            Diag.w("local fetch failed: ${e.javaClass.simpleName}")
+            plain
+        }
+    }
+
+    private fun uploadFetch(url: String, result: JSONObject): String? {
+        val conn = open(url)
+        try {
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.readTimeout = 30_000
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(result.toString().toByteArray()) }
+            if (conn.responseCode !in 200..299) {
+                Diag.w("local fetch upload: HTTP ${conn.responseCode}")
+                return null
+            }
+            val reply = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+            return reply.optJSONObject("widget")?.toString()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     private fun download(url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 15_000
-        conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("User-Agent", "nufe-kebiao-android/1")
+        val conn = open(url)
+        runCatching { signRequest(conn) }
         try {
             val code = conn.responseCode
             if (code == 404) throw LinkInvalidException()
@@ -151,16 +190,16 @@ class Repository(context: Context) {
      * 设备被撤销或链接换了（401）就清掉本机的绑定和个人信息，返回 null。
      */
     suspend fun fetchProfile(): Profile? = withContext(Dispatchers.IO) {
-        val id = deviceId ?: return@withContext null
+        if (deviceId == null) return@withContext null
         val base = deviceBase() ?: return@withContext null
         try {
-            var result = requestProfile(base, id)
+            var result = requestProfile(base)
             if (result.first == 401) {
                 val serverTime = runCatching { JSONObject(result.second).optLong("server_time") }.getOrDefault(0L)
                 if (serverTime > 0) {
                     // 手机时钟不准：按服务器时间校正，再试一次
                     prefs.edit().putLong(KEY_CLOCK, serverTime - System.currentTimeMillis() / 1000).apply()
-                    result = requestProfile(base, id)
+                    result = requestProfile(base)
                 }
             }
             when (result.first) {
@@ -180,14 +219,20 @@ class Repository(context: Context) {
         }
     }
 
-    private fun requestProfile(base: String, id: String): Pair<Int, String> {
-        val token = base.substringAfterLast('/')
+    /** 设备签名：绑定过才加。 */
+    private fun signRequest(conn: HttpURLConnection) {
+        val id = deviceId ?: return
+        val token = deviceBase()?.substringAfterLast('/') ?: return
         val time = (System.currentTimeMillis() / 1000 + prefs.getLong(KEY_CLOCK, 0)).toString()
-        val message = "nufe-kebiao-profile-v1\n$token\n$id\n$time".toByteArray()
-        val conn = open("$base/profile")
+        val message = "nufe-kebiao-device-v1\n$token\n$id\n$time".toByteArray()
         conn.setRequestProperty("X-Device-Id", id)
         conn.setRequestProperty("X-Device-Time", time)
         conn.setRequestProperty("X-Device-Signature", DeviceKeys.sign(message))
+    }
+
+    private fun requestProfile(base: String): Pair<Int, String> {
+        val conn = open("$base/profile")
+        signRequest(conn)
         try {
             val status = conn.responseCode
             val stream = if (status in 200..299) conn.inputStream else conn.errorStream

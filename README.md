@@ -195,10 +195,11 @@ MAIL_FROM_NAME=南财课表
 
 ### 安卓 App 与个人信息保护
 
-设置 → “安卓 App”：生成配对链接 → “在安卓 App 中打开”。课表读 `GET /mobile/<token>.json`，**不含姓名、学号、学院、专业、班级、邮箱**；这条链接泄露时别人只能看到课表，也拿不到代抓任务里的教务 cookie。`/widget/<token>.json` 同样不含个人信息。
+设置 → “安卓 App”：生成配对链接 → “在安卓 App 中打开”。课表读 `GET /mobile/<token>.json`，**不含姓名、学号、学院、专业、班级、邮箱**；这条链接泄露时别人只能看到课表，拿不到代抓任务里的教务 cookie（要设备签名才下发）。`/widget/<token>.json` 同样不含个人信息。
 
 - **绑定设备**：App 在 Android Keystore 里生成不可导出的 P-256 密钥；网站发 10 分钟有效、只能用一次的配对码（`POST /api/mobile/pair`，只存哈希），App 凭它 `POST /mobile/<token>/pair` 登记公钥。只拿到链接的人没有配对码，绑不上。每人最多 5 台；绑了邮箱会收到新设备提醒。
-- **读个人信息**：`GET /mobile/<token>/profile`，请求头带设备 id、时间戳和私钥签名（ECDSA-SHA256，内容 `nufe-kebiao-profile-v1\n<token>\n<设备 id>\n<时间戳>`），误差不超过 5 分钟，手机时钟不准时服务器返回 `server_time` 供校正。响应不缓存，只给打码邮箱。App 用 Keystore 里的 AES-GCM 密钥加密落盘。
+- **读个人信息**：`GET /mobile/<token>/profile`，请求头带设备 id、时间戳和私钥签名（ECDSA-SHA256，内容 `nufe-kebiao-device-v1\n<token>\n<设备 id>\n<时间戳>`），误差不超过 5 分钟，手机时钟不准时服务器返回 `server_time` 供校正。响应不缓存，只给打码邮箱。App 用 Keystore 里的 AES-GCM 密钥加密落盘。
+- **手机代抓**：绑定过的 App 请求 `/mobile/<token>.json` 时带同样的签名，服务器才在 JSON 里下发 `fetch` 任务（和 `poll_after`）；App 用手机的网络向教务要课表，交回 `POST /mobile/<token>/upload`，由服务器解析入库，抓不到就如实上报、服务器兜底。没绑定的 App、只有链接的人都领不到任务，课表由服务器刷。设置里的“手机获取课表”开关对 iOS 和安卓都生效。任务里的 cookie 不写进 App 缓存。
 - **撤销**：设置里能查看和撤销设备（`/api/mobile/devices`）；撤销后课表仍可读，手机丢失请重新生成链接——重新生成 / 停用会让所有设备和配对码失效。
 - **防不住的**：手机被 root 或完全控制；课表本身的课程、教师、教室也可能让人推断出身份，这一层靠重新生成链接补救。
 

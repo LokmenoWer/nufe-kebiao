@@ -1905,13 +1905,15 @@ class _Phone:
             self.device_id = r.json()["device_id"]
         return r
 
-    def profile(self, at=None, key=None, device_id=None):
+    def signed(self, at=None, key=None, device_id=None):
         device_id = device_id or self.device_id
         ts = str(int(at if at is not None else time.time()))
         message = mobile_devices.signed_message(self.token, device_id, ts)
         sig = (key or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
-        return TestClient(app).get(f"/mobile/{self.token}/profile", headers={
-            "X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()})
+        return {"X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+
+    def profile(self, **kw):
+        return TestClient(app).get(f"/mobile/{self.token}/profile", headers=self.signed(**kw))
 
 
 def _pair_code(c):
@@ -1920,6 +1922,54 @@ def _pair_code(c):
     url = r.json()["pair_url"]
     assert url.startswith("nufekebiao://setup?url=http%3A%2F%2Ftestserver%2Fmobile%2F")
     return url.split("&pair=")[1]
+
+
+def test_mobile_local_fetch_only_for_signed_devices(widget_user, up):
+    c, _path = widget_user
+    phone = _Phone(c)
+    feed = f"/mobile/{phone.token}.json"
+    anon = TestClient(app)
+    # 只拿到链接：任务和其中的教务 cookie 都拿不到，也不占着任务（服务器照常刷）
+    r = anon.get(feed)
+    assert "fetch" not in r.json() and "SESSION=jw-1" not in r.text and "delegate" not in r.json()
+    assert service.widget_refresh_state(service_uid("2023001"))["pending"] is True
+    assert phone.pair(_pair_code(c)).status_code == 200
+    # 冒充的钥匙、过期的时间戳：同样当没绑定
+    fake = anon.get(feed, headers=phone.signed(key=ec.generate_private_key(ec.SECP256R1())))
+    assert "fetch" not in fake.json()
+    stale = anon.get(feed, headers=phone.signed(at=time.time() - mobile_devices.SIG_SKEW - 60))
+    assert stale.status_code == 200 and "fetch" not in stale.json()
+    # 绑定过的设备：和 iOS 一样领任务，只含教务 cookie，不缓存
+    r = anon.get(feed, headers=phone.signed())
+    data = r.json()
+    task = data["fetch"]
+    assert data["delegate"] is True and data["poll_after"] >= 60 and "no-store" in r.headers["cache-control"]
+    assert "CASTGC" not in r.text and all(s["cookie"] == "SESSION=jw-1" for s in task["steps"])
+    assert anon.get(feed, headers=phone.signed()).json()["fetch"]["id"] == task["id"]
+    # 手机抓不到：如实上报，服务器兜底
+    up_url = f"/mobile/{phone.token}/upload"
+    assert anon.post(up_url, json={"id": "nope", "error": "network"}).status_code == 400
+    r = anon.post(up_url, json={"id": task["id"], "error": "network"})
+    assert r.status_code == 200 and r.json()["status"] == "fallback"
+    assert "student" not in r.json()["widget"] and "fetch" not in r.json()["widget"]
+    assert anon.post(up_url, json={"id": task["id"]}, headers={"Origin": "https://evil.example"}).status_code == 403
+    # 撤销设备后不再发任务
+    c.post(f"/api/mobile/devices/{phone.device_id}/revoke", headers=_csrf(c))
+    assert "fetch" not in anon.get(feed, headers=phone.signed()).json()
+
+
+def test_mobile_local_fetch_upload_saves_timetable(widget_user, up):
+    c, _path = widget_user
+    phone = _Phone(c)
+    assert phone.pair(_pair_code(c)).status_code == 200
+    anon = TestClient(app)
+    task = anon.get(f"/mobile/{phone.token}.json", headers=phone.signed()).json()["fetch"]
+    r = anon.post(f"/mobile/{phone.token}/upload", json={
+        "id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data(),
+        "final_urls": [s["url"] for s in task["steps"]]})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    row = db.connect().execute("SELECT widget_fetch_ok_at FROM users WHERE student_id='2023001'").fetchone()
+    assert row["widget_fetch_ok_at"] is not None
 
 
 def test_mobile_profile_needs_paired_device(up):

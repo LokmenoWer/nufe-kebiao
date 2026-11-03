@@ -29,13 +29,15 @@ import wiki.nufe.kebiao.widget.WidgetVersion
  * 什么时候拉数据、什么时候重画：
  * - 每 30 分钟一次的周期任务兜底（系统可能推迟，国产 ROM 需要允许后台运行）；
  * - 另排一次“下一个时刻”：最近的上下课、课前 25 分钟（服务器刚在课前半小时确认完课表）、北京时间零点后，
- *   服务器正在向学校拉课表时改为大约 2 分钟后，这样“正在上课 / 下一节”能按时切换。
+ *   服务器正在向学校拉课表时改为大约 2 分钟后，这样“正在上课 / 下一节”能按时切换；
+ * - 绑定过的设备替服务器拉课表：再加课前 37 分钟（自己去学校确认这节课）和服务器给的 poll_after。
  */
 object Sync {
     private const val PERIODIC = "sync-periodic"
     private const val NEXT = "sync-next"
     private const val NOW = "sync-now"
     private const val AFTER_CHECK_MINUTES = 25
+    private const val DELEGATE_CHECK_MINUTES = 37
     private const val PENDING_REFRESH_MS = 2 * 60_000L
     private const val MAX_REDRAW_MS = 30 * 60_000L
 
@@ -67,10 +69,13 @@ object Sync {
         val candidates = mutableListOf(now.ms + MAX_REDRAW_MS, now.ms + (24 * 60 - now.minutes + 1) * 60_000L)
         val (today, _) = resolveDays(payload, now)
         for (lesson in today?.lessons.orEmpty()) {
-            for (t in listOf(lesson.startMinutes - AFTER_CHECK_MINUTES, lesson.startMinutes, lesson.endMinutes)) {
+            val marks = mutableListOf(lesson.startMinutes - AFTER_CHECK_MINUTES, lesson.startMinutes, lesson.endMinutes)
+            if (payload.delegate) marks += lesson.startMinutes - DELEGATE_CHECK_MINUTES
+            for (t in marks) {
                 if (t > now.minutes) candidates += now.ms + (t - now.minutes) * 60_000L
             }
         }
+        if (payload.delegate) payload.pollAfterSeconds?.takeIf { it > 0 }?.let { candidates += now.ms + it * 1000 }
         if (payload.refresh.pending || payload.refresh.due) candidates += now.ms + PENDING_REFRESH_MS
         return maxOf(now.ms + 60_000L, candidates.min())
     }

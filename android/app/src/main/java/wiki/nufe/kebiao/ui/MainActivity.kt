@@ -1216,9 +1216,9 @@ private fun ReminderSection(
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("闹钟上课提示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("上课通知", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(2.dp))
-                Hint("开启后会设置本地闹钟，在设定的时间响起。")
+                Hint("开启后会在设定的时间发一条通知提醒上课，不是闹钟，不会持续响铃。")
             }
             Switch(
                 checked = alarmEnabled,
@@ -1246,7 +1246,7 @@ private fun ReminderSection(
                 )
                 if (!alarmEnabled) {
                     Spacer(Modifier.height(2.dp))
-                    Hint("开启“闹钟上课提示”后生效。")
+                    Hint("开启“上课通知”后生效。")
                 }
             }
             Switch(

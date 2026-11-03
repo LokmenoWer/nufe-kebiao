@@ -94,7 +94,7 @@ object Diagnostics {
             appendLine("离线：${snapshot?.offline == true}")
             appendLine("服务状态：${payload?.status ?: "无"}")
             appendLine("设备已绑定：${repo.deviceId != null}")
-            appendLine("提醒：提前 ${repo.remindMinutes} 分钟，闹钟 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
+            appendLine("提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
             appendLine("准时提醒：${Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true}")
             appendLine(

@@ -38,7 +38,8 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
 
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "用“nufe课表”App 查看今天的课、在桌面显示今天和本周的课，并在课前提醒。"
-      + "课表链接不含姓名、学号等个人信息，这些只发给绑定过的设备。手机丢失或链接泄露时请重新生成。"),
+      + "课表链接不含姓名、学号等个人信息，这些只发给绑定过的设备。绑定后 App 还会用手机的网络向学校获取课表，"
+      + "可在上面 iOS 模块的开关里关闭。手机丢失或链接泄露时请重新生成。"),
     h("div", { class: "button-row" }, createBtn, pairBtn, rotateBtn, disableBtn),
     pairRow,
     manual,

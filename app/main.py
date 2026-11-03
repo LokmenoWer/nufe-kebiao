@@ -132,7 +132,7 @@ def _widget_post(request: Request) -> bool:
     path = request.url.path
     return (request.method == "POST" and not request.headers.get("origin")
             and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
-                 or (path.startswith("/mobile/") and path.endswith("/pair"))))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))))
 
 
 @app.middleware("http")
@@ -712,16 +712,26 @@ def widget_script_by_token(token: str):
 
 @app.get("/widget/{token}.json")
 def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
-    return _feed(token, refresh, "widget")
+    return _feed(_widget_user(token), refresh, "widget", delegate=True)
 
 
 @app.get("/mobile/{token}.json")
-def mobile_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
-    return _feed(token, refresh, "mobile")
-
-
-def _feed(token: str, refresh: int, via: str):
+def mobile_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1)):
     user = _widget_user(token)
+    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], token, request))
+
+
+def _device_signed(uid: int, token: str, request: Request) -> bool:
+    h = request.headers
+    try:
+        mobile_devices.authenticate(uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+                                    h.get("x-device-signature", ""))
+    except mobile_devices.AuthError:
+        return False
+    return True
+
+
+def _feed(user, refresh: int, via: str, delegate: bool):
     presence.mark_user(user["id"], via)
     try:
         service.touch(user["id"])
@@ -744,8 +754,9 @@ def _feed(token: str, refresh: int, via: str):
         log.warning("widget refresh state failed for user %s: %s", user["id"], type(e).__name__)
         payload["refresh"] = {"pending": False, "due": False, "fresh": False}
     task = None
-    # 手机代抓只有 Scriptable 脚本会做：不给安卓 App 发，任务里的教务 cookie 不必多走一条路，也不会因为没人交回而记失败
-    if via == "widget":
+    # 手机代抓：Scriptable 脚本凭链接领（已有行为）；安卓 App 要绑定过的设备签名才领，
+    # 只拿到 /mobile 链接的人拿不到任务里的教务 cookie，没绑定的 App 由服务器刷
+    if delegate:
         try:
             task = service.widget_fetch_task(user["id"])
         except Exception as e:
@@ -838,6 +849,7 @@ WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 
 
 @app.post("/widget/{token}/upload")
+@app.post("/mobile/{token}/upload")
 async def widget_upload(token: str, request: Request):
     """小组件用手机网络抓到的课表页和 print-data。响应带上最新的小组件数据，脚本同一次运行就能画上。"""
     user = await asyncio.to_thread(_widget_user, token)

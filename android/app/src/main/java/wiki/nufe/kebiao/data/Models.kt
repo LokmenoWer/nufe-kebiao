@@ -21,6 +21,8 @@ data class Payload(
     val upcoming: Day?,
     val changedAt: Long?,
     val refresh: Refresh,
+    val delegate: Boolean,         // 这台设备在替服务器向学校拉课表
+    val pollAfterSeconds: Long?,   // 服务器建议多久后再来问
 ) {
     companion object {
         fun parse(text: String): Payload {
@@ -41,6 +43,8 @@ data class Payload(
                 refresh = o.optJSONObject("refresh").let {
                     Refresh(pending = it?.optBoolean("pending") == true, due = it?.optBoolean("due") == true)
                 },
+                delegate = o.optBoolean("delegate"),
+                pollAfterSeconds = o.long("poll_after"),
             )
         }
     }

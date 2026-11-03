@@ -2,7 +2,7 @@
 
 - App 在 Android Keystore 里生成不可导出的 P-256 密钥；网站发一次性配对码，App 凭它登记公钥。
   只拿到长期链接的人没有配对码，绑不上。
-- 读个人信息时用设备私钥签名（token、设备 id、时间戳），服务器按公钥校验，时间差不超过 SIG_SKEW。
+- 读个人信息、领手机代抓任务时用设备私钥签名（token、设备 id、时间戳），服务器按公钥校验，时间差不超过 SIG_SKEW。
 - 配对码只存哈希；撤销单个设备只影响个人信息，课表仍凭链接读取；重新生成 / 停用链接时全部设备失效。
 """
 from __future__ import annotations
@@ -75,7 +75,7 @@ def bind(uid: int, code: str, public_key: str, name: str) -> str:
 
 
 def signed_message(token: str, device_id: str, timestamp: str) -> bytes:
-    return f"nufe-kebiao-profile-v1\n{token}\n{device_id}\n{timestamp}".encode()
+    return f"nufe-kebiao-device-v1\n{token}\n{device_id}\n{timestamp}".encode()
 
 
 def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature: str) -> None:
