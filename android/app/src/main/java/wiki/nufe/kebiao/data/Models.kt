@@ -68,22 +68,13 @@ data class Profile(val student: StudentInfo?, val mail: MailInfo?) {
 data class StudentInfo(
     val name: String?,
     val code: String?,
-    val department: String?,
-    val major: String?,
-    val adminclass: String?,
-    val grade: String?,
 ) {
-    val hasData get() = name != null || code != null || department != null ||
-        major != null || adminclass != null || grade != null
+    val hasData get() = name != null || code != null
 
     companion object {
         fun parse(o: JSONObject) = StudentInfo(
             name = o.str("name"),
             code = o.str("code"),
-            department = o.str("department"),
-            major = o.str("major"),
-            adminclass = o.str("adminclass"),
-            grade = o.str("grade"),
         )
     }
 }

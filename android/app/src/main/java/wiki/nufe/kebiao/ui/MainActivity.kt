@@ -158,6 +158,7 @@ import wiki.nufe.kebiao.widget.parseColor
 
 private const val SITE_URL = "https://kebiao.nufe.wiki"
 private const val REPO_URL = "https://github.com/LokmenoWer/nufe-kebiao"
+private const val FEEDBACK_EMAIL = "lokmenower@163.com"
 private const val PIN_COOLDOWN_MS = 2_000L
 private const val PIN_CHECK_DELAY_MS = 1_000L
 private const val MANUAL_ADD =
@@ -1408,11 +1409,16 @@ private fun MineScreen(
     val manager = context.getSystemService(NotificationManager::class.java)
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
-    val host = repo.widgetUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() } ?: "未连接"
+    var showFeedback by remember { mutableStateOf(false) }
     val student = profile?.student
     val mail = profile?.mail
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
+
+    fun openExternal(intent: Intent) {
+        runCatching { context.startActivity(intent) }
+            .onFailure { Toast.makeText(context, "没有可用的应用", Toast.LENGTH_SHORT).show() }
+    }
 
     fun exportDiagnostics() {
         if (exporting) return
@@ -1506,12 +1512,6 @@ private fun MineScreen(
                     ) { Text("粘贴配对链接", fontSize = 12.sp) }
                 }
             }
-            if (student != null) {
-                ProfileRow("学院", student.department)
-                ProfileRow("专业", student.major)
-                ProfileRow("班级", student.adminclass)
-                ProfileRow("年级", student.grade)
-            }
             if (profile != null) Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1544,7 +1544,7 @@ private fun MineScreen(
         Spacer(Modifier.height(14.dp))
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("当前链接", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("账号连接", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 val needsLogin = snapshot?.payload?.needsLogin == true
                 Tag(
@@ -1552,8 +1552,6 @@ private fun MineScreen(
                     if (needsLogin || snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.primary,
                 )
             }
-            Spacer(Modifier.height(4.dp))
-            Hint(host)
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
@@ -1570,11 +1568,17 @@ private fun MineScreen(
                     },
                     contentPadding = PaddingValues(horizontal = 4.dp),
                 ) { Text("应用设置", fontSize = 12.sp) }
-                TextButton(
-                    onClick = { confirmRemove = true },
-                    contentPadding = PaddingValues(horizontal = 4.dp),
-                ) { Text("移除链接", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
             }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = { confirmRemove = true },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text("断开连接", fontSize = 14.sp) }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -1613,17 +1617,24 @@ private fun MineScreen(
 
         Spacer(Modifier.height(14.dp))
         SectionCard {
-            Text("帮助开发者优化 App", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Hint("导出诊断文件，包含版本、设备、权限、链接状态和最近日志；不含小组件链接、密码或邮箱。")
-            Spacer(Modifier.height(4.dp))
-            Hint("遇到问题时先复现，再立即导出，日志更有用。")
-            Spacer(Modifier.height(8.dp))
-            TextButton(
-                onClick = ::exportDiagnostics,
-                enabled = !exporting,
-                contentPadding = PaddingValues(0.dp),
-            ) { Text(if (exporting) "正在导出…" else "导出诊断日志", fontSize = 12.sp) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showFeedback = true },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("提交反馈", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(2.dp))
+                    Hint("GitHub Issue、联系开发者，或先导出诊断日志")
+                }
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -1638,15 +1649,114 @@ private fun MineScreen(
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false },
-            title = { Text("移除小组件链接？") },
-            text = { Text("App 里的课表缓存、提醒和桌面小组件会停止更新；网站账号不受影响。") },
+            title = { Text("断开连接？") },
+            text = {
+                Text(
+                    "断开后需要重新粘贴或绑定链接才能继续使用，课表、提醒和桌面小组件都会停止更新。" +
+                        "网站账号和网站上的设备记录不受影响；如需撤销设备，请到网站“安卓 App”里操作。",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirmRemove = false
                     onRemove()
-                }) { Text("移除", color = MaterialTheme.colorScheme.error) }
+                }) { Text("断开连接", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("取消") } },
+        )
+    }
+
+    if (showFeedback) {
+        FeedbackDialog(
+            exporting = exporting,
+            onGitHub = {
+                showFeedback = false
+                openExternal(Intent(Intent.ACTION_VIEW, Uri.parse("$REPO_URL/issues/new")))
+            },
+            onContact = {
+                showFeedback = false
+                openExternal(
+                    Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$FEEDBACK_EMAIL")).apply {
+                        putExtra(Intent.EXTRA_SUBJECT, "nufe课表 App 反馈")
+                    },
+                )
+            },
+            onExport = {
+                showFeedback = false
+                exportDiagnostics()
+            },
+            onDismiss = { showFeedback = false },
+        )
+    }
+}
+
+@Composable
+private fun FeedbackDialog(
+    exporting: Boolean,
+    onGitHub: () -> Unit,
+    onContact: () -> Unit,
+    onExport: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("提交反馈") },
+        text = {
+            Column {
+                Text(
+                    "遇到问题或有建议，可以先导出诊断日志，再选择反馈方式。",
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                Hint("诊断文件会自动隐藏小组件链接、密码和邮箱。")
+                Spacer(Modifier.height(10.dp))
+                FeedbackOption("1. GitHub Issue", "功能建议、可以公开讨论的问题", onClick = onGitHub)
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 2.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                )
+                FeedbackOption("2. 直接联系开发者", FEEDBACK_EMAIL, onClick = onContact)
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 2.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                )
+                FeedbackOption(
+                    "3. 导出诊断日志",
+                    if (exporting) "正在导出…" else "可选，附在反馈里更有帮助",
+                    enabled = !exporting,
+                    onClick = onExport,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun FeedbackOption(
+    title: String,
+    description: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(2.dp))
+            Text(description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Icon(
+            painter = painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
         )
     }
 }
@@ -1746,23 +1856,6 @@ private fun AboutScreen(
             }
         }
         Spacer(Modifier.height(110.dp))
-    }
-}
-
-@Composable
-private fun ProfileRow(label: String, value: String?) {
-    if (value.isNullOrBlank()) return
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            label,
-            fontSize = 13.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(72.dp),
-        )
-        Text(value, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
