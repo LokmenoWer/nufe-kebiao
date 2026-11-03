@@ -241,9 +241,9 @@ private fun Axis(
                     Column(modifier = GlanceModifier.padding(top = (item.top - cursor).coerceAtLeast(0f).dp)) {
                         if (item.start) {
                             Label(item.text, size = axisSp.sp, bold = true, color = GlanceTheme.colors.onSurfaceVariant)
-                            if (showUnit) Label("第${item.unit}节", size = unitSp.sp, color = GlanceTheme.colors.outline)
+                            if (showUnit) Label("第${item.unit}节", size = unitSp.sp, color = GlanceTheme.colors.onSurfaceVariant)
                         } else {
-                            Label(item.text, size = endSp.sp, color = GlanceTheme.colors.outline)
+                            Label(item.text, size = endSp.sp, color = GlanceTheme.colors.onSurfaceVariant)
                         }
                     }
                     cursor = maxOf(cursor, item.top) + item.height + if (showUnit) unitH else 0f
