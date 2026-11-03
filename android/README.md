@@ -64,7 +64,8 @@ app/src/main/java/wiki/nufe/kebiao/
              WeekWidget（本周按节次）、WeekLayout（本周按内容排版：节次 / 时间纵轴、量字、分几档内容、解分界线）
   sync/      WorkManager 同步与重画时机
   remind/    上课提醒（AlarmManager + 通知）、开机恢复
-  ui/        设置页（Compose）
+  ui/        Compose 界面：MainActivity、AppRoot、HomeScreen、MineScreen、AboutScreen、
+             SetupScreen、ReminderSection、WidgetSection、GlassNav、CommonUi、Theme
 app/src/debug/  小组件预览页
 ```
 
