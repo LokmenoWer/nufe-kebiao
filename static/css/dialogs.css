@@ -282,6 +282,9 @@ dialog[open] { animation: modal-in 0.16s ease-out; }
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   resize: vertical;
 }
+.device-list { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.device-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.device-item .hint { margin: 2px 0 0; }
 .widget-help summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; }
 .widget-steps {
   margin: 8px 0 0;

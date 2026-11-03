@@ -185,6 +185,16 @@ def _email_of(uid: int, pref: str | None = None) -> str | None:
 
 # ---------- 提醒 ----------
 
+def device_bound(uid: int, device_name: str) -> None:
+    """安全提醒：不受两个提醒开关影响，绑了邮箱就发。"""
+    email = _email_of(uid)
+    if email:
+        mailer.send(email, "【南财课表】有新设备绑定了安卓 App",
+                    f"设备“{device_name}”刚刚绑定了你的安卓 App，可以读取你的姓名、学号等个人信息。\n\n"
+                    f"如果不是你本人操作，请打开网站「设置 → 安卓 App」撤销设备并重新生成链接：{PUBLIC_BASE_URL}/"
+                    + _FOOTER)
+
+
 def refresh_paused(uid: int, status: str, message: str) -> None:
     if not MAIL_ENABLED:
         return

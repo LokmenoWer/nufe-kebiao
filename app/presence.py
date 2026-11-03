@@ -10,7 +10,7 @@ from . import db
 
 ONLINE_WINDOW = 300            # 秒：多久内有请求算“在线”
 
-_presence: dict[int, tuple[float, str]] = {}   # uid -> (最近请求时刻, 渠道 web / widget / ics)
+_presence: dict[int, tuple[float, str]] = {}   # uid -> (最近请求时刻, 渠道 web / widget / mobile / ics)
 _visitors: dict[str, float] = {}               # IP 的哈希 -> 最近请求时刻（含未登录的访客）
 _presence_lock = threading.Lock()
 

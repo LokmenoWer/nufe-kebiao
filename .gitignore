@@ -16,3 +16,7 @@ node_modules/
 test-results/
 playwright-report/
 .claude/
+.vscode/
+.ruff_cache/
+.idea/
+andorid_key/

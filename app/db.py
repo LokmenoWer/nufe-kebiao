@@ -105,6 +105,20 @@ CREATE TABLE IF NOT EXISTS refresh_log (
     ok       INTEGER NOT NULL,
     message  TEXT
 );
+CREATE TABLE IF NOT EXISTS mobile_devices (
+    id           TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    public_key   BLOB NOT NULL,     -- 安卓 App 的设备公钥（SPKI DER），私钥不出手机
+    name         TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    last_seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mobile_pairings (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash  TEXT NOT NULL,       -- 一次性配对码的哈希
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_devices_user ON mobile_devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_next ON users(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_log_user ON refresh_log(user_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);

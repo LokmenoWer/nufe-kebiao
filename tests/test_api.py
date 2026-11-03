@@ -1,8 +1,17 @@
 """Web 层端到端测试：上游（CAS/教务）全部打桩，不访问学校服务器。"""
+import base64
+import hashlib
+import time
+from types import SimpleNamespace
+
 import pytest
+import requests
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from app import admin, cas, db, jwxt, scheduler, service
+from app import admin, android_releases, cas, db, jwxt, main, mobile_devices, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -210,6 +219,7 @@ def up(monkeypatch):
     from app import security
     security.login_by_ip._hits.clear()
     security.login_by_student._hits.clear()
+    main.mobile_pair_by_user._hits.clear()
     fake = FakeUpstream()
     monkeypatch.setattr(cas, "login", fake.login)
     FakeFlow.up = fake
@@ -1170,6 +1180,7 @@ def test_ics_access_log_and_error_paths_are_redacted():
     assert "secret-token" not in record.getMessage() and "<redacted>" in record.getMessage()
     assert _safe_log_path("/ics/secret-token.ics") == "/ics/<redacted>"
     assert _safe_log_path("/widget/secret-token.json?x=1") == "/widget/<redacted>"
+    assert _safe_log_path("/mobile/secret-token.json") == "/mobile/<redacted>"
     assert _safe_log_path("/api/me") == "/api/me"
 
 
@@ -1377,7 +1388,10 @@ def test_widget_link_lifecycle(up):
     path = url.removeprefix("http://testserver")
     anon = TestClient(app)  # 链接本身就是凭证，不需要登录
     r = anon.get(path)
-    assert r.status_code == 200 and r.json()["v"] == 1 and r.json()["semester"] == "2026-2027-1"
+    payload = r.json()
+    assert r.status_code == 200 and payload["v"] == 1 and payload["semester"] == "2026-2027-1"
+    # 个人信息不随只读链接走：只有配对过的设备能读（见 test_mobile_profile_*）
+    assert "student" not in payload and "mail" not in payload and "学生1" not in r.text
     assert r.headers["x-robots-tag"].startswith("noindex") and "private" in r.headers["cache-control"]
     script = c.get("/api/widget/script")
     assert script.status_code == 200 and url in script.text and "__WIDGET_URL__" not in script.text
@@ -1388,6 +1402,17 @@ def test_widget_link_lifecycle(up):
     c.post("/api/widget/disable", headers=_csrf(c))
     assert anon.get(url2.removeprefix("http://testserver")).status_code == 404
     assert c.get("/api/me").json()["widget_url"] is None
+
+
+def test_widget_feed_returns_only_masked_email(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox, "Me.Name@Example.com")
+    path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    for feed in (path, path.replace("/widget/", "/mobile/")):
+        r = TestClient(app).get(feed)
+        assert r.status_code == 200
+        assert "mail" not in r.json() and "@example.com" not in r.text
 
 
 def test_widget_script_self_update_by_token(up):
@@ -1840,6 +1865,326 @@ def widget_user(up):
 
 def _upload(path, body, **kw):
     return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
+
+
+APK = b"fake-apk-bytes"
+
+
+def _github_release(tag, pre=False, data=APK, **over):
+    return {"tag_name": tag, "prerelease": pre, "draft": False, "assets": [{
+        "name": f"app-{tag}.apk", "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+        "browser_download_url": f"https://github.com/LokmenoWer/nufe-kebiao/releases/download/{tag}/app-{tag}.apk",
+    }], **over}
+
+
+@pytest.fixture
+def github(monkeypatch, tmp_path):
+    """假的 GitHub：测试改 state 里的内容；calls 记请求，broken 模拟连不上。"""
+    state = SimpleNamespace(releases=[_github_release("1.3.0-beta.1", pre=True), _github_release("1.2.0")],
+                            apk=APK, calls=[], broken=False)
+
+    class Reply:
+        def __init__(self, url):
+            self.url = url
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return state.releases
+
+        def iter_content(self, _size):
+            yield state.apk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def get(url, **_kw):
+        state.calls.append(url)
+        if state.broken:
+            raise requests.ConnectionError
+        return Reply(url)
+
+    monkeypatch.setattr(android_releases.requests, "get", get)
+    monkeypatch.setattr(android_releases, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(android_releases, "_releases", [])
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    return state
+
+
+def test_android_release_feed_mirrors_github(github, up):
+    r = TestClient(app).get("/android/releases.json")
+    assert r.status_code == 200 and "public" in r.headers["cache-control"]
+    feed = r.json()
+    assert [x["tag_name"] for x in feed] == ["1.3.0-beta.1", "1.2.0"]
+    assert feed[0]["prerelease"] is True and feed[0]["assets"][0]["name"].endswith(".apk")
+    assert feed[1]["html_url"].endswith("/android/apk/1.2.0.apk")
+    # 不是每个请求都去问 GitHub
+    TestClient(app).get("/android/releases.json")
+    assert len(github.calls) == 1
+
+
+def test_android_release_feed_skips_unusable_and_survives_outage(github, up, monkeypatch):
+    bad_host = _github_release("9.0.0")
+    bad_host["assets"][0]["browser_download_url"] = "https://evil.example/app.apk"
+    no_digest = _github_release("9.0.1")
+    no_digest["assets"][0].pop("digest")
+    github.releases = [bad_host, no_digest, _github_release("android-v1.0.0-preview"),
+                       _github_release("9.0.2", draft=True), _github_release("1.2.0")]
+    assert [x["tag_name"] for x in TestClient(app).get("/android/releases.json").json()] == ["1.2.0"]
+    # GitHub 连不上：继续给旧结果，隔一会儿才再试
+    github.broken = True
+    monkeypatch.setattr(android_releases, "_next_refresh", 0.0)
+    calls = len(github.calls)
+    assert [x["tag_name"] for x in TestClient(app).get("/android/releases.json").json()] == ["1.2.0"]
+    TestClient(app).get("/android/releases.json")
+    assert len(github.calls) == calls + 1
+
+
+def test_android_apk_mirror_downloads_once_and_verifies(github, up, tmp_path):
+    c = TestClient(app)
+    r = c.get("/android/apk/1.2.0.apk")
+    assert r.status_code == 200 and r.content == APK
+    assert r.headers["content-type"] == "application/vnd.android.package-archive"
+    assert "app-1.2.0.apk" in r.headers["content-disposition"] and "content-encoding" not in {
+        k for k, v in r.headers.items() if v == "gzip"}
+    downloads = [u for u in github.calls if u.endswith(".apk")]
+    assert len(downloads) == 1
+    c.get("/android/apk/1.2.0.apk")
+    assert len([u for u in github.calls if u.endswith(".apk")]) == 1
+    # 只认发布列表里的版本，路径里塞不进别的东西
+    assert c.get("/android/apk/6.6.6.apk").status_code == 404
+    assert c.get("/android/apk/..%2F..%2Fkebiao.apk").status_code == 404
+    # 校验不过：不留文件，不发给用户
+    github.apk = b"tampered"
+    assert c.get("/android/apk/1.3.0-beta.1.apk").status_code == 502
+    assert not (tmp_path / "1.3.0-beta.1.apk").exists() and not list(tmp_path.glob("*.tmp"))
+    # 从发布列表里消失的版本：缓存删掉
+    (tmp_path / "0.0.1.apk").write_bytes(b"old")
+    android_releases._next_refresh = 0.0
+    c.get("/android/releases.json")
+    assert not (tmp_path / "0.0.1.apk").exists() and (tmp_path / "1.2.0.apk").exists()
+
+
+def test_android_latest_apk_points_at_stable(github, up):
+    r = TestClient(app).get("/android/latest.apk", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "apk/1.2.0.apk"
+    github.releases = [_github_release("1.3.0-beta.1", pre=True)]
+    android_releases._next_refresh = 0.0
+    assert TestClient(app).get("/android/latest.apk", follow_redirects=False).status_code == 404
+
+
+def test_mobile_feed_shares_token_without_fetch_task(widget_user, up):
+    c, path = widget_user
+    links = c.get("/api/me").json()
+    token = path.removeprefix("/widget/").removesuffix(".json")
+    assert links["mobile_url"] == f"http://testserver/mobile/{token}.json"
+    feed = TestClient(app).get(f"/mobile/{token}.json")
+    assert feed.status_code == 200
+    data = feed.json()
+    assert data["today"] == TestClient(app).get(path).json()["today"]
+    # 代抓任务（含教务 cookie）只给 Scriptable 脚本，安卓 App 不交回，发了只会记失败
+    assert data["refresh"]["pending"] is True and "no-store" in feed.headers["cache-control"]
+    assert "fetch" not in data and "delegate" not in data and "SESSION=jw-1" not in feed.text
+    assert TestClient(app).get("/mobile/nope.json").status_code == 404
+    c.post("/api/widget/disable", headers=_csrf(c))
+    assert TestClient(app).get(f"/mobile/{token}.json").status_code == 404
+    assert c.get("/api/me").json()["mobile_url"] is None
+
+
+def rsa_key():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+class _Phone:
+    """测试里的安卓 App：一把 P-256 设备密钥，会配对、会签名。"""
+
+    def __init__(self, c):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.token = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].split("/")[-1][:-5]
+        self.device_id = None
+
+    def public(self):
+        der = self.key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        return base64.b64encode(der).decode()
+
+    def pair(self, code, **kw):
+        r = TestClient(app).post(f"/mobile/{self.token}/pair", json={
+            "code": code, "public_key": kw.pop("public_key", self.public()), "name": "Test Phone"}, **kw)
+        if r.status_code == 200:
+            self.device_id = r.json()["device_id"]
+        return r
+
+    def signed(self, at=None, key=None, device_id=None):
+        device_id = device_id or self.device_id
+        ts = str(int(at if at is not None else time.time()))
+        message = mobile_devices.signed_message(self.token, device_id, ts)
+        sig = (key or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
+        return {"X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+
+    def profile(self, **kw):
+        return TestClient(app).get(f"/mobile/{self.token}/profile", headers=self.signed(**kw))
+
+
+def _pair_code(c):
+    r = c.post("/api/mobile/pair", headers=_csrf(c))
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    url = r.json()["pair_url"]
+    assert url.startswith("nufekebiao://setup?url=http%3A%2F%2Ftestserver%2Fmobile%2F")
+    return url.split("&pair=")[1]
+
+
+def test_mobile_local_fetch_only_for_signed_devices(widget_user, up):
+    c, _path = widget_user
+    phone = _Phone(c)
+    feed = f"/mobile/{phone.token}.json"
+    anon = TestClient(app)
+    # 只拿到链接：任务和其中的教务 cookie 都拿不到，也不占着任务（服务器照常刷）
+    r = anon.get(feed)
+    assert "fetch" not in r.json() and "SESSION=jw-1" not in r.text and "delegate" not in r.json()
+    assert service.widget_refresh_state(service_uid("2023001"))["pending"] is True
+    assert phone.pair(_pair_code(c)).status_code == 200
+    # 冒充的钥匙、过期的时间戳：同样当没绑定
+    fake = anon.get(feed, headers=phone.signed(key=ec.generate_private_key(ec.SECP256R1())))
+    assert "fetch" not in fake.json()
+    stale = anon.get(feed, headers=phone.signed(at=time.time() - mobile_devices.SIG_SKEW - 60))
+    assert stale.status_code == 200 and "fetch" not in stale.json()
+    # 绑定过的设备：和 iOS 一样领任务，只含教务 cookie，不缓存
+    r = anon.get(feed, headers=phone.signed())
+    data = r.json()
+    task = data["fetch"]
+    assert data["delegate"] is True and data["poll_after"] >= 60 and "no-store" in r.headers["cache-control"]
+    assert "CASTGC" not in r.text and all(s["cookie"] == "SESSION=jw-1" for s in task["steps"])
+    assert anon.get(feed, headers=phone.signed()).json()["fetch"]["id"] == task["id"]
+    # 手机抓不到：如实上报，服务器兜底
+    up_url = f"/mobile/{phone.token}/upload"
+    assert anon.post(up_url, json={"id": "nope", "error": "network"}).status_code == 400
+    r = anon.post(up_url, json={"id": task["id"], "error": "network"})
+    assert r.status_code == 200 and r.json()["status"] == "fallback"
+    assert "student" not in r.json()["widget"] and "fetch" not in r.json()["widget"]
+    assert anon.post(up_url, json={"id": task["id"]}, headers={"Origin": "https://evil.example"}).status_code == 403
+    # 撤销设备后不再发任务
+    c.post(f"/api/mobile/devices/{phone.device_id}/revoke", headers=_csrf(c))
+    assert "fetch" not in anon.get(feed, headers=phone.signed()).json()
+
+
+def test_mobile_local_fetch_upload_saves_timetable(widget_user, up):
+    c, _path = widget_user
+    phone = _Phone(c)
+    assert phone.pair(_pair_code(c)).status_code == 200
+    anon = TestClient(app)
+    task = anon.get(f"/mobile/{phone.token}.json", headers=phone.signed()).json()["fetch"]
+    r = anon.post(f"/mobile/{phone.token}/upload", json={
+        "id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data(),
+        "final_urls": [s["url"] for s in task["steps"]]})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    row = db.connect().execute("SELECT widget_fetch_ok_at FROM users WHERE student_id='2023001'").fetchone()
+    assert row["widget_fetch_ok_at"] is not None
+
+
+def test_mobile_profile_needs_paired_device(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    phone = _Phone(c)
+    anon = TestClient(app)
+    # 只拿到链接：课表能读，个人信息读不到，也绑不上
+    assert anon.get(f"/mobile/{phone.token}.json").status_code == 200
+    assert anon.get(f"/mobile/{phone.token}/profile").status_code == 401
+    assert phone.pair("guess-" * 8).status_code == 400
+    code = _pair_code(c)
+    assert TestClient(app).post("/mobile/nope/pair", json={"code": code, "public_key": phone.public()}).status_code == 404
+    assert phone.pair(code, public_key="bm90LWEta2V5").status_code == 400  # 公钥不对不消耗配对码
+    rsa = base64.b64encode(rsa_key().public_key().public_bytes(
+        Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+    assert phone.pair(code, public_key=rsa).status_code == 400
+    assert phone.pair(code, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert phone.pair(code).status_code == 200
+    assert phone.pair(code).status_code == 400  # 配对码只能用一次
+    r = phone.profile()
+    assert r.status_code == 200 and "no-store" in r.headers["cache-control"]
+    assert r.json()["student"]["name"] == "学生1" and r.json()["student"]["code"] == "2023001"
+    assert "credits" not in r.json()["student"] and r.json()["mail"] == {"bound": False, "email": None}
+    # 别的密钥冒充、请求里没签名：都不行
+    assert phone.profile(key=ec.generate_private_key(ec.SECP256R1())).status_code == 401
+    assert "server_time" not in phone.profile(key=ec.generate_private_key(ec.SECP256R1()), at=1).json()
+    # 手机时钟不准：真设备才告诉它校正
+    stale = phone.profile(at=time.time() - mobile_devices.SIG_SKEW - 60)
+    assert stale.status_code == 401 and abs(stale.json()["server_time"] - time.time()) < 5
+
+
+def test_mobile_pair_code_expires_and_is_per_user(up):
+    c, other = TestClient(app), TestClient(app)
+    _login(c, "2023001")
+    _login(other, "2023002")
+    phone, stranger = _Phone(c), _Phone(other)
+    code = _pair_code(c)
+    assert stranger.pair(code).status_code == 400  # 别人的配对码
+    old = code
+    code = _pair_code(c)
+    assert phone.pair(old).status_code == 400  # 新码发出后旧码作废
+    with db.tx() as conn:
+        conn.execute("UPDATE mobile_pairings SET expires_at=?", (time.time() - 1,))
+    assert phone.pair(code).status_code == 400
+    assert phone.pair(_pair_code(c)).status_code == 200
+    assert stranger.profile(device_id=phone.device_id).status_code == 401  # 别人的设备 id
+
+
+def test_mobile_device_management_and_revocation(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    phone = _Phone(c)
+    assert c.post("/api/mobile/pair", headers=ORIGIN).status_code == 403  # 没带 CSRF
+    assert phone.pair(_pair_code(c)).status_code == 200
+    devices = c.get("/api/mobile/devices").json()["devices"]
+    assert [d["name"] for d in devices] == ["Test Phone"] and "public_key" not in devices[0]
+    # 同一把钥匙重新配对只留一条
+    assert phone.pair(_pair_code(c)).status_code == 200
+    assert len(c.get("/api/mobile/devices").json()["devices"]) == 1
+    # 撤销：个人信息读不到了，课表还能读
+    assert c.post("/api/mobile/devices/nope/revoke", headers=_csrf(c)).status_code == 404
+    device = phone.device_id
+    assert c.post(f"/api/mobile/devices/{device}/revoke", headers=_csrf(c)).status_code == 200
+    assert phone.profile().status_code == 401
+    assert TestClient(app).get(f"/mobile/{phone.token}.json").status_code == 200
+    # 数量上限，满了不消耗配对码
+    phones = []
+    for _ in range(mobile_devices.MAX_DEVICES):
+        extra = _Phone.__new__(_Phone)
+        extra.key, extra.token, extra.device_id = ec.generate_private_key(ec.SECP256R1()), phone.token, None
+        assert extra.pair(_pair_code(c)).status_code == 200
+        phones.append(extra)
+    assert phone.pair(_pair_code(c)).status_code == 400
+    # 重新生成 / 停用链接：所有设备和配对码都失效
+    code = _pair_code(c)
+    c.post("/api/widget/rotate", headers=_csrf(c))
+    assert c.get("/api/mobile/devices").json()["devices"] == []
+    with db.tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM mobile_pairings").fetchone()[0] == 0
+    assert phones[0].profile().status_code == 404 and phones[0].pair(code).status_code == 404
+    c.post("/api/widget/disable", headers=_csrf(c))
+    assert c.post("/api/mobile/pair", headers=_csrf(c)).status_code == 404
+
+
+def test_mobile_bind_sends_security_mail(up, outbox):
+    c = TestClient(app)
+    _login(c, "2023001")
+    _bind_email(c, outbox, "me@example.com")
+    phone = _Phone(c)
+    assert phone.pair(_pair_code(c)).status_code == 200
+    to, subject, body = outbox[-1]
+    assert to == "me@example.com" and "新设备" in subject and "Test Phone" in body
+    assert phone.profile().json()["mail"] == {"bound": True, "email": "m***@example.com"}
+
+
+def test_widget_feed_poll_after_only_when_delegating(widget_user, up):
+    c, path = widget_user
+    assert TestClient(app).get(path).json()["poll_after"] >= 60
+    assert "poll_after" not in TestClient(app).get(path.replace("/widget/", "/mobile/")).json()  # 安卓 App 不代抓
+    service.set_widget_fetch(service_uid("2023001"), False)
+    assert TestClient(app).get(path).json()["poll_after"] is None
 
 
 def test_widget_delegated_fetch_roundtrip(widget_user, up):

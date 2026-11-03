@@ -1,4 +1,4 @@
-/** 设置里的“桌面小组件”：生成只读链接、复制 Scriptable 脚本、使用步骤。 */
+/** 设置里的“iOS 桌面小组件”：生成只读链接、复制 Scriptable 脚本、使用步骤。安卓见 settings-android.js。 */
 
 import { api } from "../api.js";
 import { h } from "../dom.js";
@@ -32,8 +32,8 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   fetchToggle.checked = widgetFetch;
   const fetchRow = h("label", { class: "check" }, fetchToggle,
     h("span", {}, "用这台手机的网络直接向学校获取课表（推荐）",
-      h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件，"
-        + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新）")));
+      h("span", { class: "muted" }, "（本站服务器少访问学校，不容易被学校限制。会把教务系统的登录状态交给你自己的小组件和绑定过的安卓 App，"
+        + "不含统一身份认证的凭据；手机拿不到时仍由服务器更新。这个开关对 iOS 和安卓都生效）")));
   const manual = h("textarea", {
     class: "widget-script", readonly: "", rows: "6", hidden: true, "aria-label": "小组件脚本，手动全选复制",
   });
@@ -75,22 +75,16 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     if (!url) manual.hidden = true;
   }
 
-  function set(next) {
-    url = next;
-    onChange?.(url);
-    render();
-  }
-
   async function rotate() {
     if (url && !await confirmDialog({
       title: "重新生成小组件链接？",
-      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本。",
+      message: "旧链接会立即失效，已经添加的小组件需要粘贴新复制的脚本。安卓 App 共用这个凭证，也要重新粘贴链接。",
       confirmText: "重新生成",
     })) return;
     try {
       const result = await api.post("api/widget/rotate");
       const had = Boolean(url);
-      set(result.widget_url);
+      onChange?.(result);
       manual.hidden = true;
       status.textContent = had ? "已生成新链接：请重新复制脚本，替换 Scriptable 里的旧脚本。" : "链接已生成，下一步：复制脚本。";
     } catch (error) {
@@ -138,13 +132,13 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   async function disable() {
     if (!await confirmDialog({
       title: "停用桌面小组件？",
-      message: "链接会立即失效，已经添加的小组件会提示链接失效。",
+      message: "链接会立即失效，已经添加的小组件和安卓 App 都会提示链接失效。",
       confirmText: "停用",
       danger: true,
     })) return;
     try {
       await api.post("api/widget/disable");
-      set(null);
+      onChange?.({ widget_url: null, mobile_url: null });
       status.textContent = "已停用。";
     } catch (error) {
       showToast(error.message, { type: "error" });
@@ -152,5 +146,12 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
   }
 
   render();
-  return { el };
+  return {
+    el,
+    update(next) {
+      url = next;
+      status.textContent = "";
+      render();
+    },
+  };
 }

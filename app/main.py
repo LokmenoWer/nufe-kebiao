@@ -10,17 +10,18 @@ import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin, cas, crypto, db, ics, mailer, notify, presence, scheduler, service, widget
+from . import admin, android_releases, cas, crypto, db, ics, mailer, mobile_devices, notify, presence, scheduler, service, widget
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -51,7 +52,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("kebiao.web")
 
 
-_TOKEN_PATHS = ("/ics/", "/widget/")
+_TOKEN_PATHS = ("/ics/", "/widget/", "/mobile/")
 
 
 def _safe_log_path(path: str) -> str:
@@ -126,10 +127,12 @@ async def validation_exception(_request: Request, _exc: RequestValidationError):
 
 
 def _widget_post(request: Request) -> bool:
-    """小组件交回代抓结果 / 要日历订阅链接：Scriptable 不带 Origin，凭路径里的 token 认人、不用 cookie，
+    """小组件交回代抓结果 / 要日历订阅链接、安卓 App 配对：客户端不带 Origin，凭路径里的 token 认人、不用 cookie，
     没有 CSRF 的问题。浏览器带了别站的 Origin 仍然拒绝。"""
-    return (request.method == "POST" and request.url.path.startswith("/widget/")
-            and request.url.path.endswith(("/upload", "/calendar")) and not request.headers.get("origin"))
+    path = request.url.path
+    return (request.method == "POST" and not request.headers.get("origin")
+            and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))))
 
 
 @app.middleware("http")
@@ -412,16 +415,23 @@ def _ics_url(uid: int) -> str | None:
     return f"{PUBLIC_BASE_URL}/ics/{token}.ics"
 
 
-def _widget_url(uid: int) -> str | None:
+def _widget_token(uid: int) -> str | None:
     row = db.connect().execute("SELECT enc_widget_token FROM users WHERE id=?", (uid,)).fetchone()
     if not row or not row["enc_widget_token"]:
         return None
     try:
-        token = crypto.decrypt(row["enc_widget_token"], "widget", uid).decode()
+        return crypto.decrypt(row["enc_widget_token"], "widget", uid).decode()
     except (crypto.CryptoError, UnicodeDecodeError):
         log.warning("user %s: widget token cannot be decrypted", uid)
         return None
-    return f"{PUBLIC_BASE_URL}/widget/{token}.json"
+
+
+def _widget_links(token: str | None) -> dict:
+    """同一个 token 两条路径：/widget/ 给 iOS 脚本，/mobile/ 给安卓 App。"""
+    return {
+        "widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json" if token else None,
+        "mobile_url": f"{PUBLIC_BASE_URL}/mobile/{token}.json" if token else None,
+    }
 
 
 def _record_use(uid: int) -> None:
@@ -472,7 +482,7 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "keepalive": service.keepalive_state(sess),
         "ics_url": _ics_url(sess["id"]),
         "mail": notify.snapshot(sess["id"]),
-        "widget_url": _widget_url(sess["id"]),
+        **_widget_links(_widget_token(sess["id"])),
         "widget_fetch": _widget_fetch_enabled(sess["id"]),
     }
 
@@ -628,6 +638,9 @@ def _widget_template() -> tuple[str, str]:
     return _script_cache[1], _script_cache[2]
 
 
+mobile_pair_by_user = RateLimiter(20, 900)
+
+
 def _widget_user(token: str):
     if not token or len(token) > 128:
         raise HTTPException(404)
@@ -649,7 +662,8 @@ def widget_rotate(sess=Depends(csrf_protected)):
             raise HTTPException(401, "会话已失效")
         c.execute("UPDATE users SET widget_token_hash=?, enc_widget_token=? WHERE id=?",
                   (crypto.token_hash(token), crypto.encrypt(token.encode(), "widget", sess["id"]), sess["id"]))
-    return {"widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json"}
+        mobile_devices.clear(c, sess["id"])
+    return _widget_links(token)
 
 
 def _widget_fetch_enabled(uid: int) -> bool:
@@ -671,13 +685,14 @@ def widget_fetch_pref(body: WidgetFetchIn, sess=Depends(csrf_protected)):
 def widget_disable(sess=Depends(csrf_protected)):
     with db.tx() as c:
         c.execute("UPDATE users SET widget_token_hash=NULL, enc_widget_token=NULL WHERE id=?", (sess["id"],))
+        mobile_devices.clear(c, sess["id"])
     return {"ok": True}
 
 
 @app.get("/api/widget/script")
 def widget_script(sess=Depends(current_session)):
     """把本人的只读链接填进 Scriptable 脚本模板，设置页一键复制。"""
-    url = _widget_url(sess["id"])
+    url = _widget_links(_widget_token(sess["id"]))["widget_url"]
     if not url:
         raise HTTPException(404, "请先生成小组件链接")
     template, _version = _widget_template()
@@ -697,8 +712,27 @@ def widget_script_by_token(token: str):
 
 @app.get("/widget/{token}.json")
 def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
+    return _feed(_widget_user(token), refresh, "widget", delegate=True)
+
+
+@app.get("/mobile/{token}.json")
+def mobile_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1)):
     user = _widget_user(token)
-    presence.mark_user(user["id"], "widget")
+    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], token, request))
+
+
+def _device_signed(uid: int, token: str, request: Request) -> bool:
+    h = request.headers
+    try:
+        mobile_devices.authenticate(uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+                                    h.get("x-device-signature", ""))
+    except mobile_devices.AuthError:
+        return False
+    return True
+
+
+def _feed(user, refresh: int, via: str, delegate: bool):
+    presence.mark_user(user["id"], via)
     try:
         service.touch(user["id"])
         # ?refresh=1：脚本判断快上课，或用户在 Scriptable 里点了“刷新课表”。
@@ -719,17 +753,85 @@ def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
     except Exception as e:
         log.warning("widget refresh state failed for user %s: %s", user["id"], type(e).__name__)
         payload["refresh"] = {"pending": False, "due": False, "fresh": False}
-    try:
-        task = service.widget_fetch_task(user["id"])
-    except Exception as e:
-        log.warning("widget fetch task failed for user %s: %s", user["id"], type(e).__name__)
-        task = None
-    if task:
-        payload["fetch"] = task
-    payload["delegate"] = _widget_fetch_enabled(user["id"])
+    task = None
+    # 手机代抓：Scriptable 脚本凭链接领（已有行为）；安卓 App 要绑定过的设备签名才领，
+    # 只拿到 /mobile 链接的人拿不到任务里的教务 cookie，没绑定的 App 由服务器刷
+    if delegate:
+        try:
+            task = service.widget_fetch_task(user["id"])
+        except Exception as e:
+            log.warning("widget fetch task failed for user %s: %s", user["id"], type(e).__name__)
+        if task:
+            payload["fetch"] = task
+        payload["delegate"] = _widget_fetch_enabled(user["id"])
+        payload["poll_after"] = service.widget_poll_after(user["id"])
     # 正在排队 / 带着代抓任务（含 cookie）时不要缓存，两分钟后的重画必须打到服务器
     caching = "private, no-store" if payload["refresh"].get("pending") or task else "private, max-age=60"
     return JSONResponse(payload, headers={"Cache-Control": caching, **_WIDGET_HEADERS})
+
+
+class MobilePairIn(BaseModel):
+    code: str = Field(max_length=128)
+    public_key: str = Field(max_length=512)
+    name: str = Field("", max_length=128)
+
+
+@app.post("/api/mobile/pair")
+def mobile_pair_start(sess=Depends(csrf_protected)):
+    """网站发一次性配对码，和链接一起放进 nufekebiao:// 交给 App。"""
+    url = _widget_links(_widget_token(sess["id"]))["mobile_url"]
+    if not url:
+        raise HTTPException(404, "请先生成链接")
+    code = mobile_devices.start_pairing(sess["id"])
+    return JSONResponse({"pair_url": f"nufekebiao://setup?url={quote(url, safe='')}&pair={code}",
+                         "expires_in": mobile_devices.PAIR_TTL}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/mobile/devices")
+def mobile_device_list(sess=Depends(current_session)):
+    return {"devices": mobile_devices.list_devices(sess["id"])}
+
+
+@app.post("/api/mobile/devices/{device_id}/revoke")
+def mobile_device_revoke(device_id: str, sess=Depends(csrf_protected)):
+    if not mobile_devices.revoke(sess["id"], device_id):
+        raise HTTPException(404, "设备不存在")
+    return {"ok": True}
+
+
+@app.post("/mobile/{token}/pair")
+def mobile_pair(token: str, body: MobilePairIn):
+    user = _widget_user(token)
+    if not mobile_pair_by_user.hit(str(user["id"])):
+        raise HTTPException(429, "尝试太频繁，请稍后再试")
+    try:
+        device_id = mobile_devices.bind(user["id"], body.code, body.public_key, body.name)
+    except mobile_devices.PairError as e:
+        raise HTTPException(400, str(e)) from e
+    device = next(d for d in mobile_devices.list_devices(user["id"]) if d["id"] == device_id)
+    notify.device_bound(user["id"], device["name"])
+    return JSONResponse({"device_id": device_id}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+@app.get("/mobile/{token}/profile")
+def mobile_profile(token: str, request: Request):
+    """个人信息：只给配对过的设备，要带设备私钥的签名。链接泄露时这里拿不到东西。"""
+    user = _widget_user(token)
+    h = request.headers
+    try:
+        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+                                    h.get("x-device-signature", ""))
+    except mobile_devices.AuthError as e:
+        body = {"detail": "设备未绑定或签名无效"}
+        if e.skew:
+            body["server_time"] = int(db.now())
+        return JSONResponse(body, status_code=401, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+    student = (service.timetable_view(user["id"], None) or {}).get("student") or {}
+    email = notify.snapshot(user["id"]).get("email")
+    return JSONResponse({
+        "student": {k: student.get(k) for k in ("name", "code", "department", "major", "adminclass", "grade")},
+        "mail": {"bound": bool(email), "email": mailer.mask(email) if email else None},
+    }, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 def _widget_payload(user) -> dict:
@@ -739,6 +841,7 @@ def _widget_payload(user) -> dict:
                            script_version=version, changes=service.recent_changes(user["id"]))
     payload["refresh"] = service.widget_refresh_state(user["id"])
     payload["delegate"] = _widget_fetch_enabled(user["id"])
+    payload["poll_after"] = service.widget_poll_after(user["id"])
     return payload
 
 
@@ -746,6 +849,7 @@ WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 
 
 @app.post("/widget/{token}/upload")
+@app.post("/mobile/{token}/upload")
 async def widget_upload(token: str, request: Request):
     """小组件用手机网络抓到的课表页和 print-data。响应带上最新的小组件数据，脚本同一次运行就能画上。"""
     user = await asyncio.to_thread(_widget_user, token)
@@ -966,6 +1070,34 @@ async def versioned_asset(version: str, path: str, request: Request):
         resp.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if version == _asset_version()
                                          else "no-cache")
     return resp
+
+
+@app.get("/android/releases.json")
+def android_release_feed():
+    """给连不上 GitHub 的 App 查新版本：不需要登录，也不含任何个人信息。"""
+    return JSONResponse(android_releases.feed(), headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/android/latest.apk")
+def android_latest_apk():
+    tag = android_releases.latest_stable_tag()
+    if not tag:
+        raise HTTPException(404, "暂时没有可下载的版本")
+    return RedirectResponse(f"apk/{tag}.apk", 302)
+
+
+@app.get("/android/apk/{tag}.apk")
+def android_apk(tag: str):
+    try:
+        found = android_releases.apk_path(tag)
+    except android_releases.MirrorError as e:
+        raise HTTPException(502, str(e)) from e
+    if not found:
+        raise HTTPException(404)
+    path, name = found
+    # 安装包本来就压缩过：标明 identity，GZip 中间件不再白压一遍
+    return FileResponse(path, media_type="application/vnd.android.package-archive", filename=name,
+                        headers={"Cache-Control": "public, max-age=86400", "Content-Encoding": "identity"})
 
 
 @app.get("/health")

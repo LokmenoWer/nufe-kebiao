@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 桌面“添加小组件”时的静态预览（Android 12+ 的 previewLayout）：本周是示意内容 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/preview_bg"
+    android:orientation="vertical"
+    android:padding="10dp">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="一"
+            android:textColor="@color/widget_sub"
+            android:textSize="11sp" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="二"
+            android:textColor="@color/widget_sub"
+            android:textSize="11sp" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="三"
+            android:textColor="@color/widget_sub"
+            android:textSize="11sp" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="四"
+            android:textColor="@color/widget_sub"
+            android:textSize="11sp" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="五"
+            android:textColor="@color/widget_sub"
+            android:textSize="11sp" />
+    </LinearLayout>
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="高数"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="英语"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="2" />
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="2" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="会计"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="体育"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="高数"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="3" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="思政"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="英语"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="3"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="统计"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_margin="1dp"
+                android:layout_weight="2"
+                android:background="@drawable/preview_block"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="会计"
+                android:textColor="@color/widget_text"
+                android:textSize="10sp" />
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="5" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

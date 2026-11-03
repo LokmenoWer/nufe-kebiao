@@ -916,3 +916,23 @@ def test_none_auth_type_is_unsupported():
         assert "无可用" in str(e)
     else:
         raise AssertionError("noneAuthType=1 must be reported as unsupported")
+
+
+def test_widget_poll_after_follows_due_and_tightens_near_class():
+    import datetime as dt
+
+    from app import refresh_policy as rp
+    now = dt.datetime(2026, 10, 26, 12, 0, tzinfo=rp._TZ).timestamp()
+    seen = {"last_seen_at": now, "last_success_at": now - 60}
+    # 离上课还远：到下次该刷时再来，不缩短
+    far = rp.Signals(**seen, next_class_at=now + 2 * rp.DAY)
+    assert rp.widget_poll_after(far, now) == rp.next_due(far, now) - now > rp.WIDGET_POLL_MAX
+    # 3 小时内有课：最多 15 分钟一次
+    near = rp.Signals(**seen, next_class_at=now + 2 * rp.HOUR)
+    assert rp.widget_poll_after(near, now) == rp.WIDGET_POLL_MAX
+    # 检查窗口马上打开：正好那时来
+    soon = rp.Signals(**seen, next_class_at=now + 45 * rp.MINUTE)
+    assert rp.widget_poll_after(soon, now) == 5 * rp.MINUTE
+    # 已经到期：尽快来，但不低于下限
+    requested = rp.Signals(**seen, next_class_at=now + 2 * rp.HOUR, refresh_requested_at=now)
+    assert rp.widget_poll_after(requested, now) == rp.WIDGET_POLL_MIN
