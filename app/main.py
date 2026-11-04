@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextvars
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -696,13 +697,15 @@ def widget_script(sess=Depends(current_session)):
     if not url:
         raise HTTPException(404, "请先生成小组件链接")
     template, _version = _widget_template()
-    return PlainTextResponse(template.replace("__WIDGET_URL__", url),
-                             media_type="text/javascript; charset=utf-8", headers={"Cache-Control": "no-store"})
+    token = _widget_token(sess["id"])
+    script = template.replace("__WIDGET_URL__", url).replace("__WIDGET_FETCH_KEY__", crypto.widget_fetch_key(token))
+    return PlainTextResponse(script, media_type="text/javascript; charset=utf-8", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/widget/{token}.js")
 def widget_script_by_token(token: str):
-    """脚本在 Scriptable 里自我更新用：凭同一个只读 token 取最新脚本（已填好本人链接）。"""
+    """脚本在 Scriptable 里自我更新用：凭同一个只读 token 取最新脚本（已填好本人链接）。
+    不填代抓密钥：只有链接的人不能从这里拿到它，脚本更新时自己把手里的密钥带过去。"""
     _widget_user(token)
     template, _version = _widget_template()
     return PlainTextResponse(template.replace("__WIDGET_URL__", f"{PUBLIC_BASE_URL}/widget/{token}.json"),
@@ -711,8 +714,11 @@ def widget_script_by_token(token: str):
 
 
 @app.get("/widget/{token}.json")
-def widget_feed(token: str, refresh: int = Query(0, ge=0, le=1)):
-    return _feed(_widget_user(token), refresh, "widget", delegate=True)
+def widget_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1)):
+    user = _widget_user(token)
+    sent = request.headers.get("x-widget-key", "").encode()
+    keyed = hmac.compare_digest(sent, crypto.widget_fetch_key(token).encode())
+    return _feed(user, refresh, "widget", delegate=keyed)
 
 
 @app.get("/mobile/{token}.json")
@@ -754,8 +760,11 @@ def _feed(user, refresh: int, via: str, delegate: bool):
         log.warning("widget refresh state failed for user %s: %s", user["id"], type(e).__name__)
         payload["refresh"] = {"pending": False, "due": False, "fresh": False}
     task = None
-    # 手机代抓：Scriptable 脚本凭链接领（已有行为）；安卓 App 要绑定过的设备签名才领，
-    # 只拿到 /mobile 链接的人拿不到任务里的教务 cookie，没绑定的 App 由服务器刷
+    # 手机代抓：Scriptable 脚本要带代抓密钥，安卓 App 要绑定过的设备签名。
+    # 只拿到 /widget 或 /mobile 链接的人拿不到任务里的教务 cookie，这时由服务器刷
+    if via == "widget" and not delegate:
+        # 没带密钥的多半是升级前装的脚本：提示用户重新复制，否则这台手机再也不会代抓
+        payload["fetch_key_required"] = _widget_fetch_enabled(user["id"])
     if delegate:
         try:
             task = service.widget_fetch_task(user["id"])

@@ -1,6 +1,7 @@
 """Web 层端到端测试：上游（CAS/教务）全部打桩，不访问学校服务器。"""
 import base64
 import hashlib
+import json
 import time
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 
-from app import admin, android_releases, cas, db, jwxt, main, mobile_devices, scheduler, service
+from app import admin, android_releases, cas, crypto, db, jwxt, main, mobile_devices, scheduler, service
 from app.main import app
 
 ORIGIN = {"Origin": "http://testserver"}
@@ -1867,6 +1868,12 @@ def _upload(path, body, **kw):
     return TestClient(app).post(path.removesuffix(".json") + "/upload", json=body, **kw)
 
 
+def _keyed_get(path):
+    """设置页复制出来的 iOS 脚本：带代抓密钥请求。"""
+    token = path.removeprefix("/widget/").removesuffix(".json")
+    return TestClient(app).get(path, headers={"X-Widget-Key": crypto.widget_fetch_key(token)})
+
+
 APK = b"fake-apk-bytes"
 
 
@@ -2058,7 +2065,7 @@ def test_mobile_feed_shares_token_without_fetch_task(widget_user, up):
     assert feed.status_code == 200
     data = feed.json()
     assert data["today"] == TestClient(app).get(path).json()["today"]
-    # 代抓任务（含教务 cookie）只给 Scriptable 脚本，安卓 App 不交回，发了只会记失败
+    # 代抓任务（含教务 cookie）要设备签名才下发，只有链接领不到
     assert data["refresh"]["pending"] is True and "no-store" in feed.headers["cache-control"]
     assert "fetch" not in data and "delegate" not in data and "SESSION=jw-1" not in feed.text
     assert TestClient(app).get("/mobile/nope.json").status_code == 404
@@ -2253,15 +2260,49 @@ def test_mobile_bind_sends_security_mail(up, outbox):
 
 def test_widget_feed_poll_after_only_when_delegating(widget_user, up):
     c, path = widget_user
-    assert TestClient(app).get(path).json()["poll_after"] >= 60
+    assert _keyed_get(path).json()["poll_after"] >= 60
     assert "poll_after" not in TestClient(app).get(path.replace("/widget/", "/mobile/")).json()  # 安卓 App 不代抓
     service.set_widget_fetch(service_uid("2023001"), False)
-    assert TestClient(app).get(path).json()["poll_after"] is None
+    assert _keyed_get(path).json()["poll_after"] is None
+
+
+def test_widget_link_alone_gets_no_fetch_task(widget_user, up):
+    c, path = widget_user
+    token = path.removeprefix("/widget/").removesuffix(".json")
+    anon = TestClient(app)
+    # 只有链接、或密钥不对：没有任务和教务 cookie，也不占着任务，课表照常由服务器刷
+    for headers in ({}, {"X-Widget-Key": "wrong"}, {"X-Widget-Key": "错".encode()},
+                    {"X-Widget-Key": crypto.widget_fetch_key("other-token")}):
+        r = anon.get(path, headers=headers)
+        data = r.json()
+        assert r.status_code == 200 and "fetch" not in data and "SESSION=jw-1" not in r.text
+        assert "delegate" not in data and "poll_after" not in data and data["fetch_key_required"] is True
+    assert not service._widget_tasks and _row("2023001", "widget_fetch_pending_until")[0] is None
+    assert data["refresh"]["pending"] is True
+    # 链接换不到密钥：自我更新的脚本里没有，也不能凭 token 算出来
+    key = crypto.widget_fetch_key(token)
+    assert key not in anon.get(f"/widget/{token}.js").text and key not in r.text
+    assert 'const FETCH_KEY = "__WIDGET_FETCH_KEY__"' in anon.get(f"/widget/{token}.js").text
+    # 登录后从设置页复制的脚本带密钥，带上就能领任务
+    script = c.get("/api/widget/script").text
+    assert f'const FETCH_KEY = "{key}"' in script
+    keyed = anon.get(path, headers={"X-Widget-Key": key}).json()
+    assert keyed["fetch"]["steps"][0]["cookie"] == "SESSION=jw-1" and "fetch_key_required" not in keyed
+    # /mobile 不认这把密钥，仍然只认设备签名
+    assert "fetch" not in anon.get(path.replace("/widget/", "/mobile/"), headers={"X-Widget-Key": key}).json()
+    # 用户关了手机代抓就不提示重新复制
+    service.set_widget_fetch(service_uid("2023001"), False)
+    assert anon.get(path).json()["fetch_key_required"] is False
+    # 重新生成链接后，旧密钥和新链接配不上
+    service.set_widget_fetch(service_uid("2023001"), True)
+    new = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
+    assert "fetch" not in anon.get(new, headers={"X-Widget-Key": key}).json()
+    assert "fetch" in _keyed_get(new).json()
 
 
 def test_widget_delegated_fetch_roundtrip(widget_user, up):
     c, path = widget_user
-    feed = TestClient(app).get(path)
+    feed = _keyed_get(path)
     data = feed.json()
     task = data["fetch"]
     assert data["delegate"] is True and data["refresh"]["pending"] is True
@@ -2272,7 +2313,7 @@ def test_widget_delegated_fetch_roundtrip(widget_user, up):
     assert all(s["cookie"] == "SESSION=jw-1" for s in task["steps"])
     assert "/semester/161/print-data" in task["steps"][1]["url"]
     # 还没交回来时再来要：同一个任务，不顺延
-    assert TestClient(app).get(path).json()["fetch"]["id"] == task["id"]
+    assert _keyed_get(path).json()["fetch"]["id"] == task["id"]
     # 手机抓着的时候服务器不抢
     uid = service_uid("2023001")
     assert uid not in [u for _s, u in service.candidates()]
@@ -2297,12 +2338,12 @@ def test_widget_delegated_fetch_roundtrip(widget_user, up):
     again = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data()})
     assert again.status_code == 400
     # 刚更新过：不再发任务
-    assert "fetch" not in TestClient(app).get(path).json()
+    assert "fetch" not in _keyed_get(path).json()
 
 
 def test_widget_upload_expired_session_falls_back_to_server(widget_user, up):
     _c, path = widget_user
-    task = TestClient(app).get(path).json()["fetch"]
+    task = _keyed_get(path).json()["fetch"]
     r = _upload(path, {"id": task["id"], "final_urls": ["https://authserver.nufe.edu.cn/authserver/login?service=x"]})
     assert r.json()["status"] == "fallback" and r.json()["widget"]["refresh"]["pending"] is True
     assert _row("2023001", "widget_fetch_fails")[0] == 1
@@ -2315,7 +2356,7 @@ def test_widget_upload_expired_session_falls_back_to_server(widget_user, up):
 
 def test_widget_upload_rejections(widget_user, up):
     _c, path = widget_user
-    task = TestClient(app).get(path).json()["fetch"]
+    task = _keyed_get(path).json()["fetch"]
     assert _upload(path, {"id": "nope"}).status_code == 400
     assert _upload(path, {"id": task["id"]}, headers={"Origin": "https://evil.example"}).status_code == 403
     assert TestClient(app).post("/widget/nope/upload", json={"id": task["id"]}).status_code == 404
@@ -2326,10 +2367,28 @@ def test_widget_upload_rejections(widget_user, up):
     bad = _upload(path, {"id": task["id"], "course_html": "<html>login</html>", "print_data": _print_data()})
     assert bad.status_code == 400 and _row("2023001", "widget_fetch_fails")[0] == 1
     # 别人的课表
-    task = TestClient(app).get(path).json()["fetch"]
+    task = _keyed_get(path).json()["fetch"]
     other = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": _print_data(code="2023999")})
     assert other.status_code == 400
     assert c_room(_c) == "A101"
+
+
+@pytest.mark.parametrize("print_data", [
+    _print_data(code=""),
+    json.dumps({"studentTableVms": []}),
+    json.dumps({"studentTableVms": [{"activities": [{"weekday": 1, "startUnit": 1, "courseName": "伪造"}]}]}),
+])
+def test_widget_upload_without_student_code_is_rejected(widget_user, up, monkeypatch, print_data):
+    c, path = widget_user
+    alerted = []
+    monkeypatch.setattr(service, "alert_classmates", lambda *a: alerted.append(a) or 0)
+    task = _keyed_get(path).json()["fetch"]
+    r = _upload(path, {"id": task["id"], "course_html": COURSE_HTML, "print_data": print_data})
+    assert r.status_code == 400
+    # 课表没被改，也没有惊动同班同学；任务作废后仍在排队，由服务器兜底
+    assert c_room(c) == "A101" and not alerted
+    uid = service_uid("2023001")
+    assert _row("2023001", "widget_fetch_fails")[0] == 1 and service.widget_refresh_state(uid)["pending"] is True
 
 
 def c_room(client):
@@ -2360,7 +2419,7 @@ def test_widget_fetch_pref(widget_user, up):
     c, path = widget_user
     assert c.get("/api/me").json()["widget_fetch"] is True
     assert c.post("/api/widget/fetch-pref", headers=_csrf(c), json={"enabled": False}).json() == {"widget_fetch": False}
-    data = TestClient(app).get(path).json()
+    data = _keyed_get(path).json()
     assert "fetch" not in data and data["delegate"] is False and data["refresh"]["pending"] is True
     assert c.get("/api/me").json()["widget_fetch"] is False
     assert c.post("/api/widget/fetch-pref", headers=ORIGIN, json={"enabled": True}).status_code == 403
@@ -2368,9 +2427,9 @@ def test_widget_fetch_pref(widget_user, up):
 
 def test_widget_task_lapses_count_as_failure(widget_user, up):
     _c, path = widget_user
-    task = TestClient(app).get(path).json()["fetch"]
+    task = _keyed_get(path).json()["fetch"]
     service._widget_tasks[task["id"]].expires_at = db.now() - 1
-    assert TestClient(app).get(path).json()["fetch"]["id"] != task["id"]
+    assert _keyed_get(path).json()["fetch"]["id"] != task["id"]
     assert _row("2023001", "widget_fetch_fails")[0] == 1
 
 
@@ -2381,7 +2440,7 @@ def test_widget_no_task_without_jwxt_session(up):
     path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
     with db.tx() as conn:
         conn.execute("UPDATE users SET last_success_at=? WHERE student_id='2023001'", (db.now() - 30 * 86400,))
-    assert "fetch" not in TestClient(app).get(path).json()
+    assert "fetch" not in _keyed_get(path).json()
 
 
 def _qr_login(sid):

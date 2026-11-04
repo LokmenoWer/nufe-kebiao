@@ -54,12 +54,14 @@ export function createWidgetSection({ widgetUrl, widgetFetch = true, onChange, o
     h("li", {}, "课表该更新时（每节课出门前也会确认一次），小组件会用手机的网络直接向学校拿课表；"
       + "拿不到或关闭了这项时由服务器拉取，标题栏显示“更新中”，大约两分钟后再画一次。"
       + "在 Scriptable 里运行脚本，选“刷新课表”可以马上更新。"),
-    h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"));
+    h("li", {}, "小组件提示“脚本可更新”时，在 Scriptable 里运行脚本选“更新脚本”即可，不用重新复制。"
+      + "提示“请重新复制脚本”时，点上面的“复制脚本”替换旧脚本的全部内容，手机才能继续直接向学校获取课表。"));
 
   const el = h("div", { class: "widget-settings" },
     h("p", { class: "hint" }, "借助免费的 Scriptable App，在 iPhone / iPad 桌面和锁屏上显示今天、明天或本周的课。"
       + "课表过期或快上课时，小组件会主动请服务器更新，并在上课前发本地通知。"
-      + "小组件用一条只读链接取数据，链接本身就是凭证，泄露后请重新生成。"),
+      + "小组件用一条只读链接取数据，链接本身就是凭证，泄露后请重新生成。"
+      + "脚本里还有一把代抓密钥，能领到你的教务登录状态，不要把整个脚本发给别人。"),
     h("div", { class: "button-row" }, createBtn, copyBtn, rotateBtn, disableBtn),
     fetchRow,
     manual,

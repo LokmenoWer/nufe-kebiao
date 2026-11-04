@@ -157,10 +157,11 @@ export async function runWidgetScript({
   screen = { width: 393, height: 852 },
   // 手机代抓：jwxt(url) → { status, body, url, cookies, redirect, hang }；upload(body) → 服务器回的 JSON
   // budgetMs：Timer 到点前的真实等待（默认按脚本给的毫秒数）
-  jwxt, upload, budgetMs,
+  jwxt, upload, budgetMs, fetchKey,
 }) {
   let source = fs.readFileSync(new URL("../../scriptable/nufe-kebiao-widget.js", import.meta.url), "utf8");
   if (url !== undefined) source = source.replace("__WIDGET_URL__", url);
+  if (fetchKey !== undefined) source = source.replace("__WIDGET_FETCH_KEY__", fetchKey);
   source = source.replace("__SCRIPT_VERSION__", version);
   const files = cache || new Map();
   let result = null;
@@ -170,6 +171,7 @@ export async function runWidgetScript({
   const requests = [];
   const uploads = [];
   const school = [];
+  const feedHeaders = [];
   class Request {
     constructor(u) {
       this.url = u;
@@ -207,6 +209,7 @@ export async function runWidgetScript({
         this.response = { statusCode: scriptStatus };
         return scriptBody;
       }
+      feedHeaders.push(this.headers);
       this.response = { statusCode: status };
       if (typeof payload === "string") return payload; // 原样返回（比如反向代理的 HTML 错误页）
       const data = JSON.parse(JSON.stringify(payload));
@@ -342,5 +345,5 @@ export async function runWidgetScript({
   context.globalThis = context;
   vm.runInNewContext(source, context);
   await finished;
-  return { widget: result, files, alerts, presented, requests, uploads, school, notifications: bucket };
+  return { widget: result, files, alerts, presented, requests, uploads, school, feedHeaders, notifications: bucket };
 }

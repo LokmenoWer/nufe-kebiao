@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import time
 
 import pytest
 from cryptography.hazmat.primitives import padding
@@ -240,6 +241,53 @@ def test_pace_spacing_across_threads():
 
 
 # ---------- 回归：解析边界 ----------
+
+_MB = 1024 * 1024
+
+
+@pytest.mark.parametrize("html", [
+    # 顶层很多字符串：旧实现每遇到一个引号就复制一遍剩下的全文
+    "var personId = 1; var currentSemester = {" + "'a':1," * (_MB // 6) + "'id': 161};",
+    # 下面这些没有闭合的标签：旧的正则会从每个开头一路回溯
+    "var personId = 1; var currentSemester = {'id': 161};" + "<select " * (_MB // 8),
+    "var personId = 1; var currentSemester = {'id': 161};<select " + "id='allSemesters'" * (_MB // 17),
+    "var personId = 1; var currentSemester = {'id': 161};<select id='allSemesters'><option "
+    + "value='1'" * (_MB // 9) + "</select>",
+    "var personId = 1; var currentSemester = {'id': 161};<select id='allSemesters'>" + "<option " * (_MB // 8)
+    + "</select>",
+])
+def test_course_page_parses_large_hostile_input_quickly(html):
+    assert len(html) <= _MB + 100
+    started = time.monotonic()
+    page = jwxt.parse_course_page(html)
+    assert time.monotonic() - started < 3
+    assert page.person_id == 1 and page.current_semester_id == 161
+
+
+def test_course_page_semester_list_variants():
+    html = """var personId = 1; var currentSemester = {'id': 161};
+    <select class="x" id="other"><option value="9">不是这个</option></select>
+    <select name="s" id='allSemesters' data-a="1">
+      <option selected value="161" data-x="y"> 2026-2027-1 &amp; </option>
+      <option value='160'>2025-2026-2</option>
+      <option>没有 value</option>
+    </select>
+    <option value="8">选择框外面</option>"""
+    assert jwxt.parse_course_page(html).semesters == [
+        {"id": 161, "name": "2026-2027-1 &"}, {"id": 160, "name": "2025-2026-2"}]
+    no_close = "var personId = 1; var currentSemester = {'id': 161};<select id='allSemesters'><option value='1'>a</option>"
+    assert jwxt.parse_course_page(no_close).semesters == []
+
+
+def test_teacher_name_strips_parens_and_survives_long_whitespace():
+    assert jwxt._teacher_name("张三 (工号)") == "张三"
+    assert jwxt._teacher_name("张三（学院(兼职)）") == "张三"
+    assert jwxt._teacher_name({"name": " 李四 "}) == "李四"
+    started = time.monotonic()
+    assert jwxt._teacher_name(" " * (2 * _MB)) == ""
+    assert jwxt._teacher_name("(" * (2 * _MB) + "\n") == ""
+    assert time.monotonic() - started < 3
+
 
 def test_course_page_word_boundaries():
     html = """<script>var mypersonId = 999; var personId = 123;

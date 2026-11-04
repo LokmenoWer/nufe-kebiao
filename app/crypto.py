@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import os
 
@@ -54,3 +56,12 @@ def decrypt_json(blob: bytes, purpose: str, user_id: int):
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def widget_fetch_key(token: str) -> str:
+    """iOS 脚本领代抓任务用的密钥：由主密钥和小组件 token 算出，不落库，重新生成 / 停用链接后自然失效。
+
+    光有 token 算不出来（token_hash 不带密钥，这里必须用 HMAC），所以链接泄露不等于密钥泄露。
+    """
+    mac = hmac.new(APP_SECRET_KEY, b"kebiao-widget-fetch-v1\n" + token.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode()

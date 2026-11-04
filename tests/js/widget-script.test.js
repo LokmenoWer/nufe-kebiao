@@ -857,6 +857,41 @@ test("在 Scriptable 里运行：菜单可预览，也能更新脚本", async ()
   assert.equal(bad.alerts[1].title, "出错了");
 });
 
+const FETCH_KEY = "abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
+
+test("代抓密钥：有才放进请求头；没有时不发假值，并提示重新复制脚本", async () => {
+  const keyed = await runWidgetScript({ payload: PAYLOAD, url: URL_OK, nowMs: NOW, fetchKey: FETCH_KEY });
+  assert.equal(keyed.feedHeaders[0]["X-Widget-Key"], FETCH_KEY);
+
+  // 模板里的占位符不是密钥：旧脚本自我更新来的就是这样
+  const bare = await runWidgetScript({
+    payload: { ...PAYLOAD, fetch_key_required: true }, url: URL_OK, nowMs: NOW, inApp: true, choose: [],
+  });
+  assert.equal(bare.feedHeaders[0]["X-Widget-Key"], undefined);
+  assert.match(bare.alerts[0].message, /重新复制脚本/);
+  const pill = await runWidgetScript({ payload: { ...PAYLOAD, fetch_key_required: true }, url: URL_OK, nowMs: NOW });
+  assert.ok(pill.widget.texts().includes("请重新复制脚本"));
+
+  // 服务器没要求（用户关了手机代抓）就不打扰
+  const off = await runWidgetScript({ payload: { ...PAYLOAD, fetch_key_required: false }, url: URL_OK, nowMs: NOW });
+  assert.ok(!off.widget.texts().includes("请重新复制脚本"));
+});
+
+test("更新脚本时把手里的代抓密钥带到新版本；没有密钥就原样写入", async () => {
+  const newer = `const WIDGET_URL = "${URL_OK}";\nconst FETCH_KEY = "__WIDGET_FETCH_KEY__";\nconst SCRIPT_VERSION = "sha-000000000002";\n`;
+  const keyed = new Map();
+  await runWidgetScript({
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, choose: ["更新脚本"], scriptBody: newer, cache: keyed,
+    fetchKey: FETCH_KEY,
+  });
+  assert.equal(keyed.get("/Documents/南财课表.js"), newer.replace("__WIDGET_FETCH_KEY__", FETCH_KEY));
+  const bare = new Map();
+  await runWidgetScript({
+    payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, choose: ["更新脚本"], scriptBody: newer, cache: bare,
+  });
+  assert.equal(bare.get("/Documents/南财课表.js"), newer);
+});
+
 test("在 Scriptable 里可以选择刷新课表", async () => {
   const pushed = await runWidgetScript({
     payload: PAYLOAD, url: URL_OK, nowMs: NOW, inApp: true, choose: ["刷新课表"],

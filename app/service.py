@@ -1010,9 +1010,11 @@ def accept_widget_upload(uid: int, body: dict, now: float | None = None) -> dict
         user = db.connect().execute("SELECT student_id, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
         if not user:
             raise UserGone(uid)
+        # 手机传来的内容不可信：读不到学号也要拒绝，否则删掉 code 就能绕过本人校验。
+        # 真遇到学校不返回学号的情况，这里记失败后由服务器照常刷新。
         code = str(data["student"].get("code") or "")
-        if code and code != user["student_id"]:
-            _widget_fetch_failed(uid, "学号不一致")
+        if code != user["student_id"]:
+            _widget_fetch_failed(uid, "学号不一致" if code else "未读到学号")
             raise WidgetUploadRejected("课表不是本人的")
         try:
             cookies = crypto.decrypt_json(user["enc_cookies"], "cookies", uid) if user["enc_cookies"] else []

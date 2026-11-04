@@ -27,6 +27,14 @@ class CoursePage:
     semesters: list[dict] = field(default_factory=list)  # [{id, name}]
 
 
+_QUOTED_ID = re.compile(r"(['\"])id\1\s*:\s*(\d+)")
+# 课表页可能是手机上传的（最大 1 MB）：下面的正则都先按 < 切开标签，单次匹配走不出当前标签，不会平方级回溯
+_SELECT_TAG = re.compile(r"<select\b([^<>]*)>")
+_OPTION = re.compile(r"<option\b([^<>]*)>([^<]+)</option>")
+_ALL_SEMESTERS_ID = re.compile(r"\bid=[\"']allSemesters[\"']")
+_OPTION_VALUE = re.compile(r"\bvalue=[\"'](\d+)[\"']")
+
+
 def _top_level_id(html: str, var: str) -> int | None:
     """取 `var xxx = {...}` 这个对象字面量的顶层 'id'（对象里还嵌套着 calendarAssoc:{'id':1} 等）。"""
     m = re.search(rf"\b{re.escape(var)}\s*=\s*\{{", html)
@@ -43,7 +51,7 @@ def _top_level_id(html: str, var: str) -> int | None:
         elif ch in "'\"":
             quote = ch
             if depth == 1:
-                km = re.match(r"(['\"])id\1\s*:\s*(\d+)", html[i:])
+                km = _QUOTED_ID.match(html, i)  # 传位置而不是切片：切片每遇到一个引号都要复制剩下的全文
                 if km:
                     return int(km.group(2))
         elif ch == "{":
@@ -61,12 +69,20 @@ def parse_course_page(html: str) -> CoursePage:
     sem_id = _top_level_id(html, "currentSemester")
     if not m_person or sem_id is None:
         raise ValueError("课表页结构异常：未找到 personId / currentSemester")
+    return CoursePage(int(m_person.group(1)), sem_id, _parse_semesters(html))
+
+
+def _parse_semesters(html: str) -> list[dict]:
+    tag = next((m for m in _SELECT_TAG.finditer(html) if _ALL_SEMESTERS_ID.search(m.group(1))), None)
+    end = html.find("</select>", tag.end()) if tag else -1
+    if end < 0:
+        return []
     semesters = []
-    m_sel = re.search(r"<select[^>]*id=[\"']allSemesters[\"'][^>]*>(.*?)</select>", html, re.S)
-    if m_sel:
-        for v, text in re.findall(r"<option[^>]*value=[\"'](\d+)[\"'][^>]*>([^<]+)</option>", m_sel.group(1)):
-            semesters.append({"id": int(v), "name": html_lib.unescape(text).strip()})
-    return CoursePage(int(m_person.group(1)), sem_id, semesters)
+    for attrs, text in _OPTION.findall(html, tag.end(), end):
+        value = _OPTION_VALUE.search(attrs)
+        if value:
+            semesters.append({"id": int(value.group(1)), "name": html_lib.unescape(text).strip()})
+    return semesters
 
 
 def _check(r: requests.Response) -> requests.Response:
@@ -134,15 +150,18 @@ def get_semester_detail(session: requests.Session, semester_id: int) -> dict | N
         return None
 
 
-_PAREN = re.compile(r"\s*[(（].*$")  # "张三(工号)"、"张三(学院(兼职))" → "张三"
+_PAREN = re.compile(r"[(（]")
 
 
 def _teacher_name(t) -> str:
+    """"张三(工号)"、"张三(学院(兼职))" → "张三"。"""
     if t is None:
         return ""
     if isinstance(t, dict):
         t = t.get("name") or t.get("teacherName") or ""
-    return _PAREN.sub("", str(t)).strip()
+    name = str(t)
+    paren = _PAREN.search(name)
+    return (name[:paren.start()] if paren else name).strip()
 
 
 def _as_int(value) -> int | None:

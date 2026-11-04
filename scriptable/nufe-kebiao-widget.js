@@ -25,8 +25,10 @@
  *   课表变了、或者改了提前分钟数而提醒还是旧的，标题栏会提示“点按更新提醒”，点一下小组件就会在 Scriptable 里重排。
  *
  * 下面的链接本身就是凭证（只读，能看到你的课表）。泄露了就去网站设置里“重新生成”，再重新复制脚本。
+ * 代抓密钥能领到你的教务登录状态，不要把整个脚本发给别人。
  */
 const WIDGET_URL = "__WIDGET_URL__";
+const FETCH_KEY = "__WIDGET_FETCH_KEY__"; // 从网站复制脚本时填入；更新脚本时会带到新版本
 const SCRIPT_VERSION = "__SCRIPT_VERSION__"; // 服务器下发时填入脚本内容的哈希，无需手改
 
 const TZ_OFFSET_MINUTES = 8 * 60;      // 北京时间，学校课表按它算
@@ -580,7 +582,7 @@ function needsLogin(payload) {
 
 /**
  * 标题栏右侧只放一条最要紧的提示：
- * 登录失效 > 数据过旧 > 刷新失败 > 离线 > 更新中 > 提醒要重排 > 有调课 > 脚本可更新 > 周次。
+ * 登录失效 > 数据过旧 > 刷新失败 > 离线 > 更新中 > 提醒要重排 > 有调课 > 脚本可更新 > 要重新复制脚本 > 周次。
  */
 function headerNote(payload, offline, day, family, extra = {}) {
   if (needsLogin(payload)) return { text: "需重新登录", tone: "warn" };
@@ -596,6 +598,7 @@ function headerNote(payload, offline, day, family, extra = {}) {
   const recent = payload && payload.changed_at && nowSec - payload.changed_at < CHANGE_NOTE_SECONDS;
   if (extra.changed || recent) return { text: "有调课", tone: "warn" };
   if (payload && isOutdated(payload.script_version, SCRIPT_VERSION)) return { text: "脚本可更新", tone: "accent" };
+  if (payload && needsFetchKey(payload)) return { text: "请重新复制脚本", tone: "accent" };
   if (day && day.week && family !== "small") return { text: `第 ${day.week} 周`, tone: "faint" };
   return null;
 }
@@ -1477,11 +1480,20 @@ function updateState(changes) {
   writeJsonFile(STATE_FILE(), { ...readState(), ...changes }, true);
 }
 
+/** 从网站复制的脚本才有代抓密钥；靠旧脚本自我更新来的没有，课表由服务器拉取。 */
+function hasFetchKey() {
+  return /^[A-Za-z0-9_-]{43}$/.test(FETCH_KEY); // HMAC-SHA256 的 base64url；模板占位符不算
+}
+
+function needsFetchKey(payload) {
+  return Boolean(payload.fetch_key_required) && !hasFetchKey();
+}
+
 /** 只请求一次：快上课时的确认由服务器按“出门前检查点”安排，脚本不必再追加请求。 */
 async function readFeed(url) {
   const req = new Request(url);
   req.timeoutInterval = 12;
-  req.headers = { "Cache-Control": "no-cache" };
+  req.headers = { "Cache-Control": "no-cache", ...(hasFetchKey() ? { "X-Widget-Key": FETCH_KEY } : {}) };
   const text = await req.loadString();
   const status = req.response && req.response.statusCode;
   if (status === 404) return { error: "小组件链接已失效：请到网站设置里重新生成，并重新复制脚本" };
@@ -1722,7 +1734,8 @@ async function updateScript() {
   } catch (_) {
     // 用本地
   }
-  fm.writeString(module.filename, code);
+  // 服务器下发的新版本不含代抓密钥（只凭链接拿不到），把手里的带过去
+  fm.writeString(module.filename, hasFetchKey() ? code.replace(/const FETCH_KEY = "[^"]*"/, `const FETCH_KEY = "${FETCH_KEY}"`) : code);
   return version;
 }
 
@@ -1807,7 +1820,9 @@ async function inAppMenu(result, mode, remindNote, lead, fromParam) {
   alert.title = "南财课表小组件";
   const latest = result.data && result.data.script_version;
   const versionNote = `脚本版本 ${SCRIPT_VERSION}${isOutdated(latest, SCRIPT_VERSION) ? `，可更新到 ${latest}` : ""}`;
-  alert.message = remindNote ? `${versionNote}\n${remindNote}` : versionNote;
+  const keyNote = result.data && needsFetchKey(result.data)
+    ? "这个脚本不能用手机直接向学校获取课表，现在由服务器拉取。要恢复，请到网站设置重新复制脚本并替换。" : "";
+  alert.message = [versionNote, keyNote, remindNote].filter(Boolean).join("\n");
   const preview = (family, m) => buildWidget(result.data, { family, mode: m, offline: result.offline });
   const actions = [
     ["预览今天（中号）", () => preview("medium", "today").presentMedium()],
