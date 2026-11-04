@@ -88,4 +88,11 @@ class SyncScheduleTest {
         )
         assertEquals(lessonMs(date, "13:02"), next)
     }
+
+    @Test
+    fun alignsExactClassStartWhenSecondsAreNonZero() {
+        val twentySecondsBefore = Now(lessonMs(date, "18:29") + 40_000L)
+        val next = Sync.nextRedrawMs(payload(), twentySecondsBefore)
+        assertEquals(lessonMs(date, "18:30"), next)
+    }
 }

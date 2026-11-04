@@ -19,6 +19,7 @@ import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Repository
+import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.resolveDays
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.widget.TodayWidget
@@ -40,6 +41,7 @@ object Sync {
     private const val DELEGATE_CHECK_MINUTES = 37
     private const val PENDING_REFRESH_MS = 2 * 60_000L
     private const val MAX_REDRAW_MS = 30 * 60_000L
+    private const val MIN_REDRAW_MS = 5_000L
 
     fun schedule(context: Context) {
         val request = PeriodicWorkRequestBuilder<SyncWorker>(30, TimeUnit.MINUTES)
@@ -66,22 +68,24 @@ object Sync {
     }
 
     fun nextRedrawMs(payload: Payload, now: Now): Long {
-        val candidates = mutableListOf(now.ms + MAX_REDRAW_MS, now.ms + (24 * 60 - now.minutes + 1) * 60_000L)
+        val dayStartMs = lessonMs(now.date, "00:00")
+        val candidates = mutableListOf(now.ms + MAX_REDRAW_MS, dayStartMs + (24 * 60 + 1) * 60_000L)
         val (today, _) = resolveDays(payload, now)
         for (lesson in today?.lessons.orEmpty()) {
             val marks = mutableListOf(lesson.startMinutes - AFTER_CHECK_MINUTES, lesson.startMinutes, lesson.endMinutes)
             if (payload.delegate) marks += lesson.startMinutes - DELEGATE_CHECK_MINUTES
             for (t in marks) {
-                if (t > now.minutes) candidates += now.ms + (t - now.minutes) * 60_000L
+                val targetMs = dayStartMs + t * 60_000L
+                if (targetMs > now.ms) candidates += targetMs
             }
         }
         if (payload.delegate) payload.pollAfterSeconds?.takeIf { it > 0 }?.let { candidates += now.ms + it * 1000 }
         if (payload.refresh.pending || payload.refresh.due) candidates += now.ms + PENDING_REFRESH_MS
-        return maxOf(now.ms + 60_000L, candidates.min())
+        return maxOf(now.ms + MIN_REDRAW_MS, candidates.min())
     }
 
     internal fun scheduleNext(context: Context, atMs: Long) {
-        val delay = (atMs - System.currentTimeMillis()).coerceAtLeast(60_000L)
+        val delay = (atMs - System.currentTimeMillis()).coerceAtLeast(MIN_REDRAW_MS)
         val request = OneTimeWorkRequestBuilder<SyncWorker>()
             .setInitialDelay(delay, TimeUnit.MILLISECONDS)
             .setBackoffCriteria(BackoffPolicy.LINEAR, 5, TimeUnit.MINUTES)

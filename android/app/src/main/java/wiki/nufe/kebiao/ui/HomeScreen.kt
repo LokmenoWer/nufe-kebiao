@@ -11,15 +11,20 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -28,6 +33,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -55,7 +61,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import wiki.nufe.kebiao.R
+import wiki.nufe.kebiao.data.Cancelled
+import wiki.nufe.kebiao.data.Day
+import wiki.nufe.kebiao.data.DayColumn
 import wiki.nufe.kebiao.data.DayPlan
+import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.AppUpdate
@@ -71,10 +81,26 @@ import wiki.nufe.kebiao.data.buildTodayPlan
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
+import wiki.nufe.kebiao.data.weekColumns
+import wiki.nufe.kebiao.data.weekToShow
 import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
+import wiki.nufe.kebiao.widget.CHIP_GAP
+import wiki.nufe.kebiao.widget.CHIP_PAD_H
+import wiki.nufe.kebiao.widget.CHIP_PAD_V
+import wiki.nufe.kebiao.widget.Cell
+import wiki.nufe.kebiao.widget.GridLayout
+import wiki.nufe.kebiao.widget.Kind
+import wiki.nufe.kebiao.widget.TextMeasure
+import wiki.nufe.kebiao.widget.bestPieces
+import wiki.nufe.kebiao.widget.cellsOf
+import wiki.nufe.kebiao.widget.layoutGrid
+import wiki.nufe.kebiao.widget.mix
 import wiki.nufe.kebiao.widget.parseColor
+import wiki.nufe.kebiao.widget.pieceBold
+import wiki.nufe.kebiao.widget.roomText
+import wiki.nufe.kebiao.widget.size
 
 @Composable
 internal fun UpdateBanner(update: AppUpdate, onDismiss: () -> Unit) {
@@ -161,7 +187,12 @@ internal fun HomeScreen(
         StatusPill(plan, now)
         if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
         if (message != null) {
-            Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            val isSuccess = message == "已绑定这台设备。"
+            Text(
+                message,
+                color = if (isSuccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                fontSize = 12.sp,
+            )
             Spacer(Modifier.height(10.dp))
         }
         update?.let {
@@ -190,7 +221,7 @@ internal fun HomeScreen(
                     repo.remindMinutes = 10
                 }
                 if (!enabled) LiveUpdates.cancel(context)
-                Reminders.reschedule(context)
+                Reminders.rescheduleAsync(context)
             },
             liveUpdate = liveUpdate,
             onLiveUpdateChange = { checked ->
@@ -198,7 +229,7 @@ internal fun HomeScreen(
                 liveUpdate = checked
                 repo.liveUpdateEnabled = checked
                 if (!checked) LiveUpdates.cancel(context)
-                Reminders.reschedule(context)
+                Reminders.rescheduleAsync(context)
             },
         )
         Spacer(Modifier.height(110.dp))
@@ -212,7 +243,7 @@ internal fun HomeScreen(
                 showWheel = false
                 minutes = selected
                 repo.remindMinutes = selected
-                Reminders.reschedule(context)
+                Reminders.rescheduleAsync(context)
             },
         )
     }
@@ -268,6 +299,14 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
     }
 }
 
+private enum class CardMode { DAY, WEEK }
+
+private data class SelectedCourse(
+    val day: Day,
+    val slots: List<Slot>,
+    val cancelled: Cancelled? = null,
+)
+
 @Composable
 private fun TodayCardView(
     snapshot: Snapshot?,
@@ -278,6 +317,9 @@ private fun TodayCardView(
     onRefresh: () -> Unit,
     onOpenSite: () -> Unit,
 ) {
+    var mode by remember { mutableStateOf(CardMode.DAY) }
+    var preferNextWeek by remember { mutableStateOf<Boolean?>(null) }
+    var selectedCourse by remember { mutableStateOf<SelectedCourse?>(null) }
     val tomorrow = plan?.title == "明天"
     var showAll by remember(plan?.day?.date) { mutableStateOf(false) }
     val fullSlots = plan?.day
@@ -285,22 +327,47 @@ private fun TodayCardView(
         .orEmpty()
     val hiddenPast = fullSlots.count { it.state == State.PAST }
 
+    val payload = snapshot?.payload
+    val defaultWeek = payload?.let { weekToShow(it, now) }
+    val showNext = preferNextWeek ?: (defaultWeek?.first == "下周")
+    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else (defaultWeek?.first ?: "本周")
+    val weekBlock = if (showNext && payload?.nextWeek != null) payload.nextWeek else defaultWeek?.second
+    val weekCols = remember(weekBlock, now.date, now.minutes) { weekColumns(weekBlock, now) }
+    val weekRange = if (weekCols.isNotEmpty()) {
+        val first = shortDate(weekCols.first().day.date)
+        val last = shortDate(weekCols.last().day.date)
+        if (first == last) first else "$first–$last"
+    } else ""
+    val weekFirstDay = weekCols.firstOrNull()?.day
+    val weekChanged = weekCols.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
+    val weekNote = snapshot?.let { headerNote(it, weekFirstDay, now, compact = false, changed = weekChanged) }
+    val activeNote = if (mode == CardMode.WEEK) weekNote else note
+
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(plan?.title ?: "今天", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            plan?.day?.let {
+            Text(
+                if (mode == CardMode.WEEK) weekTitle else (plan?.title ?: "今天"),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            val subtitle = if (mode == CardMode.WEEK) {
+                weekRange
+            } else {
+                plan?.day?.let { "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}" }.orEmpty()
+            }
+            if (subtitle.isNotEmpty()) {
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}",
+                    subtitle,
                     fontSize = 12.sp,
                     maxLines = 1,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.weight(1f))
-            note?.let {
+            activeNote?.let {
                 Text(it.text, fontSize = 11.sp, color = noteColor(it.tone))
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
             }
             TextButton(
                 onClick = onRefresh,
@@ -308,67 +375,111 @@ private fun TodayCardView(
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) { Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp) }
         }
-        if (plan != null && plan.slots.isNotEmpty()) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                if (tomorrow) "明天还有 ${plan.slots.size} 门课" else "还有 ${plan.slots.size} 门课要上",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.primary,
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ModeToggle(
+                mode = mode,
+                dayLabel = plan?.title ?: "今天",
+                weekLabel = weekTitle,
+                onSelect = { mode = it },
             )
+            if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = { preferNextWeek = !showNext },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp),
+                ) {
+                    Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            if (mode == CardMode.DAY && plan != null && plan.slots.isNotEmpty()) {
+                Text(
+                    if (tomorrow) "明天还有 ${plan.slots.size} 门课" else "还有 ${plan.slots.size} 门课要上",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         Spacer(Modifier.height(12.dp))
         if (snapshot == null || plan == null) {
             Text("正在获取课表…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@SectionCard
         }
-        AnimatedContent(
-            targetState = showAll,
-            transitionSpec = {
-                (expandVertically(
-                    expandFrom = Alignment.Bottom,
-                    animationSpec = tween(320, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(200))) togetherWith
-                    (shrinkVertically(
-                        shrinkTowards = Alignment.Bottom,
-                        animationSpec = tween(240, easing = FastOutSlowInEasing),
-                    ) + fadeOut(tween(120)))
-            },
-            label = "today-expand",
-        ) { expanded ->
-            val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
-            if (shown.isEmpty()) {
-                Text(plan.empty, fontSize = 14.sp)
-                val preview = plan.preview
-                if (preview != null) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
-                    preview.slots.firstOrNull()?.let { LessonRow(it) }
-                }
-            } else {
-                Column {
-                    shown.forEachIndexed { index, slot ->
-                        LessonRow(slot)
-                        if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
+        if (mode == CardMode.WEEK) {
+            WeekGridView(
+                columns = weekCols,
+                isHoliday = weekBlock?.week == null,
+                onSelectCourse = { selectedCourse = it },
+            )
+        } else {
+            AnimatedContent(
+                targetState = showAll,
+                transitionSpec = {
+                    (expandVertically(
+                        expandFrom = Alignment.Bottom,
+                        animationSpec = tween(320, easing = FastOutSlowInEasing),
+                    ) + fadeIn(tween(200))) togetherWith
+                        (shrinkVertically(
+                            shrinkTowards = Alignment.Bottom,
+                            animationSpec = tween(240, easing = FastOutSlowInEasing),
+                        ) + fadeOut(tween(120)))
+                },
+                label = "today-expand",
+            ) { expanded ->
+                val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
+                if (shown.isEmpty()) {
+                    Column {
+                        Text(plan.empty, fontSize = 14.sp)
+                        val preview = plan.preview
+                        if (preview != null) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(8.dp))
+                            preview.slots.forEachIndexed { index, slot ->
+                                LessonRow(slot) {
+                                    selectedCourse = SelectedCourse(preview.day, listOf(slot))
+                                }
+                                if (index != preview.slots.lastIndex) Spacer(Modifier.height(12.dp))
+                            }
+                            if (preview.cancelled.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "停课：" + preview.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                                    fontSize = 11.sp,
+                                    color = WarmOrange,
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Column {
+                        shown.forEachIndexed { index, slot ->
+                            LessonRow(slot) {
+                                plan.day?.let { d -> selectedCourse = SelectedCourse(d, listOf(slot)) }
+                            }
+                            if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
+                        }
                     }
                 }
             }
-        }
-        if (plan.cancelled.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
-                fontSize = 11.sp,
-                color = WarmOrange,
-            )
+            if (plan.cancelled.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                    fontSize = 11.sp,
+                    color = WarmOrange,
+                )
+            }
         }
         HorizontalDivider(
             modifier = Modifier.padding(top = 14.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (hiddenPast > 0) {
+            if (mode == CardMode.DAY && hiddenPast > 0) {
                 TextButton(
                     onClick = { showAll = !showAll },
                     contentPadding = PaddingValues(0.dp),
@@ -400,13 +511,403 @@ private fun TodayCardView(
             }
         }
     }
+
+    selectedCourse?.let { detail ->
+        CourseDetailDialog(detail = detail, onDismiss = { selectedCourse = null })
+    }
 }
 
 @Composable
-private fun LessonRow(slot: Slot) {
-    val lesson = slot.lesson
+private fun ModeToggle(
+    mode: CardMode,
+    dayLabel: String,
+    weekLabel: String,
+    onSelect: (CardMode) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(50),
+    ) {
+        Row(modifier = Modifier.padding(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            ModePill(text = dayLabel, selected = mode == CardMode.DAY) { onSelect(CardMode.DAY) }
+            ModePill(text = weekLabel, selected = mode == CardMode.WEEK) { onSelect(CardMode.WEEK) }
+        }
+    }
+}
+
+@Composable
+private fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
+        contentColor = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(50),
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick),
+    ) {
+        Text(
+            text = text,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun WeekGridView(
+    columns: List<DayColumn>,
+    isHoliday: Boolean,
+    onSelectCourse: (SelectedCourse) -> Unit,
+) {
+    val context = LocalContext.current
+    val dark = isSystemInDarkTheme()
+    val measure = remember(context) { TextMeasure(context) }
+    val cells = remember(columns) { columns.map(::cellsOf) }
+    if (cells.all { it.isEmpty() }) {
+        Text(if (isHoliday) "假期中" else "这周没有课", fontSize = 14.sp)
+        return
+    }
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val totalW = maxWidth.value
+        val axisSp = 9f
+        val unitSp = 8f
+        val endSp = 8.5f
+        val axisW = maxOf(
+            measure.width("00:00", axisSp, true),
+            measure.width("第10节", unitSp, false),
+            measure.width("–00:00", endSp, false),
+        ) + 4f
+        val labelH = measure.height("00:00", axisSp, true, 100f, 1)
+        val endH = measure.height("–00:00", endSp, false, 100f, 1)
+        val colGap = 3f
+        val usableW = (totalW - axisW).coerceAtLeast(1f)
+        val colW = if (columns.isEmpty()) 0f else usableW / columns.size - colGap
+        val cellInnerW = (colW - CHIP_PAD_H - 3f).coerceAtLeast(20f)
+        val gridH = 380f
+        val layout = remember(cells, totalW) {
+            layoutGrid(cells, gridH, cellInnerW, measure, labelH, endH)
+        }
+        if (layout == null) {
+            Text(if (isHoliday) "假期中" else "这周没有课", fontSize = 14.sp)
+            return@BoxWithConstraints
+        }
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(axisW.dp))
+                for (c in columns) {
+                    Column(
+                        modifier = Modifier.weight(1f).padding(start = colGap.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = "周${WEEKDAY[c.day.weekday]}",
+                            fontSize = 11.sp,
+                            lineHeight = 13.sp,
+                            fontWeight = if (c.isToday) FontWeight.Bold else FontWeight.Normal,
+                            color = if (c.isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = shortDate(c.day.date),
+                            fontSize = 9.sp,
+                            lineHeight = 11.sp,
+                            color = if (c.isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth().height(gridH.dp)) {
+                WeekAxis(layout, axisW, gridH, labelH, endH, measure, axisSp, unitSp, endSp)
+                columns.forEachIndexed { colIndex, column ->
+                    val colSpans = layout.spans.filter { it.col == colIndex }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .padding(start = colGap.dp),
+                    ) {
+                        for (span in colSpans) {
+                            val top = layout.bounds[span.a]
+                            val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .offset(y = top.dp)
+                                    .height(h.dp),
+                            ) {
+                                WeekCellCard(
+                                    cell = span.cell,
+                                    height = h,
+                                    innerW = cellInnerW,
+                                    fs = layout.fontScale,
+                                    onAxis = span.onAxis,
+                                    measure = measure,
+                                    dark = dark,
+                                    onClick = {
+                                        val overlapping = column.slots.filter {
+                                            it.lesson.startMinutes < span.cell.end && it.lesson.endMinutes > span.cell.start
+                                        }
+                                        onSelectCourse(
+                                            SelectedCourse(
+                                                day = column.day,
+                                                slots = overlapping,
+                                                cancelled = span.cell.cancelled,
+                                            ),
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class ComposeAxisItem(
+    val top: Float,
+    val height: Float,
+    val text: String,
+    val start: Boolean,
+    val unit: Int?,
+)
+
+@Composable
+private fun WeekAxis(
+    layout: GridLayout,
+    axisW: Float,
+    gridH: Float,
+    labelH: Float,
+    endH: Float,
+    measure: TextMeasure,
+    axisSp: Float,
+    unitSp: Float,
+    endSp: Float,
+) {
+    val unitH = measure.height("第1节", unitSp, false, 100f, 1)
+    val items = (layout.starts.map { (k, l) -> ComposeAxisItem(layout.bounds[k], labelH, l.time, true, l.unit) } +
+        layout.ends.map { (k, t) -> ComposeAxisItem(layout.bounds[k] - endH, endH, "–$t", false, null) })
+        .sortedWith(compareBy({ it.top }, { it.start }))
+    Box(modifier = Modifier.width(axisW.dp).height(gridH.dp)) {
+        items.forEachIndexed { i, item ->
+            val next = items.getOrNull(i + 1)?.top ?: gridH
+            val showUnit = item.start && item.unit != null && next - item.top >= labelH + unitH
+            Column(modifier = Modifier.offset(y = item.top.coerceAtLeast(0f).dp)) {
+                if (item.start) {
+                    Text(
+                        text = item.text,
+                        fontSize = axisSp.sp,
+                        lineHeight = (axisSp + 1f).sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (showUnit) {
+                        Text(
+                            text = "第${item.unit}节",
+                            fontSize = unitSp.sp,
+                            lineHeight = (unitSp + 1f).sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    Text(
+                        text = item.text,
+                        fontSize = endSp.sp,
+                        lineHeight = (endSp + 1f).sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeekCellCard(
+    cell: Cell,
+    height: Float,
+    innerW: Float,
+    fs: Float,
+    onAxis: Boolean,
+    measure: TextMeasure,
+    dark: Boolean,
+    onClick: () -> Unit,
+) {
+    val dim = cell.cancelled != null || cell.state == State.PAST
+    val live = cell.state == State.LIVE
+    val baseColor = parseColor(cell.color)
+    val bg = when {
+        live -> baseColor
+        dim -> MaterialTheme.colorScheme.surfaceVariant
+        dark -> mix(baseColor, Color(0xFF1A1A1D), 0.7f)
+        else -> mix(baseColor, Color.White, 0.84f)
+    }
+    val barColor = if (dim) MaterialTheme.colorScheme.outline else baseColor
+    val pieces = bestPieces(cell, height, measure, innerW, fs, onAxis)
+
     Row(
-        modifier = Modifier.alpha(if (slot.state == State.PAST) 0.45f else 1f),
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(6.dp))
+            .background(bg)
+            .clickable(onClick = onClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(barColor),
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+        ) {
+            var left = height - CHIP_PAD_V
+            for (p in pieces) {
+                val sp = p.size(fs)
+                val bold = pieceBold(p.kind)
+                var lines = p.maxLines
+                while (lines > 1 && measure.height(p.text, sp, bold, innerW, lines) > left) lines--
+                val h = measure.height(p.text, sp, bold, innerW, lines)
+                if (h > left + 0.5f) break
+                left -= h
+                val textColor = when {
+                    live -> Color.White
+                    cell.cancelled != null || p.kind == Kind.WAS -> WarmOrange
+                    dim -> MaterialTheme.colorScheme.onSurfaceVariant
+                    cell.lesson?.changed == true && (p.kind == Kind.NAME || p.kind == Kind.TIME) -> WarmOrange
+                    p.kind == Kind.NAME || p.kind == Kind.TIME ->
+                        if (dark) mix(baseColor, Color.White, 0.55f) else mix(baseColor, Color.Black, 0.4f)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Text(
+                    text = p.text,
+                    fontSize = sp.sp,
+                    lineHeight = (sp * 1.18f).sp,
+                    letterSpacing = if (p.kind == Kind.TIME) (-0.3).sp else 0.sp,
+                    fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = lines,
+                    overflow = TextOverflow.Ellipsis,
+                    color = textColor,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CourseDetailDialog(detail: SelectedCourse, onDismiss: () -> Unit) {
+    PopupCard(onDismissRequest = onDismiss) {
+        val dateText = "周${WEEKDAY[detail.day.weekday]} ${shortDate(detail.day.date)}" +
+            (detail.day.week?.let { " · 第 $it 周" } ?: "")
+        Text(dateText, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        detail.slots.forEachIndexed { idx, slot ->
+            val lesson = slot.lesson
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(parseColor(lesson.color)),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    lesson.name,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (lesson.changed) {
+                    Spacer(Modifier.width(6.dp))
+                    Tag("调课", WarmOrange)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            DetailLine(
+                "时间",
+                "${lesson.start}–${lesson.end}" +
+                    if (lesson.units.isNotEmpty()) "（第 ${lesson.units} 节）" else "",
+            )
+            DetailLine("地点", lesson.room.ifEmpty { "地点待定" })
+            if (lesson.was != null) {
+                DetailLine("原安排", lesson.was, highlight = true)
+            }
+            if (lesson.teachers.isNotEmpty()) {
+                DetailLine("教师", lesson.teachers)
+            }
+            if (idx != detail.slots.lastIndex) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 10.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                )
+            }
+        }
+        detail.cancelled?.let { c ->
+            if (detail.slots.isNotEmpty()) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 10.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(c.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Tag("停课", WarmOrange)
+            }
+            Spacer(Modifier.height(8.dp))
+            DetailLine("时间", "${c.start}–${c.end}")
+            if (c.room.isNotEmpty()) DetailLine("原教室", c.room)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+            ) { Text("知道了") }
+        }
+    }
+}
+
+@Composable
+private fun DetailLine(label: String, value: String, highlight: Boolean = false) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(56.dp),
+        )
+        Text(
+            value,
+            fontSize = 13.sp,
+            color = if (highlight) WarmOrange else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun LessonRow(slot: Slot, onClick: (() -> Unit)? = null) {
+    val lesson = slot.lesson
+    val timeWithUnits = if (lesson.units.isNotEmpty()) {
+        "${lesson.start}–${lesson.end} (${lesson.units}节)"
+    } else {
+        "${lesson.start}–${lesson.end}"
+    }
+    val meta = listOfNotNull(
+        timeWithUnits,
+        roomText(lesson.room, lesson.was),
+        lesson.teachers.takeIf { it.isNotEmpty() },
+    ).joinToString(" · ")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .alpha(if (slot.state == State.PAST) 0.45f else 1f),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -434,13 +935,14 @@ private fun LessonRow(slot: Slot) {
             }
             Spacer(Modifier.height(2.dp))
             Text(
-                "${lesson.start}–${lesson.end} · ${lesson.room.ifEmpty { "地点待定" }}",
+                meta,
                 fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                color = if (lesson.changed) WarmOrange else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        Spacer(Modifier.width(8.dp))
         when (slot.state) {
             State.LIVE -> Tag("上课中", LiveRed)
             State.NEXT -> Tag("下一节", MaterialTheme.colorScheme.primary)

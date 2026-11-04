@@ -13,6 +13,10 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Day
 import wiki.nufe.kebiao.data.Now
@@ -36,6 +40,13 @@ object Reminders {
     private const val MAX = 40             // 闹钟太多会被部分 ROM 限制
     private const val PREFS = "reminders"
     private const val SHOW_REQUEST_OFFSET = 100_000
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 供主线程 UI 开关、滚轮与权限回调调用，避免在主线程读盘与批量排闹钟造成卡顿。 */
+    fun rescheduleAsync(context: Context) {
+        val app = context.applicationContext
+        ioScope.launch { reschedule(app) }
+    }
 
     // 这些 ROM 会把普通精确闹钟放进弹性窗口；只有闹钟时钟能保证课前唤醒。
     private val ALARM_CLOCK_OEMS = listOf(
@@ -208,18 +219,31 @@ object Reminders {
 
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val app = context.applicationContext
+        fun redrawWidgets() {
+            val pending = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    Sync.redraw(app)
+                } finally {
+                    pending.finish()
+                }
+            }
+        }
         when (intent.action) {
             LiveUpdates.ACTION_START -> {
                 Diag.i("live update start alarm fired")
                 if (Reminders.canNotify(context)) LiveUpdates.startClass(context, intent)
+                redrawWidgets()
                 return
             }
             LiveUpdates.ACTION_END -> {
                 Diag.i("live update end alarm fired")
                 LiveUpdates.cancel(context)
+                redrawWidgets()
                 return
             }
-            Reminders.ACTION -> Unit
+            Reminders.ACTION -> redrawWidgets()
             else -> return
         }
         Diag.i("reminder alarm fired")
@@ -276,8 +300,16 @@ class ReminderReceiver : BroadcastReceiver() {
 /** 开机、更新 App、改时区后闹钟会丢：重排提醒并刷新小组件。 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        Reminders.reschedule(context)
-        Sync.schedule(context)
-        Sync.now(context)
+        val app = context.applicationContext
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                Reminders.reschedule(app)
+                Sync.schedule(app)
+                Sync.now(app)
+            } finally {
+                pending.finish()
+            }
+        }
     }
 }

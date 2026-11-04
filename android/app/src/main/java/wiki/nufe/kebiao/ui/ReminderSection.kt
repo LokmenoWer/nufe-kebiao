@@ -82,7 +82,7 @@ internal fun ReminderSection(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         canNotify = granted
-        Reminders.reschedule(context)
+        Reminders.rescheduleAsync(context)
     }
     val liveName = liveUpdateName()
     var batteryOk by remember { mutableStateOf(ignoringBatteryOptimizations(context)) }
@@ -90,6 +90,7 @@ internal fun ReminderSection(
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                canNotify = Reminders.canNotify(context)
                 batteryOk = ignoringBatteryOptimizations(context)
             }
         }
