@@ -21,6 +21,7 @@ import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.daysBetween
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.resolveDays
+import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.ui.MainActivity
 
@@ -35,6 +36,12 @@ object Reminders {
     private const val MAX = 40             // 闹钟太多会被部分 ROM 限制
     private const val MIN_GAP_MS = 60_000L // 不足 1 分钟就开始的不再响
     private const val PREFS = "reminders"
+    private const val SHOW_REQUEST_OFFSET = 100_000
+
+    // 这些 ROM 会把普通精确闹钟放进弹性窗口；只有闹钟时钟能保证课前唤醒。
+    private val ALARM_CLOCK_OEMS = listOf(
+        "oppo", "oneplus", "realme", "xiaomi", "redmi", "poco", "vivo", "iqoo", "huawei", "honor",
+    )
 
     data class Item(
         val atMs: Long,
@@ -103,7 +110,8 @@ object Reminders {
         )
     }
 
-    /** 按缓存里的课表整批重排。 */
+    /** 按缓存里的课表整批重排。启动恢复和后台同步可能同时进来，串行化避免互相抵消。 */
+    @Synchronized
     fun reschedule(context: Context) {
         val repo = Repository(context)
         val snapshot = repo.cached()
@@ -115,13 +123,52 @@ object Reminders {
         for (i in items.size until maxOf(previous, items.size)) {
             pending(context, i, null)?.let { alarms.cancel(it); it.cancel() }
         }
-        val exact = Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()
         items.forEachIndexed { i, item ->
-            val intent = pending(context, i, item)!!
-            if (exact) alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, item.atMs, intent)
-            else alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, item.atMs, intent)
+            schedule(context, item.atMs, i, pending(context, i, item)!!)
         }
-        prefs.edit().putInt("count", items.size).apply()
+        prefs.edit()
+            .putInt("count", items.size)
+            .putLong("next_at", items.firstOrNull()?.atMs ?: 0L)
+            .apply()
+        Diag.i("reminders scheduled=${items.size} alarmClock=${needsAlarmClock()}")
+    }
+
+    /** 上次排好的提醒数量和最近一次时间，诊断日志用来确认闹钟是否还在。 */
+    fun scheduledInfo(context: Context): Pair<Int, Long?> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getInt("count", 0) to prefs.getLong("next_at", 0L).takeIf { it > 0 }
+    }
+
+    /**
+     * 课前提醒也必须能唤醒进程：国产 ROM 上普通 setExact 会被延后，
+     * 用用户可见的闹钟时钟排，失败时再退回精确 / 非精确闹钟。
+     */
+    private fun schedule(context: Context, atMs: Long, requestCode: Int, pending: PendingIntent) {
+        val alarms = context.getSystemService(AlarmManager::class.java)
+        if (needsAlarmClock()) {
+            val show = PendingIntent.getActivity(
+                context,
+                requestCode + SHOW_REQUEST_OFFSET,
+                Intent(context, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val scheduled = runCatching {
+                alarms.setAlarmClock(AlarmManager.AlarmClockInfo(atMs, show), pending)
+            }.isSuccess
+            if (scheduled) return
+        }
+        if (Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()) {
+            val scheduled = runCatching {
+                alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
+            }.isSuccess
+            if (scheduled) return
+        }
+        alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
+    }
+
+    private fun needsAlarmClock(): Boolean {
+        val id = "${Build.MANUFACTURER} ${Build.BRAND}".lowercase()
+        return ALARM_CLOCK_OEMS.any { it in id }
     }
 
     /** item = null 只用来查找已有的同号闹钟（取消用）。 */
@@ -155,25 +202,40 @@ class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             LiveUpdates.ACTION_START -> {
+                Diag.i("live update start alarm fired")
                 if (Reminders.canNotify(context)) LiveUpdates.startClass(context, intent)
                 return
             }
             LiveUpdates.ACTION_END -> {
+                Diag.i("live update end alarm fired")
                 LiveUpdates.cancel(context)
                 return
             }
             Reminders.ACTION -> Unit
             else -> return
         }
-        if (!Reminders.canNotify(context)) return
+        Diag.i("reminder alarm fired")
+        if (!Reminders.canNotify(context)) {
+            Diag.w("reminder skipped: notification permission")
+            return
+        }
         val at = intent.getLongExtra("at", 0L)
         val repo = Repository(context)
-        if (!repo.alarmEnabled) return
+        if (!repo.alarmEnabled) {
+            Diag.i("reminder skipped: disabled")
+            return
+        }
         if (repo.liveUpdateEnabled &&
             runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
-        ) return
+        ) {
+            Diag.i("live update posted")
+            return
+        }
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
-        if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) return
+        if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) {
+            Diag.i("reminder skipped: stale")
+            return
+        }
         Reminders.ensureChannel(context)
         val open = PendingIntent.getActivity(
             context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
@@ -196,8 +258,9 @@ class ReminderReceiver : BroadcastReceiver() {
             .build()
         try {
             NotificationManagerCompat.from(context).notify((at / 60_000L).toInt(), notification)
+            Diag.i("reminder notification posted")
         } catch (_: SecurityException) {
-            // 通知权限在这之间被关掉了
+            Diag.w("reminder notification failed: security")
         }
     }
 }

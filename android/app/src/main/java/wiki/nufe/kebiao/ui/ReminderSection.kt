@@ -35,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -45,7 +46,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
@@ -55,6 +55,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import wiki.nufe.kebiao.R
@@ -82,6 +85,17 @@ internal fun ReminderSection(
         Reminders.reschedule(context)
     }
     val liveName = liveUpdateName()
+    var batteryOk by remember { mutableStateOf(ignoringBatteryOptimizations(context)) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                batteryOk = ignoringBatteryOptimizations(context)
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -196,6 +210,14 @@ internal fun ReminderSection(
                 contentPadding = PaddingValues(0.dp),
             ) { Text("允许准时提醒", fontSize = 12.sp) }
         }
+        if (alarmEnabled && !batteryOk) {
+            Spacer(Modifier.height(6.dp))
+            Hint("系统可能在后台冻结 App，导致提醒被推迟。")
+            TextButton(
+                onClick = { openBatteryOptimizationSettings(context) },
+                contentPadding = PaddingValues(0.dp),
+            ) { Text("允许后台运行", fontSize = 12.sp) }
+        }
     }
 }
 
@@ -211,7 +233,11 @@ internal fun TimeWheelDialog(
     PopupCard(onDismissRequest = onDismiss) {
         Text("上课前提示时间", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(2.dp))
-        Text("提前多久提醒你", fontSize = 12.sp, color = Color(0xFF77777D))
+        Text(
+            "提前多久提醒你",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Spacer(Modifier.height(8.dp))
         MinuteWheel(initial = start, onSelected = { selected = it })
         Spacer(Modifier.height(8.dp))
@@ -221,13 +247,15 @@ internal fun TimeWheelDialog(
         ) {
             TextButton(
                 onClick = onDismiss,
-                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF111111)),
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ),
             ) { Text("取消") }
             Button(
                 onClick = { onConfirm(selected) },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF111111),
-                    contentColor = Color.White,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 shape = RoundedCornerShape(14.dp),
             ) { Text("确定") }
@@ -256,7 +284,7 @@ private fun MinuteWheel(initial: Int, onSelected: (Int) -> Unit) {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("提前", fontSize = 17.sp, color = Color(0xFF77777D))
+        Text("提前", fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.width(14.dp))
         Box(Modifier.width(84.dp).height(220.dp)) {
             VerticalPager(
@@ -276,7 +304,11 @@ private fun MinuteWheel(initial: Int, onSelected: (Int) -> Unit) {
                         text = (page + 1).toString(),
                         fontSize = 30.sp,
                         fontWeight = if (page == pager.currentPage) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (page == pager.currentPage) Color(0xFF111111) else Color(0xFF77777D),
+                        color = if (page == pager.currentPage) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         textAlign = TextAlign.Center,
                         modifier = Modifier.graphicsLayer {
                             val p = distance.coerceAtMost(3f)
@@ -293,7 +325,7 @@ private fun MinuteWheel(initial: Int, onSelected: (Int) -> Unit) {
             }
         }
         Spacer(Modifier.width(14.dp))
-        Text("分钟", fontSize = 17.sp, color = Color(0xFF77777D))
+        Text("分钟", fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

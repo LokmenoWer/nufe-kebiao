@@ -13,9 +13,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.diag.Diag
+import wiki.nufe.kebiao.remind.Reminders
+import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 
@@ -31,6 +34,11 @@ class MainActivity : ComponentActivity() {
             KebiaoTheme {
                 AppRoot(incoming) { incoming = null }
             }
+        }
+        // 强制停止、覆盖安装都会清掉 AlarmManager 队列；每次打开都按缓存补回来。
+        lifecycleScope.launch(Dispatchers.IO) {
+            Reminders.reschedule(this@MainActivity)
+            Sync.schedule(this@MainActivity)
         }
         publishWidgetPreviews()
     }

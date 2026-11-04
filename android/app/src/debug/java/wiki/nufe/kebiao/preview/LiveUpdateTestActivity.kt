@@ -1,6 +1,7 @@
 package wiki.nufe.kebiao.preview
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -127,6 +128,11 @@ class LiveUpdateTestActivity : ComponentActivity() {
 
                         OutlinedButton(
                             modifier = Modifier.fillMaxWidth(),
+                            onClick = { scheduleAlarmTest() },
+                        ) { Text("15 秒后闹钟测试（按 Home 后等待）") }
+
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 LiveUpdates.cancel(this@LiveUpdateTestActivity)
                                 status = "已停止真实课程提醒。"
@@ -152,6 +158,9 @@ class LiveUpdateTestActivity : ComponentActivity() {
         if (intent.getBooleanExtra("fallback_test", false)) {
             window.decorView.post { sendReminderFallback() }
         }
+        if (intent.getBooleanExtra("alarm_test", false)) {
+            window.decorView.post { scheduleAlarmTest() }
+        }
         if (intent.getBooleanExtra("near_test", false)) {
             window.decorView.post { sendNearReminder() }
         }
@@ -174,6 +183,48 @@ class LiveUpdateTestActivity : ComponentActivity() {
             end = end.format(fmt),
         )
         status = "已安排 2 分钟后开课的测试；观察流体云是否在开课时切为“正在上课”，并在 5 分钟后收起。"
+    }
+
+    /** 走真实 AlarmManager，确认按 Home 退到后台后仍能唤醒进程发通知。 */
+    private fun scheduleAlarmTest() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        val at = System.currentTimeMillis() + 15_000L
+        val intent = Intent(this, ReminderReceiver::class.java)
+            .setAction(Reminders.ACTION)
+            .putExtra("at", at)
+            .putExtra("title", "闹钟测试")
+            .putExtra("text", "15 秒后唤醒测试")
+            .putExtra("date", Now.current().date)
+            .putExtra("start", "23:00")
+            .putExtra("end", "23:50")
+            .putExtra("name", "闹钟测试")
+            .putExtra("room", "A101")
+        val pending = PendingIntent.getBroadcast(
+            this, 990001, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val show = PendingIntent.getActivity(
+            this, 990002, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val alarms = getSystemService(AlarmManager::class.java)
+        val scheduled = runCatching {
+            alarms.setAlarmClock(AlarmManager.AlarmClockInfo(at, show), pending)
+        }.isSuccess
+        if (!scheduled) {
+            if (Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()) {
+                alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+            } else {
+                alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+            }
+        }
+        status = "已安排 15 秒后的真实闹钟，请按 Home 退到后台等待通知。"
     }
 
     /** 走真实的 ReminderReceiver：流体云不可用时应落到普通通知。 */

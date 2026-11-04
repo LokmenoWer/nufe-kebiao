@@ -82,10 +82,11 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
             Build.VERSION.SDK_INT < 36 || notificationManager?.canPostPromotedNotifications() == true,
         )
     }
+    var batteryOk by remember { mutableStateOf(ignoringBatteryOptimizations(context)) }
     var showPermissions by remember {
         mutableStateOf(
             !permissionPrefs.getBoolean("seen", false) &&
-                (!notificationsOk || !exactOk || !promotedOk),
+                (!notificationsOk || !exactOk || !promotedOk || !batteryOk),
         )
     }
 
@@ -104,6 +105,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                     exactAlarms?.canScheduleExactAlarms() == true
                 promotedOk = Build.VERSION.SDK_INT < 36 ||
                     notificationManager?.canPostPromotedNotifications() == true
+                batteryOk = ignoringBatteryOptimizations(context)
             }
         }
         lifecycle.addObserver(observer)
@@ -115,8 +117,8 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         permissionPrefs.edit().putBoolean("seen", true).apply()
     }
 
-    LaunchedEffect(notificationsOk, exactOk, promotedOk) {
-        if (showPermissions && notificationsOk && exactOk && promotedOk) {
+    LaunchedEffect(notificationsOk, exactOk, promotedOk, batteryOk) {
+        if (showPermissions && notificationsOk && exactOk && promotedOk && batteryOk) {
             markPermissionsSeen()
         }
     }
@@ -334,6 +336,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
             notificationsOk = notificationsOk,
             exactOk = exactOk,
             promotedOk = promotedOk,
+            batteryOk = batteryOk,
             onAllowNotifications = {
                 notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             },
@@ -351,6 +354,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                 )
             },
+            onOpenBattery = { openBatteryOptimizationSettings(context) },
             onDismiss = { markPermissionsSeen() },
         )
     }

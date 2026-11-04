@@ -43,9 +43,11 @@ internal fun PermissionSetupDialog(
     notificationsOk: Boolean,
     exactOk: Boolean,
     promotedOk: Boolean,
+    batteryOk: Boolean,
     onAllowNotifications: () -> Unit,
     onOpenExactAlarm: () -> Unit,
     onOpenPromoted: () -> Unit,
+    onOpenBattery: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -85,6 +87,13 @@ internal fun PermissionSetupDialog(
                         onClick = onOpenPromoted,
                     )
                 }
+                PermissionDialogRow(
+                    title = "后台运行",
+                    detail = "避免系统冻结、推迟上课提醒",
+                    allowed = batteryOk,
+                    action = "去设置",
+                    onClick = onOpenBattery,
+                )
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } },

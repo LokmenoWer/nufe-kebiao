@@ -1,6 +1,11 @@
 package wiki.nufe.kebiao.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -19,7 +24,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
@@ -38,8 +42,9 @@ internal fun PopupCard(
         }
         Surface(
             shape = RoundedCornerShape(28.dp),
-            color = Color.White,
-            contentColor = Color(0xFF111111),
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.75f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .graphicsLayer {
@@ -84,5 +89,22 @@ internal fun liveUpdateName(): String {
         "oppo" in name || "oneplus" in name || "realme" in name -> "流体云"
         "xiaomi" in name || "redmi" in name || "poco" in name -> "实时动态"
         else -> "系统实时提醒"
+    }
+}
+
+internal fun ignoringBatteryOptimizations(context: Context): Boolean =
+    context.getSystemService(PowerManager::class.java)
+        ?.isIgnoringBatteryOptimizations(context.packageName) == true
+
+/** 国产 ROM 的“允许后台运行”入口通常就是电池优化白名单；申请失败时退回列表页。 */
+internal fun openBatteryOptimizationSettings(context: Context) {
+    val direct = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}"),
+    )
+    runCatching { context.startActivity(direct) }.onFailure {
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
     }
 }
