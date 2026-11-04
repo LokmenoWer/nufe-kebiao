@@ -34,7 +34,6 @@ object Reminders {
     const val IN_CLASS_VISIBLE_MS = 5 * 60_000L  // 开课后保留 5 分钟，然后静默撤销
     private const val HORIZON_DAYS = 7     // 只排未来这么多天的；更远的等下次同步
     private const val MAX = 40             // 闹钟太多会被部分 ROM 限制
-    private const val MIN_GAP_MS = 60_000L // 不足 1 分钟就开始的不再响
     private const val PREFS = "reminders"
     private const val SHOW_REQUEST_OFFSET = 100_000
 
@@ -79,7 +78,8 @@ object Reminders {
         for (day in lessonDays(payload, now)) {
             for (lesson in day.lessons) {
                 val at = lessonMs(day.date, lesson.start) - lead * 60_000L
-                if (at - now.ms < MIN_GAP_MS) continue
+                // 每次打开 App 都会重排，快到点的也要留着，否则同号闹钟被覆盖后这节课就不响了
+                if (at <= now.ms) continue
                 val place = lesson.room.ifEmpty { "地点待定" }
                 val changed = if (lesson.changed) " · 已调课${lesson.was?.let { "（$it）" } ?: ""}" else ""
                 out += Item(
@@ -128,15 +128,23 @@ object Reminders {
         }
         prefs.edit()
             .putInt("count", items.size)
-            .putLong("next_at", items.firstOrNull()?.atMs ?: 0L)
+            .putString("times", items.joinToString(",") { it.atMs.toString() })
             .apply()
         Diag.i("reminders scheduled=${items.size} alarmClock=${needsAlarmClock()}")
     }
 
-    /** 上次排好的提醒数量和最近一次时间，诊断日志用来确认闹钟是否还在。 */
+    /**
+     * 上次重排记下的提醒里还没到点的数量和最近一次时间，写进诊断日志。
+     * 这是 App 自己的记录，系统不提供查询，不能说明闹钟此刻还在 AlarmManager 队列里。
+     */
     fun scheduledInfo(context: Context): Pair<Int, Long?> {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return prefs.getInt("count", 0) to prefs.getLong("next_at", 0L).takeIf { it > 0 }
+        val now = System.currentTimeMillis()
+        val times = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("times", null).orEmpty()
+            .split(',')
+            .mapNotNull { it.toLongOrNull() }
+            .filter { it > now }
+        return times.size to times.minOrNull()
     }
 
     /**
