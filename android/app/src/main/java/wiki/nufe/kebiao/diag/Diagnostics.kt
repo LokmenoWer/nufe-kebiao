@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.os.Process
 import android.util.Log
 import android.widget.Toast
@@ -80,6 +81,7 @@ object Diagnostics {
         val host = repo.widgetUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() }
         val todayIds = widgets.getAppWidgetIds(ComponentName(context, TodayReceiver::class.java)).size
         val weekIds = widgets.getAppWidgetIds(ComponentName(context, WeekReceiver::class.java)).size
+        val (alarmCount, nextAlarm) = Reminders.scheduledInfo(context)
         val payload = snapshot?.payload
 
         return buildString {
@@ -95,7 +97,14 @@ object Diagnostics {
             appendLine("服务状态：${payload?.status ?: "无"}")
             appendLine("设备已绑定：${repo.deviceId != null}")
             appendLine("提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
+            appendLine("提醒队列：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
+            appendLine(
+                "后台运行：${
+                    context.getSystemService(PowerManager::class.java)
+                        ?.isIgnoringBatteryOptimizations(context.packageName) == true
+                }",
+            )
             appendLine("准时提醒：${Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true}")
             appendLine(
                 "系统实时提醒：${
