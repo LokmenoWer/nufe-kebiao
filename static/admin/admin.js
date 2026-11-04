@@ -69,6 +69,7 @@ const fmtSize = (bytes) => (bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : "
 
 const VIA = { web: "网页", widget: "iOS 小组件", mobile: "安卓 App", ics: "日历" };
 const TRIGGER = { widget: "手机代抓", scheduled: "后台", manual: "手动", login: "登录" };
+const RELOAD_TRIGGER = { sighup: "SIGHUP 信号", admin: "后台手动", watch: "文件监听", manual: "手动" };
 const STATUS_PILL = {
   ok: ["正常", "pill-ok"],
   error: ["出错退避", "pill-warn"],
@@ -152,6 +153,13 @@ function attention(o) {
   if (st.error) out.push(["warn", `${st.error} 人刷新出错，正在退避重试`]);
   if (o.phone.failing) out.push(["warn", `${o.phone.failing} 人的手机代抓最近失败，由服务器兜底刷新`]);
   if (o.release_sync.failing) out.push(["warn", `读取 GitHub 发布列表失败（${o.release_sync.last_error}），正在给旧结果`]);
+  if (o.reload && o.reload.needs_restart) {
+    out.push(["warn", `热重载中途失败（${o.reload.last_reload_error}），模块可能新旧混杂，请尽快重启服务`]);
+  } else if (o.reload && o.reload.last_reload_error) {
+    out.push(["warn", `最近一次热重载失败（${o.reload.last_reload_error}），当前仍以第 ${o.reload.generation} 代代码运行`]);
+  } else if (o.reload && !o.reload.in_sync) {
+    out.push(["warn", "磁盘上的代码和正在运行的不一致，需要热重载或重启才会生效"]);
+  }
   return out;
 }
 
@@ -185,6 +193,19 @@ function phoneShare(r) {
   const phone = r.widget_ok || 0;
   const server = (r.scheduled_ok || 0) + (r.scheduled_fail || 0);
   return phone + server ? `${Math.round((phone / (phone + server)) * 100)}%` : "—";
+}
+
+function reloadText(rel) {
+  if (!rel) return "—";
+  const parts = [`第 ${rel.generation} 代`, `代码 ${rel.code_version}`];
+  if (rel.last_reload_at) {
+    const via = RELOAD_TRIGGER[rel.last_reload_trigger] || rel.last_reload_trigger || "";
+    parts.push(`最近重载于 ${fmtTime(rel.last_reload_at)}（${via ? `${via} · ` : ""}耗时 ${rel.last_reload_ms} ms）`);
+  } else {
+    parts.push("启动以来未重载");
+  }
+  if (rel.watcher_alive) parts.push("文件监听运行中");
+  return parts.join(" · ");
 }
 
 function renderOverview(o) {
@@ -221,6 +242,7 @@ function renderOverview(o) {
       ["已运行", `${fmtDuration(o.now - o.started_at)}（启动于 ${fmtTime(o.started_at)}）`],
       // Windows 上没有峰值内存（max_rss_mb 为 null），只显示 PID
       ["进程", `PID ${o.pid}${o.max_rss_mb == null ? "" : ` · 峰值内存 ${o.max_rss_mb} MB`}`],
+      ["热重载", reloadText(o.reload)],
       ["数据库", `${o.db_mb} MB`],
       ["Python", `${o.python} · ${o.platform}`]),
   ];
@@ -487,8 +509,22 @@ function showDashboard() {
     showLogin();
   } }, "退出");
   const refresh = h("button", { class: "btn btn-sm", type: "button", onclick: () => load() }, "刷新");
+  const hotReload = h("button", { class: "btn btn-sm", type: "button", onclick: async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await api("api/admin/reload", { method: "POST" });
+      showToast(`热重载完成：第 ${res.generation} 代（${res.last_reload_ms} ms）`, { type: "success" });
+      load();
+    } catch (err) {
+      showToast(err.message, { type: "error" });
+      load();
+    } finally {
+      btn.disabled = false;
+    }
+  } }, "热重载");
   replace(app, h("div", { class: "adm" },
-    h("header", { class: "adm-head" }, h("h1", "服务器管理"), stamp, refresh, logout),
+    h("header", { class: "adm-head" }, h("h1", "服务器管理"), stamp, refresh, hotReload, logout),
     tabs, body));
   enterTab(tab);
   startPolling();

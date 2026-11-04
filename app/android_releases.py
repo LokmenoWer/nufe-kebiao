@@ -31,13 +31,13 @@ TIMEOUT = 8
 
 CACHE_DIR = Path(DB_PATH).parent / "android-apk"
 
-_releases: list[dict] = []
-_next_refresh = 0.0
-_last_ok_at: float | None = None
-_last_error_at: float | None = None
-_last_error: str | None = None
-_refresh_lock = threading.Lock()
-_download_lock = threading.Lock()
+_releases: list[dict] = globals().get("_releases") if "_releases" in globals() else []
+_next_refresh: float = globals().get("_next_refresh", 0.0)
+_last_ok_at: float | None = globals().get("_last_ok_at")
+_last_error_at: float | None = globals().get("_last_error_at")
+_last_error: str | None = globals().get("_last_error")
+_refresh_lock: threading.Lock = globals().get("_refresh_lock") or threading.Lock()
+_download_lock: threading.Lock = globals().get("_download_lock") or threading.Lock()
 
 
 class MirrorError(Exception):

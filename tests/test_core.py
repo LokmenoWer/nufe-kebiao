@@ -984,3 +984,113 @@ def test_widget_poll_after_follows_due_and_tightens_near_class():
     # 已经到期：尽快来，但不低于下限
     requested = rp.Signals(**seen, next_class_at=now + 2 * rp.HOUR, refresh_requested_at=now)
     assert rp.widget_poll_after(requested, now) == rp.WIDGET_POLL_MIN
+
+
+def test_rate_limiter_bounded_and_preserves_state():
+    from app import security
+    lim = security.RateLimiter(limit=2, window=60, max_keys=3)
+    assert lim.hit("k1") and lim.hit("k1") and not lim.hit("k1")
+    assert lim.hit("k2") and lim.hit("k3") and lim.hit("k4")
+    # 超过 max_keys：淘汰最老的未到限额的 k2；已被限速的 k1 不会被灌入的新键冲掉
+    assert len(lim._hits) == 3 and "k2" not in lim._hits and not lim.hit("k1")
+    # 热重载时传入旧实例：限流桶原样继承
+    reloaded = security.RateLimiter(limit=2, window=60, max_keys=3, prev=lim)
+    assert reloaded._hits is lim._hits
+
+
+def test_presence_bounded_and_preserves_state(monkeypatch):
+    from app import presence
+    presence._presence.clear()
+    presence._visitors.clear()
+    monkeypatch.setattr(presence, "MAX_TRACKED", 5)
+    for i in range(10):
+        presence.mark_user(i + 1, "web")
+        presence.mark_visitor(f"10.0.0.{i}")
+    assert len(presence._presence) == 5 and len(presence._visitors) == 5
+    assert 1 not in presence._presence and 10 in presence._presence
+
+
+def test_admin_verify_password_caps_iterations():
+    from app import admin
+    excessive = f"pbkdf2_sha256${admin.MAX_PBKDF2_ITERATIONS + 1}$" + base64.b64encode(b"0" * 16).decode() + "$" + base64.b64encode(b"0" * 32).decode()
+    assert not admin.verify_password("anything", excessive)
+
+
+def test_merge_phone_cookies_filters_bad_chars():
+    from app import service
+    jar = [
+        {"name": "SESSION", "value": "jw-old", "domain": "jwxt.nufe.edu.cn", "path": "/student"},
+        {"name": "CASTGC", "value": "tgc-1", "domain": "authserver.nufe.edu.cn", "path": "/authserver"},
+    ]
+    # 含分号、控制字符或超长的值一律拒绝，合法新值正常更新
+    merged = service._merge_phone_cookies(jar, [
+        {"name": "SESSION", "value": "bad;injected=1"},
+        {"name": "SESSION", "value": "bad\r\ninjected"},
+        {"name": "SESSION", "value": "x" * 4097},
+    ])
+    assert {c["name"]: c["value"] for c in merged}["SESSION"] == "jw-old"
+    merged2 = service._merge_phone_cookies(jar, [{"name": "SESSION", "value": "jw-clean"}])
+    assert {c["name"]: c["value"] for c in merged2}["SESSION"] == "jw-clean"
+
+
+def test_ics_fold_fast_path_and_utf8_boundary():
+    short = "SUMMARY:高等数学"
+    assert ics._fold(short) == short
+    long_line = "DESCRIPTION:" + "数" * 40
+    folded = ics._fold(long_line)
+    for part in folded.split("\r\n"):
+        assert len(part.encode("utf-8")) <= 75
+    assert folded.replace("\r\n ", "") == long_line
+
+
+def test_rate_limiter_falls_back_to_oldest_when_all_saturated():
+    from app import security
+    lim = security.RateLimiter(limit=1, window=60, max_keys=2)
+    assert lim.hit("a") and lim.hit("b") and lim.hit("c")
+    assert len(lim._hits) == 2 and "a" not in lim._hits
+
+
+def test_dotenv_sync_applies_removals_but_keeps_explicit_env(monkeypatch):
+    import os
+
+    from app import config
+    monkeypatch.setenv("KB_PROBE_EXPLICIT", "from-env")
+    monkeypatch.setattr(config, "_initial_env", {*config._initial_env, "KB_PROBE_EXPLICIT"})
+    loaded = config._dotenv_loaded
+    try:
+        config._sync_dotenv({"KB_PROBE_A": "1", "KB_PROBE_B": "2", "KB_PROBE_EXPLICIT": "from-file", "KB_PROBE_NONE": None})
+        assert os.environ["KB_PROBE_A"] == "1" and os.environ["KB_PROBE_EXPLICIT"] == "from-env"
+        assert "KB_PROBE_NONE" not in os.environ
+        config._sync_dotenv({"KB_PROBE_B": "3"})
+        assert "KB_PROBE_A" not in os.environ and os.environ["KB_PROBE_B"] == "3"
+    finally:
+        os.environ.pop("KB_PROBE_A", None)
+        os.environ.pop("KB_PROBE_B", None)
+        config._dotenv_loaded = loaded
+
+
+def test_reload_order_covers_every_app_module():
+    from pathlib import Path
+
+    from app import reloader
+    names = {p.stem for p in Path(reloader.APP_DIR).glob("*.py")} - {"__init__", "cli", "reloader"}
+    assert names == {m.removeprefix("app.") for m in reloader._RELOAD_ORDER}
+
+
+def test_scheduler_start_fills_in_missing_threads(monkeypatch):
+    from app import scheduler
+    scheduler.stop()
+    monkeypatch.setattr(scheduler, "SCHEDULER_TICK", 0.01)
+    monkeypatch.setattr(scheduler.service, "housekeeping", lambda: None)
+    monkeypatch.setattr(scheduler, "run_once", lambda: 0)
+    try:
+        scheduler.start(refresh=False)
+        assert set(scheduler.alive()) == {"qr-pump"}
+        scheduler.start(refresh=True)
+        assert scheduler.alive() == {"qr-pump": True, "refresh-scheduler": True}
+        refresh_thread = next(t for t in scheduler._threads if t.name == "refresh-scheduler")
+        scheduler.start(refresh=False)  # SCHEDULER_ENABLED 被关掉：下个 tick 自行退出
+        refresh_thread.join(timeout=2)
+        assert not refresh_thread.is_alive() and set(scheduler.alive()) == {"qr-pump"}
+    finally:
+        scheduler.stop()

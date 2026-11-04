@@ -9,15 +9,26 @@ import time
 from . import db
 
 ONLINE_WINDOW = 300            # 秒：多久内有请求算“在线”
+MAX_TRACKED = 5000             # 在线字典硬上限：防扫描/洪水撑大内存
 
-_presence: dict[int, tuple[float, str]] = {}   # uid -> (最近请求时刻, 渠道 web / widget / mobile / ics)
-_visitors: dict[str, float] = {}               # IP 的哈希 -> 最近请求时刻（含未登录的访客）
-_presence_lock = threading.Lock()
+_presence: collections.OrderedDict[int, tuple[float, str]] = (
+    globals()["_presence"] if isinstance(globals().get("_presence"), collections.OrderedDict)
+    else collections.OrderedDict(globals().get("_presence") or {})
+)
+_visitors: collections.OrderedDict[str, float] = (
+    globals()["_visitors"] if isinstance(globals().get("_visitors"), collections.OrderedDict)
+    else collections.OrderedDict(globals().get("_visitors") or {})
+)
+_presence_lock: threading.Lock = globals().get("_presence_lock") or threading.Lock()
 
 
 def mark_user(uid: int, via: str) -> None:
+    now = time.time()
     with _presence_lock:
-        _presence[uid] = (time.time(), via)
+        _presence[uid] = (now, via)
+        _presence.move_to_end(uid)
+        while len(_presence) > MAX_TRACKED:
+            _presence.popitem(last=False)
 
 
 def mark_visitor(ip: str) -> None:
@@ -25,9 +36,12 @@ def mark_visitor(ip: str) -> None:
     now = time.time()
     with _presence_lock:
         _visitors[key] = now
-        if len(_visitors) > 5000:
-            for k in [k for k, t in _visitors.items() if now - t > ONLINE_WINDOW]:
-                del _visitors[k]
+        _visitors.move_to_end(key)
+        while _visitors:
+            oldest_k, oldest_t = next(iter(_visitors.items()))
+            if now - oldest_t <= ONLINE_WINDOW and len(_visitors) <= MAX_TRACKED:
+                break
+            del _visitors[oldest_k]
 
 
 def online(now: float | None = None) -> dict:

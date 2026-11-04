@@ -166,10 +166,11 @@ UPCOMING_DAYS = 14
 
 
 def upcoming(today: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict,
-             changes: list | None = None) -> dict | None:
+             changes: list | None = None, precomputed: dict[str, dict] | None = None) -> dict | None:
     """今天之后第一个有课的日子（两周内）：周末 / 放假前小组件可以提示“下次上课”。"""
     for i in range(1, UPCOMING_DAYS + 1):
-        d = _day(today + dt.timedelta(days=i), activities, week1, units, colors, changes)
+        target = today + dt.timedelta(days=i)
+        d = (precomputed or {}).get(target.isoformat()) or _day(target, activities, week1, units, colors, changes)
         if d["lessons"]:
             return d
     return None
@@ -235,9 +236,11 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
     colors = color_map(activities)
     recent = recent_changes(changes, (view or {}).get("semester_id"), now)
     monday = today - dt.timedelta(days=today.weekday())
-    today_d = _day(today, activities, week1, units, colors, recent)
-    tomorrow_d = _day(today + dt.timedelta(days=1), activities, week1, units, colors, recent)
     this_week = _week_block(monday, activities, week1, units, colors, recent)
+    next_week = _week_block(monday + dt.timedelta(days=7), activities, week1, units, colors, recent)
+    known_days = {d["date"]: d for d in (*this_week["days"], *next_week["days"])}
+    today_d = known_days[today.isoformat()]
+    tomorrow_d = known_days[(today + dt.timedelta(days=1)).isoformat()]
     return {
         "v": PAYLOAD_VERSION,
         "now": now.isoformat(timespec="seconds"),
@@ -251,9 +254,9 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
         "tomorrow": tomorrow_d,
         "week": this_week,
         # 周末本周已经没课时，week 模式改看下周
-        "next_week": _week_block(monday + dt.timedelta(days=7), activities, week1, units, colors, recent),
+        "next_week": next_week,
         "term": term_bounds(activities, week1),
-        "upcoming": upcoming(today, activities, week1, units, colors, recent),
+        "upcoming": upcoming(today, activities, week1, units, colors, recent, known_days),
         "next_change": next_change(now, [today_d, tomorrow_d]),
         # 最近一次发现调课的时刻：脚本据此在标题栏提示，并提醒到 Scriptable 里重排上课通知
         "changed_at": max((ev["at"] for ev in recent), default=None),

@@ -213,6 +213,7 @@ def up(monkeypatch):
     with db.tx() as c:
         c.execute("DELETE FROM users")
         c.execute("DELETE FROM semesters")  # 别让上一个用例写的开学日期漏到下一个
+        c.execute("DELETE FROM admin_sessions")
     service._locks.clear()
     service._pending.clear()
     service._completed.clear()
@@ -1854,7 +1855,6 @@ def _give_jwxt_session(sid, value="jw-1"):
 
 @pytest.fixture
 def widget_user(up):
-    service._widget_tasks.clear()
     c = TestClient(app)
     _login(c, "2023001")
     _give_jwxt_session("2023001")
@@ -2277,7 +2277,8 @@ def test_widget_link_alone_gets_no_fetch_task(widget_user, up):
         data = r.json()
         assert r.status_code == 200 and "fetch" not in data and "SESSION=jw-1" not in r.text
         assert "delegate" not in data and "poll_after" not in data and data["fetch_key_required"] is True
-    assert not service._widget_tasks and _row("2023001", "widget_fetch_pending_until")[0] is None
+    assert db.connect().execute("SELECT COUNT(*) FROM widget_tasks").fetchone()[0] == 0
+    assert _row("2023001", "widget_fetch_pending_until")[0] is None
     assert data["refresh"]["pending"] is True
     # 链接换不到密钥：自我更新的脚本里没有，也不能凭 token 算出来
     key = crypto.widget_fetch_key(token)
@@ -2428,13 +2429,13 @@ def test_widget_fetch_pref(widget_user, up):
 def test_widget_task_lapses_count_as_failure(widget_user, up):
     _c, path = widget_user
     task = _keyed_get(path).json()["fetch"]
-    service._widget_tasks[task["id"]].expires_at = db.now() - 1
+    with db.tx() as conn:
+        conn.execute("UPDATE widget_tasks SET expires_at=? WHERE task_id=?", (db.now() - 1, task["id"]))
     assert _keyed_get(path).json()["fetch"]["id"] != task["id"]
     assert _row("2023001", "widget_fetch_fails")[0] == 1
 
 
 def test_widget_no_task_without_jwxt_session(up):
-    service._widget_tasks.clear()
     c = TestClient(app)
     _login(c, "2023001")  # 只有 CASTGC：续期只能服务器做
     path = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].removeprefix("http://testserver")
@@ -2598,3 +2599,245 @@ def test_keepalive_saves_cookies_when_only_sso_answers(up, monkeypatch):
     from app import crypto
     assert any(ck["name"] == "route" and ck["value"] == "new"
                for ck in crypto.decrypt_json(after, "cookies", uid))
+
+
+# ---------- 热重载与安全/性能加固 ----------
+
+def test_hot_reload_preserves_inflight_login_admin_session_and_widget_tasks(widget_user, up):
+    from app import reloader
+    c_user, widget_path = widget_user
+    task = _keyed_get(widget_path).json()["fetch"]
+
+    # 1. 启动一个卡在图形验证码的半途登录流程
+    up.flow_captcha.add("2023002")
+    c_login = TestClient(app)
+    r_login = _login(c_login, "2023002").json()
+    assert r_login["need"] == "captcha"
+    flow_id = r_login["flow_id"]
+
+    # 2. 管理员登录
+    c_admin = TestClient(app)
+    r_admin = _admin(c_admin)
+    assert r_admin.status_code == 200
+    csrf = r_admin.json()["csrf"]
+    before_gen = c_admin.get("/api/admin/overview").json()["reload"]["generation"]
+
+    # 注册热重载后钩子以恢复测试打桩（与 demo_server 一致）
+    def _repatch():
+        cas.login = up.login
+        cas.LoginFlow = FakeFlow
+        jwxt.fetch_timetable = up.fetch
+        cas.renew_with_tgc = up.renew
+        cas.touch_sso = up.touch_sso
+        jwxt.touch = up.touch_jwxt
+        service.MANUAL_REFRESH_MIN_GAP = 0
+        service.MANUAL_REFRESH_FRESH_SECONDS = 0
+
+    reloader.register_post_reload(_repatch)
+    try:
+        # 3. 缺少 CSRF 时拒绝热重载
+        assert c_admin.post("/api/admin/reload", headers=ORIGIN).status_code == 403
+        # 4. 触发进程内热重载
+        res = c_admin.post("/api/admin/reload", headers={**ORIGIN, "X-CSRF-Token": csrf})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["ok"] is True
+        assert body["generation"] == before_gen + 1
+        assert body["last_reload_trigger"] == "admin"
+        assert body["last_reload_error"] is None
+        assert body["code_version"].startswith("sha-")
+
+        # 5. 热重载后：管理员会话未丢失（已落库 SQLite）
+        ov = c_admin.get("/api/admin/overview")
+        assert ov.status_code == 200
+        assert ov.json()["reload"]["generation"] == before_gen + 1
+
+        # 6. 热重载后：正在进行中的验证码登录流程完好无损，直接提交验证码即可完成登录
+        ok_login = c_login.post("/api/login/captcha", headers=ORIGIN, json={"flow_id": flow_id, "captcha": "abcd"})
+        assert ok_login.status_code == 200 and ok_login.json()["ok"] is True
+        assert c_login.get("/api/me").json()["student_id"] == "2023002"
+
+        # 7. 热重载后：手机小组件已领走的代抓任务仍在 SQLite 中，回传照常落库
+        up_res = _upload(widget_path, {
+            "id": task["id"],
+            "course_html": COURSE_HTML,
+            "print_data": _print_data(room="D404"),
+            "final_urls": ["https://jwxt.nufe.edu.cn/student/for-std/course-table"],
+        })
+        assert up_res.status_code == 200 and up_res.json()["ok"] is True
+        assert c_user.get("/api/timetable").json()["activities"][0]["room"] == "D404"
+    finally:
+        if _repatch in reloader._post_reload_hooks:
+            reloader._post_reload_hooks.remove(_repatch)
+
+
+def test_hot_reload_rejects_real_syntax_error(up, monkeypatch, tmp_path):
+    from app import reloader
+    c_admin = TestClient(app)
+    csrf = _admin(c_admin).json()["csrf"]
+    before_gen = reloader.status()["generation"]
+    bad = tmp_path / "broken.py"
+    bad.write_text("def broken(:\n", "utf-8")
+    monkeypatch.setattr(reloader, "_py_files", lambda: [bad])
+    monkeypatch.setattr(reloader.importlib, "reload", lambda _m: pytest.fail("预检失败不应碰线上模块"))
+    r = c_admin.post("/api/admin/reload", headers={**ORIGIN, "X-CSRF-Token": csrf})
+    assert r.status_code == 400 and "语法错误（broken.py:1）" in r.json()["detail"]
+    st = reloader.status()
+    assert st["generation"] == before_gen and "语法错误" in st["last_reload_error"] and st["needs_restart"] is False
+    assert c_admin.get("/healthz").json()["ok"] is True
+
+
+def test_hot_reload_import_failure_is_caught_before_touching_modules(up, monkeypatch):
+    from app import reloader
+    before_gen = reloader.status()["generation"]
+    monkeypatch.setattr(reloader, "_PREFLIGHT_CODE", "raise RuntimeError('boom at import')")
+    monkeypatch.setattr(reloader.importlib, "reload", lambda _m: pytest.fail("预检失败不应碰线上模块"))
+    with pytest.raises(reloader.ReloadError, match="boom at import"):
+        reloader.reload("test")
+    st = reloader.status()
+    assert st["generation"] == before_gen and st["needs_restart"] is False
+
+
+def test_hot_reload_failure_after_preflight_flags_restart(up, monkeypatch):
+    from app import reloader
+    monkeypatch.setattr(reloader, "_preflight", lambda: None)
+
+    def boom(_mod):
+        raise RuntimeError("late failure")
+
+    monkeypatch.setattr(reloader.importlib, "reload", boom)
+    with pytest.raises(reloader.ReloadError):
+        reloader.reload("test")
+    assert reloader.status()["needs_restart"] is True
+    monkeypatch.undo()
+    reloader._needs_restart = False
+    reloader._last_reload_error = None
+
+
+def test_hot_reload_refuses_when_reloader_itself_changed(up, monkeypatch):
+    from app import reloader
+    monkeypatch.setattr(reloader, "_self_hash", "changed-on-disk")
+    with pytest.raises(reloader.ReloadError, match="需要重启"):
+        reloader.reload("test")
+    monkeypatch.undo()
+    reloader._last_reload_error = None
+
+
+def test_hot_reload_status_reports_running_version_not_disk(up, monkeypatch):
+    import json
+    import os
+
+    from app import reloader
+    running = reloader.status()["code_version"]
+    monkeypatch.setattr(reloader, "_disk_version", lambda: "sha-newondisk")
+    st = reloader.status()
+    assert st["code_version"] == running and st["disk_version"] == "sha-newondisk" and st["in_sync"] is False
+    reloader._write_status()
+    saved = json.loads(reloader.status_file().read_text("utf-8"))
+    assert saved["in_sync"] is False and saved["pid"] == os.getpid()
+
+
+def test_hot_reload_swaps_in_new_classes_for_kept_instances(up):
+    import logging
+
+    from app import admin, reloader, scheduler
+    admin.install_log_capture()
+    logging.getLogger("kebiao.test").warning("before reload marker")
+    scheduler._budget.rate = 0.123
+    old_budget_cls, old_ring_cls = type(scheduler._budget), type(admin.ring)
+    gateway = main.app
+
+    def _repatch():
+        service.MANUAL_REFRESH_MIN_GAP = 0
+        service.MANUAL_REFRESH_FRESH_SECONDS = 0
+        cas.login, cas.LoginFlow = up.login, FakeFlow
+        jwxt.fetch_timetable = up.fetch
+
+    reloader.register_post_reload(_repatch)
+    try:
+        reloader.reload("test")
+    finally:
+        reloader._post_reload_hooks.remove(_repatch)
+    assert main.app is gateway
+    assert type(scheduler._budget) is scheduler.Budget is not old_budget_cls and scheduler._budget.rate == 0.123
+    assert type(admin.ring) is admin.RingHandler is not old_ring_cls
+    assert any("before reload marker" in r["message"] for r in admin.ring.records)
+    root = logging.getLogger()
+    assert [h for h in root.handlers if type(h).__name__ == "RingHandler"] == [admin.ring]
+    filters = [f for f in logging.getLogger("uvicorn.access").filters if type(f).__name__ == "_RedactTokenPaths"]
+    assert len(filters) == 1 and type(filters[0]) is main._RedactTokenPaths
+
+
+def test_changing_admin_password_invalidates_existing_sessions(up, monkeypatch):
+    from app import admin
+    c = TestClient(app)
+    assert _admin(c).status_code == 200
+    assert c.get("/api/admin/overview").status_code == 200
+    monkeypatch.setattr(admin, "ADMIN_PASSWORD_HASH", admin.hash_password("rotated", 1000))
+    assert c.get("/api/admin/overview").status_code == 401
+    assert _admin(c, pw="rotated").status_code == 200
+    assert c.get("/api/admin/overview").status_code == 200
+
+
+def test_me_queues_refresh_for_returning_dormant_user(up):
+    c = TestClient(app)
+    _login(c, "2023001")
+    uid = service_uid("2023001")
+    now = db.now()
+    # 沉寂 45 天，数据 12 小时前刷过：按沉寂算还不到期，按“刚回来”算已经逾期
+    with db.tx() as conn:
+        conn.execute("UPDATE users SET last_seen_at=?, last_success_at=?, refresh_requested_at=NULL WHERE id=?",
+                     (now - 45 * 86400, now - 12 * 3600, uid))
+    service._touched.clear()
+    assert c.get("/api/me").status_code == 200
+    assert _row("2023001", "refresh_requested_at")[0] is not None
+
+
+def test_wait_reload_script(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = str(Path(main.__file__).resolve().parent.parent / "deploy" / "wait_reload.py")
+    status = tmp_path / "reload-status.json"
+
+    def run():
+        return subprocess.run([sys.executable, script, str(status), "0.5"], capture_output=True, text=True,
+                              check=False).returncode
+
+    assert run() == 1  # 超时：服务没写结果
+    for data, code in (({"in_sync": True, "last_reload_error": None, "needs_restart": False}, 0),
+                       ({"in_sync": True, "last_reload_error": "语法错误", "needs_restart": False}, 1),
+                       ({"in_sync": True, "last_reload_error": None, "needs_restart": True}, 1),
+                       ({"in_sync": False, "last_reload_error": None, "needs_restart": False}, 1)):
+        status.write_text(json.dumps(data), "utf-8")
+        assert run() == code, data
+
+
+def test_widget_upload_rejected_early_when_no_active_task(widget_user, up):
+    _c, path = widget_user
+    r = _upload(path, {"id": "any", "course_html": COURSE_HTML, "print_data": _print_data()})
+    assert r.status_code == 400 and "任务不存在" in r.json()["detail"]
+    m_path = path.replace("/widget/", "/mobile/").removesuffix(".json") + "/upload"
+    r_m = TestClient(app).post(m_path, json={"id": "any"})
+    assert r_m.status_code == 400 and "任务不存在" in r_m.json()["detail"]
+
+
+def test_pending_login_capacity_cap_evicts_oldest_and_wipes_password(up, monkeypatch):
+    monkeypatch.setattr(service, "MAX_PENDING_FLOWS", 3)
+    up.flow_captcha.add("2023001")
+    fids = []
+    flows = []
+    for _ in range(4):
+        from app import security
+        security.login_by_ip._hits.clear()
+        security.login_by_student._hits.clear()
+        c = TestClient(app)
+        fid = _login(c, "2023001").json()["flow_id"]
+        fids.append(fid)
+        flows.append(service._pending[fid].flow)
+    assert len(service._pending) == 3
+    assert fids[0] not in service._pending
+    assert flows[0].password == ""  # 被挤出的半途流程立即擦除内存中的明文密码
+    assert fids[-1] in service._pending

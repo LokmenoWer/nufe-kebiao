@@ -23,6 +23,8 @@ def _esc(s: str) -> str:
 
 def _fold(line: str) -> str:
     """RFC5545：每行最多 75 字节，续行以空格开头（不在 UTF-8 字符中间切断）。"""
+    if len(line.encode()) <= 75:
+        return line
     out, cur = [], b""
     for ch in line:
         b = ch.encode()

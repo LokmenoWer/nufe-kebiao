@@ -44,10 +44,10 @@ class Mail:
     body: str
 
 
-_queue: queue.Queue[Mail | None] = queue.Queue(maxsize=_QUEUE_MAX)
-_thread: threading.Thread | None = None
-_thread_lock = threading.Lock()
-_stop = threading.Event()
+_queue: queue.Queue[Mail | None] = globals().get("_queue") or queue.Queue(maxsize=_QUEUE_MAX)
+_thread: threading.Thread | None = globals().get("_thread")
+_thread_lock: threading.Lock = globals().get("_thread_lock") or threading.Lock()
+_stop: threading.Event = globals().get("_stop") or threading.Event()
 
 
 def mask(address: str) -> str:

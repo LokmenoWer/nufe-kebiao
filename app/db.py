@@ -118,14 +118,28 @@ CREATE TABLE IF NOT EXISTS mobile_pairings (
     code_hash  TEXT NOT NULL,       -- 一次性配对码的哈希
     expires_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS widget_tasks (
+    task_id     TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    semester_id INTEGER NOT NULL,
+    expires_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash  TEXT PRIMARY KEY,
+    csrf        TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_mobile_devices_user ON mobile_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_widget_tasks_user ON widget_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_users_next ON users(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_log_user ON refresh_log(user_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
-_local = threading.local()
+_local: threading.local = globals().get("_local") or threading.local()
 
 
 def _open() -> sqlite3.Connection:
@@ -134,6 +148,8 @@ def _open() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -8000")
     conn.execute("PRAGMA busy_timeout = 15000")
     return conn
 

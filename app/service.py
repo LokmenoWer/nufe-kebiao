@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import random
+import re
 import secrets
 import threading
 import time
@@ -38,7 +39,7 @@ from .polite import PoliteSession, UpstreamCooldown, UpstreamYield, dump_cookies
 
 log = logging.getLogger("kebiao.service")
 
-_locks: defaultdict[int, threading.Lock] = defaultdict(threading.Lock)
+_locks: defaultdict[int, threading.Lock] = globals().get("_locks") or defaultdict(threading.Lock)
 
 
 class NeedsRebind(Exception):
@@ -75,6 +76,7 @@ class LoginRejected(Exception):
 # 未完成的登录流程（含 requests 会话，以及仅在用户选择保存时的密码）只放在内存里，5 分钟过期，不落库。
 
 PENDING_TTL = 300
+MAX_PENDING_FLOWS = 200
 MAX_VERIFY_ATTEMPTS = 5
 MAX_SMS_SENDS = 3
 MAX_QR_REFRESHES = 10
@@ -99,11 +101,11 @@ class PendingLogin:
     poll_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-_pending: dict[str, PendingLogin] = {}
-_pending_lock = threading.RLock()
+_pending: dict[str, PendingLogin] = globals().get("_pending") if "_pending" in globals() else {}
+_pending_lock: threading.RLock = globals().get("_pending_lock") or threading.RLock()
 # 后台轮询完成登录后，下一次 HTTP poll 从这里取结果（flow_id → (到期时间, 返回值)）
-_completed: dict[str, tuple[float, dict]] = {}
-_ics_cache: dict[int, tuple[tuple, str, str]] = {}
+_completed: dict[str, tuple[float, dict]] = globals().get("_completed") if "_completed" in globals() else {}
+_ics_cache: dict[int, tuple[tuple, str, str]] = globals().get("_ics_cache") if "_ics_cache" in globals() else {}
 
 
 def _purge_pending() -> None:
@@ -119,6 +121,13 @@ def _purge_pending() -> None:
 
 def _track(p: PendingLogin) -> None:
     with _pending_lock:
+        if len(_pending) >= MAX_PENDING_FLOWS and p.flow_id not in _pending:
+            _purge_pending()
+            while len(_pending) >= MAX_PENDING_FLOWS:
+                oldest_id = min(_pending, key=lambda k: _pending[k].expires_at)
+                evicted = _pending.pop(oldest_id)
+                evicted.flow.wipe_password()
+                evicted.password_to_store = None
         _pending[p.flow_id] = p
 
 
@@ -357,6 +366,9 @@ def _advance(p: PendingLogin, step, stash: bool = False) -> dict:
     if stash:
         # 与移出 _pending 放在同一把锁里，HTTP poll 不会看到“两边都没有”
         with _pending_lock:
+            while len(_completed) >= MAX_PENDING_FLOWS and p.flow_id not in _completed:
+                oldest_id = min(_completed, key=lambda k: _completed[k][0])
+                _completed.pop(oldest_id, None)
             _completed[p.flow_id] = (db.now() + 60, result)
             _pending.pop(p.flow_id, None)
         p.flow.wipe_password()
@@ -679,20 +691,34 @@ def compute_next_class(uid: int, now: float | None = None, conn=None) -> tuple[f
     today = dt.datetime.fromtimestamp(now, tz).date()
     acts = [a for a in (view.get("activities") or []) if isinstance(a, dict)]
     units = ics.unit_times(acts)
+    sid = view["semester_id"]
+    by_weekday: dict[int, list[tuple[dt.time, str, set[int]]]] = defaultdict(list)
+    for a in acts:
+        wd = a.get("weekday")
+        if not isinstance(wd, int) or not 1 <= wd <= 7:
+            continue
+        weeks = {w for w in (a.get("weekIndexes") or []) if isinstance(w, int)}
+        if not weeks:
+            continue
+        lesson = widget._lesson(a, units, {})
+        if not lesson:
+            continue
+        h, m = map(int, lesson["start"].split(":"))
+        by_weekday[wd].append((dt.time(h, m), slot_key(sid, a), weeks))
+    if not by_weekday:
+        return None, []
     for i in range(NEXT_CLASS_LOOKAHEAD_DAYS):
         day = today + dt.timedelta(days=i)
+        day_items = by_weekday.get(day.isoweekday())
+        if not day_items:
+            continue
         week = widget.week_of(day, week1)
         starts = []
-        for a in acts:
-            if a.get("weekday") != day.isoweekday() or week not in (a.get("weekIndexes") or []):
-                continue
-            lesson = widget._lesson(a, units, {})
-            if not lesson:
-                continue
-            h, m = map(int, lesson["start"].split(":"))
-            at = dt.datetime.combine(day, dt.time(h, m), tz).timestamp()
-            if at > now:
-                starts.append((at, slot_key(view["semester_id"], a)))
+        for t_start, sk, weeks in day_items:
+            if week in weeks:
+                at = dt.datetime.combine(day, t_start, tz).timestamp()
+                if at > now:
+                    starts.append((at, sk))
         if starts:
             first = min(at for at, _k in starts)
             return first, sorted({k for at, k in starts if at == first})
@@ -727,11 +753,12 @@ def _peer_checked_at(conn, uid: int, semester_id, slots_json: str | None) -> flo
     return min(r["at"] for r in rows)
 
 
-def refresh_outlook(uid: int, now: float | None = None) -> dict:
+def refresh_outlook(uid: int, now: float | None = None, row=None) -> dict:
     """给界面展示：目标间隔、原因、预计下次刷新。"""
     now = db.now() if now is None else now
-    row = db.connect().execute(f"SELECT status, next_refresh_at, {_SIGNAL_COLS} FROM users WHERE id=?",
-                               (uid,)).fetchone()
+    if row is None:
+        row = db.connect().execute(f"SELECT status, next_refresh_at, {_SIGNAL_COLS} FROM users WHERE id=?",
+                                   (uid,)).fetchone()
     if not row:
         return {}
     sig = signals_of(row)
@@ -748,8 +775,8 @@ def refresh_outlook(uid: int, now: float | None = None) -> dict:
             "pending": pending and row["status"] == "ok"}
 
 
-_touched: dict[int, float] = {}
-_touch_lock = threading.Lock()
+_touched: dict[int, float] = globals().get("_touched") if "_touched" in globals() else {}
+_touch_lock: threading.Lock = globals().get("_touch_lock") or threading.Lock()
 
 
 def touch(uid: int, now: float | None = None) -> None:
@@ -776,10 +803,11 @@ def request_refresh(uid: int, reason: str, now: float | None = None, conn=None) 
             c.execute(sql, (now, reason, uid))
 
 
-def request_if_stale(uid: int, now: float | None = None) -> bool:
+def request_if_stale(uid: int, now: float | None = None, row=None) -> bool:
     """有人打开页面 / 小组件时：数据已经比他的目标间隔还旧，就排一次后台刷新。返回是否排了。"""
     now = db.now() if now is None else now
-    row = db.connect().execute(f"SELECT status, {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
+    if row is None:
+        row = db.connect().execute(f"SELECT status, {_SIGNAL_COLS} FROM users WHERE id=?", (uid,)).fetchone()
     if not row or row["status"] != "ok":
         return False
     sig = signals_of(row)
@@ -857,12 +885,17 @@ class WidgetTask:
     expires_at: float
 
 
-_widget_tasks: dict[str, WidgetTask] = {}
-_widget_tasks_lock = threading.Lock()
+def _task_from_row(r) -> WidgetTask:
+    return WidgetTask(r["task_id"], r["user_id"], r["semester_id"], r["expires_at"])
 
 
 class WidgetUploadRejected(Exception):
     """上传的东西不能用（任务不对 / 过期 / 格式坏）：给脚本看的原因。"""
+
+
+def has_active_widget_task(uid: int) -> bool:
+    """该用户是否存在待交回的代抓任务：供 /upload 在读取 4MB 请求流前快速判权。"""
+    return db.connect().execute("SELECT 1 FROM widget_tasks WHERE user_id=? LIMIT 1", (uid,)).fetchone() is not None
 
 
 def widget_fetch_healthy(row, now: float) -> bool:
@@ -880,7 +913,7 @@ def _jwxt_cookie_header(jar, url: str) -> str:
     return get_cookie_header(only, requests.Request("GET", url).prepare()) or ""
 
 
-def widget_fetch_task(uid: int, now: float | None = None) -> dict | None:
+def widget_fetch_task(uid: int, now: float | None = None, pending: bool | None = None) -> dict | None:
     """小组件来取数据时：这个人此刻需要刷新（已在排队）、允许代抓、有可用的教务 cookie，就发一个任务。
 
     同一个人同时只有一个任务；还没过期的再来要就原样给（不顺延，免得坏掉的脚本一直挡着服务器）；
@@ -890,15 +923,17 @@ def widget_fetch_task(uid: int, now: float | None = None) -> dict | None:
     row = db.connect().execute(
         f"SELECT status, enc_cookies, current_semester_id, semesters_json, {_WIDGET_COLS} FROM users WHERE id=?",
         (uid,)).fetchone()
+    if pending is None:
+        pending = widget_refresh_state(uid, now)["pending"]
     if (not row or row["status"] != "ok" or not row["widget_fetch"] or not row["enc_cookies"]
-            or row["current_semester_id"] is None or not widget_refresh_state(uid, now)["pending"]):
+            or row["current_semester_id"] is None or not pending):
         return None
-    with _widget_tasks_lock:
-        mine = [t for t in _widget_tasks.values() if t.uid == uid]
-        for t in mine:
-            _widget_tasks.pop(t.task_id, None)
-        live = next((t for t in mine if t.expires_at > now), None)
-        lapsed = not live and bool(mine)
+    with db.tx() as c:
+        mine = [_task_from_row(r) for r in c.execute(
+            "SELECT task_id, user_id, semester_id, expires_at FROM widget_tasks WHERE user_id=?", (uid,)).fetchall()]
+        c.execute("DELETE FROM widget_tasks WHERE user_id=?", (uid,))
+    live = next((t for t in mine if t.expires_at > now), None)
+    lapsed = not live and bool(mine)
     if lapsed:
         _widget_fetch_failed(uid, "上次的代抓任务没有交回", fallback=False)
     try:
@@ -915,10 +950,11 @@ def widget_fetch_task(uid: int, now: float | None = None) -> dict | None:
     if not steps[0]["cookie"]:
         return None  # 没有教务会话（只剩 CASTGC）：续期只能服务器做
     task = live or WidgetTask(secrets.token_urlsafe(18), uid, sid, now + WIDGET_TASK_TTL)
-    with _widget_tasks_lock:
-        _widget_tasks[task.task_id] = task
-    if not live:
-        with db.tx() as c:
+    with db.tx() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO widget_tasks(task_id, user_id, semester_id, expires_at) VALUES(?,?,?,?)",
+            (task.task_id, task.uid, task.semester_id, task.expires_at))
+        if not live:
             c.execute("UPDATE users SET widget_fetch_pending_until=? WHERE id=?", (task.expires_at, uid))
     return {"id": task.task_id, "expires_in": max(0, round(task.expires_at - now)), "steps": steps,
             "headers": jwxt.PRINT_DATA_HEADERS, "login_hosts": [cas.AUTH_HOST]}
@@ -939,11 +975,14 @@ def _widget_fetch_failed(uid: int, why: str, fallback: bool = True) -> None:
 def _take_widget_task(uid: int, task_id, now: float) -> WidgetTask:
     if not isinstance(task_id, str):
         raise WidgetUploadRejected("任务不存在")
-    with _widget_tasks_lock:
-        task = _widget_tasks.get(task_id)
-        if not task or task.uid != uid:
+    with db.tx() as c:
+        row = c.execute(
+            "SELECT task_id, user_id, semester_id, expires_at FROM widget_tasks WHERE task_id=?",
+            (task_id,)).fetchone()
+        if not row or row["user_id"] != uid:
             raise WidgetUploadRejected("任务不存在")
-        _widget_tasks.pop(task_id, None)
+        c.execute("DELETE FROM widget_tasks WHERE task_id=?", (task_id,))
+        task = _task_from_row(row)
     if task.expires_at <= now:
         _widget_fetch_failed(uid, "任务已过期")
         raise WidgetUploadRejected("任务已过期")
@@ -957,14 +996,17 @@ def _logged_out(url) -> bool:
     return urlparse(url).hostname == cas.AUTH_HOST or cas.is_jw_login_url(url)
 
 
+_BAD_COOKIE_CHARS = re.compile(r"[\x00-\x1f\x7f;]")
+
+
 def _merge_phone_cookies(cookies: list[dict], updates) -> list[dict]:
-    """手机收到的新 cookie 值：只更新已有的、教务域名下的同名 cookie，不接受新增名字或别的域名。"""
+    """手机收到的新 cookie 值：只更新已有的、教务域名下的同名 cookie，不接受新增名字、别的域名或控制字符。"""
     if not isinstance(updates, list):
         return cookies
     fresh = {}
     for u in updates[:50]:
         if (isinstance(u, dict) and isinstance(u.get("name"), str) and isinstance(u.get("value"), str)
-                and len(u["value"]) <= 4096):
+                and len(u["value"]) <= 4096 and not _BAD_COOKIE_CHARS.search(u["value"])):
             fresh[u["name"]] = u["value"]
     out = []
     for c in cookies:
@@ -1035,10 +1077,8 @@ def set_widget_fetch(uid: int, enabled: bool) -> None:
     with db.tx() as c:
         c.execute("""UPDATE users SET widget_fetch=?, widget_fetch_fails=0, widget_fetch_pending_until=NULL
                      WHERE id=?""", (1 if enabled else 0, uid))
-    if not enabled:
-        with _widget_tasks_lock:
-            for t in [t for t in _widget_tasks.values() if t.uid == uid]:
-                _widget_tasks.pop(t.task_id, None)
+        if not enabled:
+            c.execute("DELETE FROM widget_tasks WHERE user_id=?", (uid,))
 
 
 def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, int]]:
@@ -1517,8 +1557,10 @@ def _outlook_fields(uid: int) -> dict:
 def housekeeping() -> None:
     """清过期会话 / 日志 / 登录流程，并回收已删除用户的刷新锁。"""
     _purge_pending()
+    now = db.now()
     with db.tx() as c:
-        c.execute("DELETE FROM sessions WHERE expires_at < ?", (db.now(),))
+        c.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+        c.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
         c.execute(
             """DELETE FROM refresh_log WHERE id IN (
                    SELECT id FROM (

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 os.environ["APP_SECRET_KEY"] = base64.b64encode(os.urandom(32)).decode()
 os.environ["DB_PATH"] = str(Path(tempfile.mkdtemp()) / "demo.db")
 os.environ["SCHEDULER_ENABLED"] = "false"
+os.environ.setdefault("HOT_RELOAD_WATCH", "true")
 os.environ["PUBLIC_BASE_URL"] = "http://localhost:8765"
 os.environ["MAIL_MAILER"] = "log"  # 邮件通知：不真的发信，验证码等内容打印在服务器日志里
 _salt = os.urandom(16)  # 管理员页密码 demo
@@ -33,11 +34,7 @@ os.environ["ADMIN_PASSWORD_HASH"] = "pbkdf2_sha256$1000${}${}".format(
     base64.b64encode(_salt).decode(), base64.b64encode(hashlib.pbkdf2_hmac("sha256", b"demo", _salt, 1000)).decode())
 sys.path.insert(0, str(ROOT))
 
-from app import cas, jwxt, security  # noqa: E402
-
-# 演示模式不限制登录次数（否则反复试前端很容易撞到真实部署的防撞库限制）
-security.login_by_ip = security.RateLimiter(10_000, 900)
-security.login_by_student = security.RateLimiter(10_000, 900)
+from app import cas, jwxt, reloader, security  # noqa: E402
 
 SAMPLE = json.loads((ROOT / "examples" / "sample_timetable.json").read_text("utf-8"))
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
@@ -182,9 +179,18 @@ def demo_fetch(session, semester_id=None, page_html=None):
     return data
 
 
-cas.LoginFlow = DemoFlow
-cas.login = lambda *a, **k: None
-jwxt.fetch_timetable = demo_fetch
+def _install_demo_patches():
+    # 演示模式不限制登录次数（否则反复试前端很容易撞到真实部署的防撞库限制）。
+    # 改限额而不是换对象：main 按名字导入了这两个限速器，换对象它看不到
+    security.login_by_ip.limit = 10_000
+    security.login_by_student.limit = 10_000
+    cas.LoginFlow = DemoFlow
+    cas.login = lambda *a, **k: None
+    jwxt.fetch_timetable = demo_fetch
+
+
+_install_demo_patches()
+reloader.register_post_reload(_install_demo_patches)
 
 
 def seed_admin_demo():
