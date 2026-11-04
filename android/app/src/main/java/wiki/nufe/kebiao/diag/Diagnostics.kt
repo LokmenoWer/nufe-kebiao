@@ -97,7 +97,7 @@ object Diagnostics {
             appendLine("服务状态：${payload?.status ?: "无"}")
             appendLine("设备已绑定：${repo.deviceId != null}")
             appendLine("提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
-            appendLine("提醒队列：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
+            appendLine("提醒队列（上次排定，未到点）：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
             appendLine(
                 "后台运行：${
