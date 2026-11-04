@@ -1,5 +1,6 @@
 package wiki.nufe.kebiao.ui
 
+import android.content.ClipboardManager
 import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
@@ -31,11 +32,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import wiki.nufe.kebiao.data.Repository
 
 @Composable
 internal fun PermissionSetupDialog(
@@ -135,6 +138,7 @@ internal fun SetupScreen(
     onConfirm: (String) -> Unit,
     onOpenSite: () -> Unit,
 ) {
+    val context = LocalContext.current
     var text by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -150,7 +154,7 @@ internal fun SetupScreen(
         SectionCard {
             Text("连接课表", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
-            Hint("在网站 → 账号与设置 → 桌面小组件生成只读链接，再粘贴到这里。")
+            Hint("在网站 → 账号与设置 → 安卓 App（或桌面小组件）复制链接粘贴到这里，或直接点“在安卓 App 中打开”。")
             Spacer(Modifier.height(16.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -204,6 +208,29 @@ internal fun SetupScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onOpenSite, contentPadding = PaddingValues(0.dp)) {
                     Text("打开网站生成链接", fontSize = 13.sp)
+                }
+                Spacer(Modifier.width(12.dp))
+                TextButton(
+                    onClick = {
+                        val clip = context.getSystemService(ClipboardManager::class.java)
+                            ?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                            ?.coerceToText(context)?.toString()?.trim()
+                        val extracted = Repository.extractLink(clip)
+                        if (clip != null && extracted != null) {
+                            text = extracted
+                            error = null
+                            if (!busy) onConfirm(clip)
+                        } else if (!clip.isNullOrBlank()) {
+                            text = clip
+                            error = "剪贴板里的内容不是有效的课表链接。"
+                        } else {
+                            error = "剪贴板为空，请先去网站复制链接。"
+                        }
+                    },
+                    enabled = !busy,
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Text("粘贴剪贴板", fontSize = 13.sp)
                 }
                 Spacer(Modifier.weight(1f))
                 Text("链接是只读凭证", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

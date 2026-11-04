@@ -1,14 +1,11 @@
 package wiki.nufe.kebiao.ui
 
-import android.app.AlarmManager
-import android.app.NotificationManager
 import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -45,7 +42,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -62,7 +58,6 @@ import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.diag.Diagnostics
-import wiki.nufe.kebiao.remind.Reminders
 
 @Composable
 internal fun MineScreen(
@@ -70,13 +65,15 @@ internal fun MineScreen(
     snapshot: Snapshot?,
     profile: Profile?,
     bound: Boolean,
+    notificationsOk: Boolean,
+    exactOk: Boolean,
+    promotedOk: Boolean,
+    batteryOk: Boolean,
     onOpenSite: () -> Unit,
     onPair: (String) -> Unit,
     onRemove: () -> Unit,
 ) {
     val context = LocalContext.current
-    val alarms = context.getSystemService(AlarmManager::class.java)
-    val manager = context.getSystemService(NotificationManager::class.java)
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
     var showFeedback by remember { mutableStateOf(false) }
@@ -255,16 +252,13 @@ internal fun MineScreen(
         SectionCard {
             Text("权限", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            PermissionRow("通知", Reminders.canNotify(context)) {
+            PermissionRow("通知", notificationsOk) {
                 context.startActivity(
                     Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                 )
             }
-            PermissionRow(
-                "准时提醒",
-                Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true,
-            ) {
+            PermissionRow("准时提醒", exactOk) {
                 context.startActivity(
                     Intent(
                         Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
@@ -275,13 +269,16 @@ internal fun MineScreen(
             if (Build.VERSION.SDK_INT >= 36) {
                 PermissionRow(
                     "系统实时提醒（$liveName）",
-                    manager?.canPostPromotedNotifications() == true,
+                    promotedOk,
                 ) {
                     context.startActivity(
                         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                             .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                     )
                 }
+            }
+            PermissionRow("后台运行", batteryOk) {
+                openBatteryOptimizationSettings(context)
             }
         }
 

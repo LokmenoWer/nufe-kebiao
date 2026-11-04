@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -36,7 +37,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.data.LinkInvalidException
 import wiki.nufe.kebiao.data.Profile
@@ -48,6 +48,7 @@ import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.LoginAlert
 import wiki.nufe.kebiao.sync.Sync
+import wiki.nufe.kebiao.widget.WidgetVersion
 
 @Composable
 internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
@@ -94,7 +95,39 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         notificationsOk = granted
-        Reminders.reschedule(context)
+        Reminders.rescheduleAsync(context)
+    }
+
+    val widgetVersion by WidgetVersion.flow.collectAsState()
+    LaunchedEffect(widgetVersion) {
+        if (widgetVersion > 0 && repo.widgetUrl != null) {
+            repo.cached()?.let { snapshot = it }
+            invalid = LinkState.isInvalid(context)
+        }
+    }
+
+    fun syncSilentlyIfDue() {
+        if (busy || repo.widgetUrl == null || LinkState.isInvalid(context)) return
+        val current = snapshot
+        val age = System.currentTimeMillis() - (current?.fetchedAtMs ?: 0L)
+        if (current != null && !current.offline && age < 2 * 60_000L) return
+        scope.launch {
+            try {
+                val snap = repo.fetch(refresh = false)
+                if (snap != null) {
+                    snapshot = snap
+                    if (!snap.offline) {
+                        LoginAlert.update(context, snap.payload)
+                        Reminders.rescheduleAsync(context)
+                        Sync.redraw(context)
+                    }
+                }
+            } catch (_: LinkInvalidException) {
+                invalid = true
+                LinkState.markInvalid(context, true)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     DisposableEffect(lifecycle) {
@@ -106,6 +139,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 promotedOk = Build.VERSION.SDK_INT < 36 ||
                     notificationManager?.canPostPromotedNotifications() == true
                 batteryOk = ignoringBatteryOptimizations(context)
+                syncSilentlyIfDue()
             }
         }
         lifecycle.addObserver(observer)
@@ -154,7 +188,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 invalid = false
                 tab = Tab.Timetable
                 LinkState.markInvalid(context, false)
-                Reminders.reschedule(context)
+                Reminders.rescheduleAsync(context)
                 Sync.schedule(context)
                 Sync.redraw(context)
                 Diag.i("link saved")
@@ -195,7 +229,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                     Diag.i("refresh ok")
                     snap?.let { LoginAlert.update(context, it.payload) }
                 }
-                Reminders.reschedule(context)
+                Reminders.rescheduleAsync(context)
                 Sync.redraw(context)
             } catch (_: LinkInvalidException) {
                 Diag.w("refresh invalid link")
@@ -217,7 +251,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         LoginAlert.clear(context)
         Sync.cancelAll(context)
         LiveUpdates.cancel(context)
-        Reminders.reschedule(context)
+        Reminders.rescheduleAsync(context)
         scope.launch { Sync.redraw(context) }
         url = null
         snapshot = null
@@ -300,6 +334,10 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                             snapshot = snapshot,
                             profile = profile,
                             bound = bound,
+                            notificationsOk = notificationsOk,
+                            exactOk = exactOk,
+                            promotedOk = promotedOk,
+                            batteryOk = batteryOk,
                             onOpenSite = ::openSite,
                             onPair = ::save,
                             onRemove = ::removeLink,

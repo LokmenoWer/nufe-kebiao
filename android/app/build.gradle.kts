@@ -18,8 +18,8 @@ android {
         applicationId = "wiki.nufe.kebiao"
         minSdk = 26
         targetSdk = 37
-        versionCode = 13
-        versionName = "1.3.6"
+        versionCode = 14
+        versionName = "1.3.7"
     }
 
     signingConfigs {

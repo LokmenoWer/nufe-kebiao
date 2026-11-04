@@ -30,7 +30,7 @@ class Repository(context: Context) {
         set(value) {
             prefs.edit().putString(KEY_URL, value).apply()
             if (value == null) {
-                cacheFile.delete()
+                synchronized(cacheLock) { cacheFile.delete() }
                 forgetDevice()
             }
         }
@@ -58,9 +58,9 @@ class Repository(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_LIVE_UPDATE, value).apply()
 
     /** 本机缓存，没有就是 null。 */
-    fun cached(): Snapshot? {
+    fun cached(): Snapshot? = synchronized(cacheLock) {
         if (!cacheFile.exists()) return null
-        return try {
+        try {
             Snapshot(Payload.parse(cacheFile.readText()), cacheFile.lastModified(), offline = false)
         } catch (_: Exception) {
             null
@@ -77,10 +77,16 @@ class Repository(context: Context) {
         try {
             val text = withLocalFetch(download(if (refresh) "$url${if ('?' in url) '&' else '?'}refresh=1" else url))
             val payload = Payload.parse(text)
-            val tmp = File(app.filesDir, "widget.json.tmp")
-            tmp.writeText(text)
-            tmp.renameTo(cacheFile)
-            Snapshot(payload, System.currentTimeMillis(), offline = false)
+            val nowMs = System.currentTimeMillis()
+            synchronized(cacheLock) {
+                val tmp = File(app.filesDir, "widget.json.tmp")
+                tmp.writeText(text)
+                if (!tmp.renameTo(cacheFile)) {
+                    cacheFile.writeText(text)
+                    tmp.delete()
+                }
+            }
+            Snapshot(payload, nowMs, offline = false)
         } catch (e: LinkInvalidException) {
             throw e
         } catch (_: Exception) {
@@ -270,6 +276,7 @@ class Repository(context: Context) {
     fun siteUrl(): String? = widgetUrl?.let { siteOf(it) }
 
     companion object {
+        private val cacheLock = Any()
         private const val KEY_URL = "widget_url"
         private const val KEY_REMIND = "remind_minutes"
         private const val KEY_ALARM = "alarm_enabled"
