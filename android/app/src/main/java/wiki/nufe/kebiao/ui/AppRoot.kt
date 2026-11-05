@@ -337,7 +337,6 @@ internal fun AppRoot(
                 ) { (target, _) ->
                     when (target) {
                         Tab.Timetable -> HomeScreen(
-                            repo = repo,
                             snapshot = snapshot,
                             busy = busy,
                             message = message,
@@ -352,10 +351,6 @@ internal fun AppRoot(
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
                             onViewConsumed = { widgetPulse = 0 },
-                            onOpenSettings = {
-                                tab = Tab.Mine
-                                pagePulse++
-                            },
                         )
                         Tab.Mine -> MineScreen(
                             repo = repo,

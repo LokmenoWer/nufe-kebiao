@@ -84,7 +84,6 @@ import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.AppUpdate
-import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
@@ -189,7 +188,6 @@ internal fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit,
 
 @Composable
 internal fun HomeScreen(
-    repo: Repository,
     snapshot: Snapshot?,
     busy: Boolean,
     message: String?,
@@ -201,7 +199,6 @@ internal fun HomeScreen(
     initialWeek: Boolean = false,
     viewPulse: Int = 0,
     onViewConsumed: () -> Unit = {},
-    onOpenSettings: () -> Unit,
 ) {
     var now by remember { mutableStateOf(Now.current()) }
 
@@ -246,38 +243,13 @@ internal fun HomeScreen(
         }
         TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
         Spacer(Modifier.height(14.dp))
-        SettingsShortcut(repo = repo, onClick = onOpenSettings)
-        Spacer(Modifier.height(110.dp))
-    }
-}
-
-@Composable
-private fun SettingsShortcut(repo: Repository, onClick: () -> Unit) {
-    SectionCard {
-        Row(
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("桌面组件与上课提醒", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    if (repo.alarmEnabled) {
-                        "提醒已开启 · 提前 ${repo.remindMinutes} 分钟 · 在“我的”里管理"
-                    } else {
-                        "提醒已关闭 · 在“我的”里管理"
-                    },
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                painter = painterResource(R.drawable.ic_chevron_right),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
+        TodayRhythmCard(plan, now)
+        val progress = snapshot?.payload?.progress.orEmpty()
+        if (progress.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            CourseProgressCard(progress, snapshot?.payload?.week?.week)
         }
+        Spacer(Modifier.height(110.dp))
     }
 }
 
