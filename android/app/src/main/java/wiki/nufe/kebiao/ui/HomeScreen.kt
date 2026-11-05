@@ -22,6 +22,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -243,7 +244,22 @@ internal fun HomeScreen(
         }
         TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
         Spacer(Modifier.height(14.dp))
-        TodayRhythmCard(plan, now, snapshot?.payload?.week?.week)
+        val week = snapshot?.payload?.week?.week
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(Modifier.weight(1f)) {
+                TodayRhythmCard(plan, now)
+            }
+            if (week != null && week > 0) {
+                SemesterProgressCard(
+                    week = week,
+                    modifier = Modifier.width(62.dp).fillMaxHeight(),
+                )
+            }
+        }
         Spacer(Modifier.height(110.dp))
     }
 }

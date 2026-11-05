@@ -1,15 +1,20 @@
 package wiki.nufe.kebiao.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,7 +37,7 @@ import wiki.nufe.kebiao.widget.parseColor
 private const val TOTAL_WEEKS = 17
 
 @Composable
-internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
+internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
     val lessons = plan?.day?.lessons.orEmpty()
     val tomorrow = plan?.title == "明天"
     val next = plan?.slots?.firstOrNull()
@@ -44,13 +49,13 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         if (tomorrow) "明日节奏" else "今日节奏",
-                        fontSize = 15.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
                         "现在 ${clock(now.minutes)}",
-                        fontSize = 10.sp,
+                        fontSize = 9.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -61,9 +66,9 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
                         now = now,
                         currentDay = currentDay,
                         tomorrow = tomorrow,
-                        modifier = Modifier.size(96.dp),
+                        modifier = Modifier.size(84.dp),
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
                         if (next != null) {
                             Text(
@@ -74,12 +79,13 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 "${next.lesson.start}–${next.lesson.end}",
-                                fontSize = 16.sp,
+                                fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
                             )
                             Text(
                                 "${next.lesson.name} · ${next.lesson.room.ifEmpty { "地点待定" }}",
-                                fontSize = 11.sp,
+                                fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 2,
                             )
@@ -94,7 +100,7 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
                                 Text(
                                     if (next.state == State.LIVE) "还剩 ${remainText(remain)}"
                                     else "${remainText(remain)}后上课",
-                                    fontSize = 11.sp,
+                                    fontSize = 10.sp,
                                     color = MaterialTheme.colorScheme.primary,
                                 )
                             }
@@ -109,10 +115,6 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, week: Int?) {
                         }
                     }
                 }
-            }
-            if (week != null && week > 0) {
-                Spacer(Modifier.width(12.dp))
-                SemesterBar(week)
             }
         }
     }
@@ -182,43 +184,54 @@ private fun RhythmRing(
                 fontSize = 9.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("${lessons.size} 节", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("${lessons.size} 节", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
 
 @Composable
-private fun SemesterBar(week: Int) {
+internal fun SemesterProgressCard(week: Int?, modifier: Modifier = Modifier) {
+    if (week == null || week <= 0) return
     val current = week.coerceIn(1, TOTAL_WEEKS)
     val outline = MaterialTheme.colorScheme.outline
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(46.dp)) {
-        Text("学期", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(4.dp))
-        Canvas(Modifier.width(18.dp).height(106.dp)) {
-            val gap = 1.5.dp.toPx()
-            val height = (size.height - gap * (TOTAL_WEEKS - 1)) / TOTAL_WEEKS
-            for (w in 1..TOTAL_WEEKS) {
-                val top = (w - 1) * (height + gap)
-                val color = weekColor(w).copy(alpha = if (w <= current) 1f else 0.18f)
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, top),
-                    size = Size(size.width, height),
-                    cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
-                )
-                if (w == current) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(26.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, outline.copy(alpha = 0.75f)),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("学期", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            Canvas(Modifier.weight(1f).width(18.dp)) {
+                val gap = 1.5.dp.toPx()
+                val height = (size.height - gap * (TOTAL_WEEKS - 1)) / TOTAL_WEEKS
+                for (w in 1..TOTAL_WEEKS) {
+                    val top = (w - 1) * (height + gap)
+                    val color = weekColor(w).copy(alpha = if (w <= current) 1f else 0.18f)
                     drawRoundRect(
-                        color = outline,
+                        color = color,
                         topLeft = Offset(0f, top),
                         size = Size(size.width, height),
                         cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
-                        style = Stroke(1.dp.toPx()),
                     )
+                    if (w == current) {
+                        drawRoundRect(
+                            color = outline,
+                            topLeft = Offset(0f, top),
+                            size = Size(size.width, height),
+                            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                            style = Stroke(1.dp.toPx()),
+                        )
+                    }
                 }
             }
+            Spacer(Modifier.height(6.dp))
+            Text("$week/$TOTAL_WEEKS", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Spacer(Modifier.height(4.dp))
-        Text("$week/$TOTAL_WEEKS", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
