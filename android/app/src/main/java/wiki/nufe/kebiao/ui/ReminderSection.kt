@@ -211,13 +211,19 @@ internal fun ReminderSection(
                 contentPadding = PaddingValues(0.dp),
             ) { Text("允许准时提醒", fontSize = 12.sp) }
         }
-        if (alarmEnabled && !batteryOk) {
+        if (alarmEnabled && (!batteryOk || isColorOsLike())) {
             Spacer(Modifier.height(6.dp))
-            Hint("系统可能会限制应用后台运行，导致课前提醒或小组件刷新被推迟。")
+            Hint(
+                if (isColorOsLike()) {
+                    "ColorOS 的电池白名单不等于后台放行；请在“耗电管理 / 自启动”里允许本应用。"
+                } else {
+                    "系统可能会限制应用后台运行，导致课前提醒或小组件刷新被推迟。"
+                },
+            )
             TextButton(
                 onClick = { openBatteryOptimizationSettings(context) },
                 contentPadding = PaddingValues(0.dp),
-            ) { Text("允许后台运行", fontSize = 12.sp) }
+            ) { Text(if (isColorOsLike()) "检查后台设置" else "允许后台运行", fontSize = 12.sp) }
         }
     }
 }

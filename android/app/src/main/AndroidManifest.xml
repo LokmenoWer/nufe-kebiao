@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android 16：Live Updates / 流体云 / 实时动态 -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <!-- 流体云提醒期间用前台服务保住进程，避免清理后台时通知一起消失 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Android 12+：精准闹钟，属于特殊权限，需在系统“闹钟和提醒”页面开启 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 开机后恢复本机提醒闹钟 -->
@@ -72,6 +75,16 @@
 
         <receiver android:name=".remind.ReminderReceiver" android:exported="false" />
         <receiver android:name=".sync.WidgetBoundaryReceiver" android:exported="false" />
+        <service
+            android:name=".remind.LiveUpdateGuardService"
+            android:exported="false"
+            android:process=":guard"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="class reminder live update" />
+        </service>
         <receiver android:name=".remind.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

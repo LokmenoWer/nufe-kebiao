@@ -95,6 +95,7 @@ internal fun PermissionSetupDialog(
                     detail = "避免应用在后台被系统冻结或推迟提醒",
                     allowed = batteryOk,
                     action = "去设置",
+                    note = if (isColorOsLike()) "电池白名单不够，还要允许自启动/后台运行" else null,
                     onClick = onOpenBattery,
                 )
             }
@@ -110,6 +111,7 @@ internal fun PermissionDialogRow(
     detail: String,
     allowed: Boolean,
     action: String,
+    note: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
@@ -119,6 +121,9 @@ internal fun PermissionDialogRow(
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (note != null) {
+                Text(note, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (allowed) {
             Text("已允许", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
