@@ -243,9 +243,7 @@ internal fun HomeScreen(
         }
         TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
         Spacer(Modifier.height(14.dp))
-        TodayRhythmCard(plan, now)
-        Spacer(Modifier.height(14.dp))
-        SemesterProgressCard(snapshot?.payload?.week?.week)
+        TodayRhythmCard(plan, now, snapshot?.payload?.week?.week)
         Spacer(Modifier.height(110.dp))
     }
 }
