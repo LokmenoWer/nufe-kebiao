@@ -9,10 +9,12 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.os.Build
+import androidx.core.content.ContextCompat
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.lessonMs
+import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.ui.MainActivity
 
 /**
@@ -26,10 +28,12 @@ object LiveUpdates {
     const val ACTION_START = "wiki.nufe.kebiao.LIVE_START"
     const val ACTION_END = "wiki.nufe.kebiao.LIVE_END"
 
-    private const val CHANNEL = "class_live_update"
-    private const val NOTIFICATION_ID = 9201
+    internal const val CHANNEL = "class_live_update"
+    internal const val NOTIFICATION_ID = 9201
+    internal const val GUARD_NOTIFICATION_ID = 9200
     private const val REQ_START = 9201
     private const val REQ_END = 9202
+    private const val GUARD_PREFS = "live_update_guard"
 
     fun itemFrom(intent: Intent): Reminders.Item = Reminders.Item(
         atMs = intent.getLongExtra("at", 0L),
@@ -85,6 +89,8 @@ object LiveUpdates {
         notify(context, item, phase, startMs, endMs)
         schedule(context, item, ACTION_START, startMs, REQ_START)
         schedule(context, item, ACTION_END, dismissMs, REQ_END)
+        remember(context, item, dismissMs)
+        startGuard(context, item)
         return true
     }
 
@@ -105,10 +111,17 @@ object LiveUpdates {
         ensureChannel(context)
         notify(context, item, Phase.DURING, startMs, endMs)
         schedule(context, item, ACTION_END, dismissMs, REQ_END)
+        remember(context, item, dismissMs)
+        startGuard(context, item)
     }
 
     fun cancel(context: Context) {
-        context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+        stopGuard(context)
+        context.getSharedPreferences(GUARD_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSystemService(NotificationManager::class.java)?.apply {
+            cancel(NOTIFICATION_ID)
+            cancel(GUARD_NOTIFICATION_ID)
+        }
         cancelPhase(context, ACTION_START, REQ_START)
         cancelPhase(context, ACTION_END, REQ_END)
     }
@@ -116,7 +129,28 @@ object LiveUpdates {
     private enum class Phase { BEFORE, DURING }
 
     private fun notify(context: Context, item: Reminders.Item, phase: Phase, startMs: Long, endMs: Long) {
-        if (Build.VERSION.SDK_INT < 36) return
+        val notification = buildNotification(context, item, phase, startMs, endMs) ?: return
+        context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+    }
+
+    /** 前台守护服务复用同一张卡片；没有这张卡片时不需要保活。 */
+    internal fun buildNotification(context: Context, item: Reminders.Item): Notification? {
+        if (Build.VERSION.SDK_INT < 36) return null
+        ensureChannel(context)
+        val startMs = lessonMs(item.date, item.start)
+        val endMs = lessonMs(item.date, item.end)
+        val phase = if (startMs > System.currentTimeMillis()) Phase.BEFORE else Phase.DURING
+        return buildNotification(context, item, phase, startMs, endMs)
+    }
+
+    private fun buildNotification(
+        context: Context,
+        item: Reminders.Item,
+        phase: Phase,
+        startMs: Long,
+        endMs: Long,
+    ): Notification? {
+        if (Build.VERSION.SDK_INT < 36) return null
         val progressStyle = Notification.ProgressStyle()
             .setProgress(0)
             .setProgressSegments(
@@ -157,7 +191,7 @@ object LiveUpdates {
             .setChronometerCountDown(true)
             .setTimeoutAfter(timeout)
         applyPromotedFlags(builder, status)
-        context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, builder.build())
+        return builder.build()
     }
 
     /** HyperOS 的 API 36 框架可能没实现这两个方法，反射调用，缺失就跳过。 */
@@ -176,7 +210,7 @@ object LiveUpdates {
         }
     }
 
-    private fun ensureChannel(context: Context) {
+    internal fun ensureChannel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(CHANNEL) != null) return
         manager.createNotificationChannel(
@@ -222,7 +256,57 @@ object LiveUpdates {
         pending.cancel()
     }
 
-    private fun putExtras(intent: Intent, item: Reminders.Item) {
+    /** 记住当前卡片，App 下次打开时如果还没到收起时间，就重新拉起守护服务。 */
+    private fun remember(context: Context, item: Reminders.Item, dismissMs: Long) {
+        context.getSharedPreferences(GUARD_PREFS, Context.MODE_PRIVATE).edit()
+            .putLong("dismiss", dismissMs)
+            .putLong("at", item.atMs)
+            .putString("date", item.date)
+            .putString("start", item.start)
+            .putString("end", item.end)
+            .putString("name", item.name)
+            .putString("room", item.room)
+            .putBoolean("changed", item.changed)
+            .putString("was", item.was)
+            .apply()
+    }
+
+    /** 打开 App 时调用：正在展示流体云就补上前台守护，防止清理后台时进程被杀。 */
+    internal fun ensureGuard(context: Context) {
+        val prefs = context.getSharedPreferences(GUARD_PREFS, Context.MODE_PRIVATE)
+        val dismissMs = prefs.getLong("dismiss", 0L)
+        if (dismissMs <= System.currentTimeMillis()) {
+            prefs.edit().clear().apply()
+            return
+        }
+        val item = Reminders.Item(
+            atMs = prefs.getLong("at", 0L),
+            title = "",
+            text = "",
+            date = prefs.getString("date", "").orEmpty(),
+            start = prefs.getString("start", "").orEmpty(),
+            end = prefs.getString("end", "").orEmpty(),
+            name = prefs.getString("name", "").orEmpty(),
+            room = prefs.getString("room", "").orEmpty(),
+            changed = prefs.getBoolean("changed", false),
+            was = prefs.getString("was", null),
+        )
+        if (item.date.isBlank() || item.start.isBlank() || item.end.isBlank()) return
+        startGuard(context, item)
+    }
+
+    private fun startGuard(context: Context, item: Reminders.Item) {
+        if (Build.VERSION.SDK_INT < 36) return
+        val intent = Intent(context, LiveUpdateGuardService::class.java).also { putExtras(it, item) }
+        runCatching { ContextCompat.startForegroundService(context, intent) }
+            .onFailure { Diag.w("live update guard start failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun stopGuard(context: Context) {
+        runCatching { context.stopService(Intent(context, LiveUpdateGuardService::class.java)) }
+    }
+
+    internal fun putExtras(intent: Intent, item: Reminders.Item) {
         intent.putExtra("at", item.atMs)
             .putExtra("title", item.title)
             .putExtra("text", item.text)

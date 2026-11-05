@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.diag.Diag
+import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
@@ -60,6 +61,12 @@ class MainActivity : ComponentActivity() {
                 if (todayOk && weekOk) prefs.edit().putLong("at", System.currentTimeMillis()).apply()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 当前正在展示流体云时补上前台守护，清理后台时不会连通知一起被结束。
+        LiveUpdates.ensureGuard(this)
     }
 
     override fun onNewIntent(intent: Intent) {
