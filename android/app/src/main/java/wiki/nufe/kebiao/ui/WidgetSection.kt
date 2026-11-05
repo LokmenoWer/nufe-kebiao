@@ -12,12 +12,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -121,12 +119,12 @@ internal fun WidgetSection() {
         )
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("点按小组件时打开", fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(50)) {
-                Row(modifier = Modifier.padding(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ModePill(text = "网页", selected = !opensApp) { setOpensApp(false) }
-                    ModePill(text = "App", selected = opensApp) { setOpensApp(true) }
-                }
-            }
+            SlidingToggle(
+                firstLabel = "网页",
+                secondLabel = "App",
+                selectedIndex = if (opensApp) 1 else 0,
+                onSelect = { index -> setOpensApp(index == 1) },
+            )
         }
         // 只有普通精确闹钟可能被延后的 ROM 才需要选；其他手机不用为它多显示一个闹钟
         if (Reminders.needsAlarmClock()) {

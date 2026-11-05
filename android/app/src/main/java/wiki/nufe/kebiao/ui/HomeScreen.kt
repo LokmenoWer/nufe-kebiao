@@ -4,13 +4,12 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Easing
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -67,6 +66,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -404,7 +404,7 @@ private fun TodayCardView(
     val activeNote = if (mode == CardMode.WEEK) {
         val warning = weekNote?.takeIf { !it.text.startsWith("第 ") }
         val text = warning?.text ?: weekBlock?.week?.let { "第 $it 周" } ?: weekNote?.text ?: "本周"
-        val label = if (warning == null && weekBlock?.week != null && weekCols.isNotEmpty()) {
+        val label = if (!showNext && warning == null && weekBlock?.week != null && weekCols.isNotEmpty()) {
             "$text · ${weekCols.size} 天"
         } else {
             text
@@ -504,13 +504,14 @@ private fun TodayCardView(
         AnimatedContent(
             targetState = mode,
             transitionSpec = {
-                (expandVertically(
-                    expandFrom = Alignment.Top,
+                val toWeek = targetState == CardMode.WEEK
+                (slideInVertically(
                     animationSpec = tween(420, easing = QuadraticEaseInOut),
+                    initialOffsetY = { if (toWeek) -it / 4 else it / 4 },
                 ) + fadeIn(tween(180))) togetherWith
-                    (shrinkVertically(
-                        shrinkTowards = Alignment.Top,
+                    (slideOutVertically(
                         animationSpec = tween(320, easing = QuadraticEaseInOut),
+                        targetOffsetY = { if (toWeek) it / 4 else -it / 4 },
                     ) + fadeOut(tween(160)))
             },
             contentAlignment = Alignment.TopCenter,
@@ -526,13 +527,14 @@ private fun TodayCardView(
                 AnimatedContent(
                     targetState = showAll,
                     transitionSpec = {
-                        (expandVertically(
-                            expandFrom = Alignment.Bottom,
-                            animationSpec = tween(320, easing = FastOutSlowInEasing),
-                        ) + fadeIn(tween(200))) togetherWith
-                            (shrinkVertically(
-                                shrinkTowards = Alignment.Bottom,
-                                animationSpec = tween(240, easing = FastOutSlowInEasing),
+                        val collapsing = !targetState
+                        (slideInVertically(
+                            animationSpec = tween(320, easing = QuadraticEaseInOut),
+                            initialOffsetY = { if (collapsing) it / 3 else -it / 3 },
+                        ) + fadeIn(tween(180))) togetherWith
+                            (slideOutVertically(
+                                animationSpec = tween(240, easing = QuadraticEaseInOut),
+                                targetOffsetY = { if (collapsing) -it / 3 else it / 3 },
                             ) + fadeOut(tween(120)))
                     },
                     label = "today-expand",
@@ -622,55 +624,95 @@ private fun ModeToggle(
     weekLabel: String,
     onSelect: (CardMode) -> Unit,
 ) {
+    SlidingToggle(
+        firstLabel = dayLabel,
+        secondLabel = weekLabel,
+        selectedIndex = if (mode == CardMode.DAY) 0 else 1,
+        onSelect = { index -> onSelect(if (index == 0) CardMode.DAY else CardMode.WEEK) },
+    )
+}
+
+/** 两段式滑动开关：选中白色胶囊在两端之间滑动，今天/本周和网页/App 共用。 */
+@Composable
+internal fun SlidingToggle(
+    firstLabel: String,
+    secondLabel: String,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+) {
     val density = LocalDensity.current
-    var dayX by remember { mutableStateOf(0f) }
-    var dayWidth by remember { mutableStateOf(0f) }
-    var weekX by remember { mutableStateOf(0f) }
-    var weekWidth by remember { mutableStateOf(0f) }
-    val targetX = if (mode == CardMode.DAY) dayX else weekX
-    val targetWidth = if (mode == CardMode.DAY) dayWidth else weekWidth
+    var firstX by remember { mutableStateOf(0f) }
+    var firstY by remember { mutableStateOf(0f) }
+    var firstWidth by remember { mutableStateOf(0f) }
+    var firstHeight by remember { mutableStateOf(0f) }
+    var secondX by remember { mutableStateOf(0f) }
+    var secondY by remember { mutableStateOf(0f) }
+    var secondWidth by remember { mutableStateOf(0f) }
+    var secondHeight by remember { mutableStateOf(0f) }
+    val targetX = if (selectedIndex == 0) firstX else secondX
+    val targetY = if (selectedIndex == 0) firstY else secondY
+    val targetWidth = if (selectedIndex == 0) firstWidth else secondWidth
+    val targetHeight = if (selectedIndex == 0) firstHeight else secondHeight
+    val springSpec = spring<Dp>(
+        dampingRatio = 0.72f,
+        stiffness = 500f,
+    )
     val indicatorX by animateDpAsState(
         targetValue = with(density) { targetX.toDp() },
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
-        label = "mode-indicator-x",
+        animationSpec = springSpec,
+        label = "sliding-toggle-x",
+    )
+    val indicatorY by animateDpAsState(
+        targetValue = with(density) { targetY.toDp() },
+        animationSpec = springSpec,
+        label = "sliding-toggle-y",
     )
     val indicatorWidth by animateDpAsState(
         targetValue = with(density) { targetWidth.toDp() },
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
-        label = "mode-indicator-width",
+        animationSpec = springSpec,
+        label = "sliding-toggle-width",
+    )
+    val indicatorHeight by animateDpAsState(
+        targetValue = with(density) { targetHeight.toDp() },
+        animationSpec = springSpec,
+        label = "sliding-toggle-height",
     )
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(50),
     ) {
         Box(Modifier.padding(2.dp)) {
-            if (targetWidth > 0f) {
+            if (targetWidth > 0f && targetHeight > 0f) {
                 Box(
                     Modifier
-                        .offset(x = indicatorX)
+                        .offset(x = indicatorX, y = indicatorY)
                         .width(indicatorWidth)
-                        .height(28.dp)
+                        .height(indicatorHeight)
                         .clip(RoundedCornerShape(50))
                         .background(MaterialTheme.colorScheme.surface),
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ModePill(
-                    text = dayLabel,
-                    selected = mode == CardMode.DAY,
-                    onClick = { onSelect(CardMode.DAY) },
-                    onPosition = { x, width ->
-                        dayX = x
-                        dayWidth = width
+                    text = firstLabel,
+                    selected = selectedIndex == 0,
+                    onClick = { onSelect(0) },
+                    onPosition = { x, y, width, height ->
+                        firstX = x
+                        firstY = y
+                        firstWidth = width
+                        firstHeight = height
                     },
                 )
                 ModePill(
-                    text = weekLabel,
-                    selected = mode == CardMode.WEEK,
-                    onClick = { onSelect(CardMode.WEEK) },
-                    onPosition = { x, width ->
-                        weekX = x
-                        weekWidth = width
+                    text = secondLabel,
+                    selected = selectedIndex == 1,
+                    onClick = { onSelect(1) },
+                    onPosition = { x, y, width, height ->
+                        secondX = x
+                        secondY = y
+                        secondWidth = width
+                        secondHeight = height
                     },
                 )
             }
@@ -682,7 +724,7 @@ private fun ModeToggle(
 internal fun ModePill(
     text: String,
     selected: Boolean,
-    onPosition: (Float, Float) -> Unit = { _, _ -> },
+    onPosition: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -695,7 +737,13 @@ internal fun ModePill(
     Box(
         modifier = Modifier
             .onGloballyPositioned { coordinates ->
-                onPosition(coordinates.positionInParent().x, coordinates.size.width.toFloat())
+                val position = coordinates.positionInParent()
+                onPosition(
+                    position.x,
+                    position.y,
+                    coordinates.size.width.toFloat(),
+                    coordinates.size.height.toFloat(),
+                )
             }
             .clip(RoundedCornerShape(50))
             .clickable(
@@ -905,7 +953,9 @@ private fun WeekCellCard(
         else -> mix(baseColor, Color.White, 0.84f)
     }
     val barColor = if (dim) MaterialTheme.colorScheme.outline else baseColor
+    // App 周视图不再在卡片里重复写起止时间，时间轴和详情弹窗已经足够。
     val pieces = bestPieces(cell, height, measure, innerW, fs, onAxis)
+        .filter { it.kind != Kind.TIME }
 
     Row(
         modifier = Modifier
