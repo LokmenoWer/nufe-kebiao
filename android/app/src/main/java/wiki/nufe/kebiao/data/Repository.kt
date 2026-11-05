@@ -62,9 +62,16 @@ class Repository(context: Context) {
         get() = prefs.getBoolean(KEY_WIDGET_OPENS_APP, false)
         set(value) = prefs.edit().putBoolean(KEY_WIDGET_OPENS_APP, value).apply()
 
-    /** 小组件上下课重画用闹钟时钟：部分 ROM 上更准时，但状态栏可能显示闹钟图标，所以默认关闭。 */
+    /**
+     * 小组件上下课重画用闹钟时钟：部分 ROM 上更准时，但状态栏可能显示闹钟图标。
+     * 第一次读取时按当时的上课通知定初值并存下来：开着通知的本来就有闹钟图标，自动打开；
+     * 之后两个开关互不影响，关掉上课通知不会连带关掉它。
+     */
     var widgetPunctual: Boolean
-        get() = prefs.getBoolean(KEY_WIDGET_PUNCTUAL, false)
+        get() {
+            if (prefs.contains(KEY_WIDGET_PUNCTUAL)) return prefs.getBoolean(KEY_WIDGET_PUNCTUAL, false)
+            return alarmEnabled.also { widgetPunctual = it }
+        }
         set(value) = prefs.edit().putBoolean(KEY_WIDGET_PUNCTUAL, value).apply()
 
     /** 本机缓存，没有就是 null。 */
