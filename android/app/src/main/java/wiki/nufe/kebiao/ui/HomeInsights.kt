@@ -86,9 +86,13 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
                         val angle = (now.minutes / 1440f * 360f - 90f) * (Math.PI / 180).toFloat()
                         val radius = size.minDimension / 2 - stroke
                         val center = Offset(size.width / 2, size.height / 2)
+                        val startRadius = size.minDimension * 0.28f
                         drawLine(
                             color = handColor,
-                            start = center,
+                            start = Offset(
+                                center.x + kotlin.math.cos(angle) * startRadius,
+                                center.y + kotlin.math.sin(angle) * startRadius,
+                            ),
                             end = Offset(
                                 center.x + kotlin.math.cos(angle) * radius,
                                 center.y + kotlin.math.sin(angle) * radius,
