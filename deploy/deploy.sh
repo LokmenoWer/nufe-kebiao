@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 在本机执行：把代码同步到服务器并重启服务。
+# 在本机执行：把代码同步到服务器，并热重载或重启服务。
+#   FORCE_RESTART=1 deploy/deploy.sh   # 改了 main.lifespan 或后台循环体这类热重载更新不到的代码时用（见 app/reloader.py）
 #   cp deploy/deploy.env.example deploy/deploy.env   # 填好服务器信息（该文件不进 git）
 #   deploy/deploy.sh
 # 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
@@ -32,7 +33,7 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .ruff_cache --exclude .claude \
   "$SRC/" "$HOST:$APP_DIR/"
 
-"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' bash -s" <<'REMOTE'
+"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' FORCE_RESTART='${FORCE_RESTART:-0}' bash -s" <<'REMOTE'
 set -euo pipefail
 APP_DIR=/opt/nufe-kebiao
 id kebiao >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin kebiao
@@ -61,22 +62,32 @@ if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
 fi
 chown root:kebiao "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 
-[ -x "$APP_DIR/.venv/bin/python" ] || python3 -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+DEPS_CHANGED=0
+if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+  python3 -m venv "$APP_DIR/.venv"
+  DEPS_CHANGED=1
+fi
+if ! sha256sum -c "$APP_DIR/.venv/.requirements.sha256" >/dev/null 2>&1; then
+  "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
+  "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+  sha256sum "$APP_DIR/requirements.txt" > "$APP_DIR/.venv/.requirements.sha256"
+  DEPS_CHANGED=1
+fi
 chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static" "$APP_DIR/scriptable"
 
-# 先确认新代码能在服务器的 Python 上编译、导入，再重启服务；失败则保留旧进程
+# 先确认新代码能在服务器的 Python 上编译、导入，再重载/重启服务；失败则保留旧进程
 cd "$APP_DIR"
 PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -m compileall -q app
 PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "import app.main" \
   && echo "import check: ok" \
   || { echo "import check failed; service not restarted" >&2; exit 1; }
 
-# 端口由 kebiao.socket 持有：平时只重启服务，重启期间的请求排队等新进程，不会被拒绝。
-# 只有第一次切到 socket 激活（旧进程自己占着端口）或 socket 配置变了，才需要先停再起，这一次会断几秒。
+# 平时只热重载（SIGHUP）：正在进行的扫码/验证码登录、学校 1 RPS 节流器状态和后台线程全部不断。
+# 依赖、service 或 socket 配置变了、服务尚未运行、FORCE_RESTART=1，或热重载没成功（含 reloader.py 自身有改动）才走 restart。
 SOCKET_CHANGED=0
+SERVICE_CHANGED=0
 cmp -s "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket || SOCKET_CHANGED=1
+cmp -s "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service || SERVICE_CHANGED=1
 install -m 644 "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket
 install -m 644 "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service
 systemctl daemon-reload
@@ -87,9 +98,24 @@ if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q kebiao.socket; then
   systemctl start kebiao.socket
 fi
 START=$(date +%s%N)
-systemctl restart kebiao
+if [ "$FORCE_RESTART" != 1 ] && [ "$SOCKET_CHANGED" = 0 ] && [ "$SERVICE_CHANGED" = 0 ] && [ "$DEPS_CHANGED" = 0 ] && systemctl is-active -q kebiao; then
+  # 信号是异步的：删掉旧结果再发，等服务写出这一次的结果
+  STATUS_FILE=$(PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "from app import reloader; print(reloader.status_file())")
+  rm -f "$STATUS_FILE"
+  systemctl reload kebiao
+  if "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
+    ACTION="reload"
+  else
+    echo "hot reload did not succeed; restarting" >&2
+    systemctl restart kebiao
+    ACTION="restart"
+  fi
+else
+  systemctl restart kebiao
+  ACTION="restart"
+fi
 curl -s -o /dev/null --max-time 30 http://127.0.0.1:8010/healthz || true
-echo "restart: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
+echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
 systemctl is-active kebiao
 curl -s -o /dev/null -w "local / -> %{http_code}\n" http://127.0.0.1:8010/
 REMOTE

@@ -14,8 +14,11 @@ WorkingDirectory=/opt/nufe-kebiao
 ExecStart=/opt/nufe-kebiao/.venv/bin/uvicorn app.main:app --fd 3 \
     --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
     --timeout-graceful-shutdown 5
+ExecReload=/bin/kill -HUP $MAINPID
 TimeoutStopSec=20
 Restart=on-failure
+# 启动早期处理器还没装好时收到 SIGHUP 会杀掉进程，而 systemd 默认把它算正常退出：这里强制拉起
+RestartForceExitStatus=SIGHUP
 RestartSec=5
 
 NoNewPrivileges=true

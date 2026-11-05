@@ -8,10 +8,26 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+# 进程启动时通过命令行/环境显式传入的变量优先级最高（如测试或容器环境变量）；
+# 其余来自 .env 的配置在首次启动和每次热重载时都会重新读取，方便在线改配置。
+_initial_env: set[str] = globals().get("_initial_env") or set(os.environ.keys())
+_dotenv_loaded: set[str] = globals().get("_dotenv_loaded") or set()
+
+
+def _sync_dotenv(values: dict[str, str | None]) -> None:
+    """把 .env 同步进环境：新增、修改的写入，从 .env 删掉的键也要移除（否则删配置要重启才生效）。"""
+    global _dotenv_loaded
+    wanted = {k: v for k, v in values.items() if k not in _initial_env and v is not None}
+    for k in _dotenv_loaded - wanted.keys():
+        os.environ.pop(k, None)
+    os.environ.update(wanted)
+    _dotenv_loaded = set(wanted)
+
+
+_sync_dotenv(dotenv_values(ROOT / ".env"))
 
 log = logging.getLogger("kebiao.config")
 
@@ -113,12 +129,16 @@ MAIL_MIN_INTERVAL = _float("MAIL_MIN_INTERVAL", 3.0, minimum=0.0)
 
 TIMEZONE = "Asia/Shanghai"
 
+# 开发模式自动热重载：监听 app/*.py 与 .env 的修改时间自动触发进程内热重载
+HOT_RELOAD_WATCH = _bool("HOT_RELOAD_WATCH", False)
+HOT_RELOAD_INTERVAL = _float("HOT_RELOAD_INTERVAL", 1.0, minimum=0.2)
+
 # 校历锚点：学期名或学期 id → 第 1 周周一。优先级高于教务接口返回的日期。
 _semesters_path = Path(os.getenv("SEMESTERS_FILE", str(ROOT / "semesters.json")))
 SEMESTERS_FILE = _semesters_path if _semesters_path.is_absolute() else (ROOT / _semesters_path).resolve()
 
 
-_semester_cache: tuple[float, dict[str, str]] | None = None
+_semester_cache: tuple[float, dict[str, str]] | None = globals().get("_semester_cache")
 
 
 def semester_overrides() -> dict[str, str]:

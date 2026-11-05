@@ -5,7 +5,8 @@ import hmac
 import secrets
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
+from itertools import islice
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -178,24 +179,43 @@ def origin_ok(request: Request) -> bool:
 
 
 class RateLimiter:
-    def __init__(self, limit: int, window: float):
-        self.limit, self.window = limit, window
-        self._hits: dict[str, deque] = defaultdict(deque)
-        self._lock = threading.Lock()
+    """滑动窗口限速器：OrderedDict 按最近访问排序，均摊 O(1) 淘汰过期项并限制最大键数，防随机键撑爆内存。"""
+
+    def __init__(self, limit: int, window: float, max_keys: int = 4096, prev: RateLimiter | None = None):
+        self.limit, self.window, self.max_keys = limit, window, max_keys
+        self._hits: OrderedDict[str, deque] = (
+            prev._hits if prev is not None and isinstance(getattr(prev, "_hits", None), OrderedDict)
+            else OrderedDict()
+        )
+        self._lock: threading.Lock = getattr(prev, "_lock", None) or threading.Lock()
+
+    def _evict_one(self) -> None:
+        """腾一个位置：优先淘汰还没到限额的键，否则灌入大量新键就能清掉已被限速的目标。只看最老的一小段，保持 O(1)。"""
+        for k, q in islice(self._hits.items(), 16):
+            if len(q) < self.limit:
+                del self._hits[k]
+                return
+        self._hits.popitem(last=False)
 
     def hit(self, key: str) -> bool:
         now = time.monotonic()
+        cutoff = now - self.window
         with self._lock:
-            stale = []
-            for k, q in self._hits.items():
-                while q and q[0] < now - self.window:
-                    q.popleft()
-                if not q:
-                    stale.append(k)
-            for k in stale:
-                del self._hits[k]
+            while self._hits:
+                oldest_k, oldest_q = next(iter(self._hits.items()))
+                while oldest_q and oldest_q[0] < cutoff:
+                    oldest_q.popleft()
+                if oldest_q:
+                    break
+                del self._hits[oldest_k]
             q = self._hits.get(key)
-            if q is None:
+            if q is not None:
+                while q and q[0] < cutoff:
+                    q.popleft()
+                self._hits.move_to_end(key)
+            else:
+                if len(self._hits) >= self.max_keys:
+                    self._evict_one()
                 q = deque()
                 self._hits[key] = q
             if len(q) >= self.limit:
@@ -205,5 +225,5 @@ class RateLimiter:
 
 
 # 每次站点登录都会真实打到学校 CAS，必须同时按 IP 和学号限速，避免撞库和触发账号锁定
-login_by_ip = RateLimiter(10, 900)
-login_by_student = RateLimiter(5, 900)
+login_by_ip = RateLimiter(10, 900, prev=globals().get("login_by_ip"))
+login_by_student = RateLimiter(5, 900, prev=globals().get("login_by_student"))

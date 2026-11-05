@@ -18,9 +18,10 @@ from .config import REFRESH_BUDGET_RPS, SCHEDULER_TICK
 from .polite import UpstreamYield, background_upstream
 
 log = logging.getLogger("kebiao.scheduler")
-_stop = threading.Event()
-_threads: list[threading.Thread] = []
-_thread_lock = threading.Lock()
+_stop: threading.Event = globals().get("_stop") or threading.Event()
+_threads: list[threading.Thread] = globals().get("_threads") if "_threads" in globals() else []
+_thread_lock: threading.Lock = globals().get("_thread_lock") or threading.Lock()
+_refresh_wanted: bool = globals().get("_refresh_wanted", False)
 
 REQUESTS_PER_REFRESH = 2.5      # 一次刷新平均打学校几次（课表页 + 打印数据，偶尔加校历 / 续期）
 KEEPALIVE_COST = 2 / REQUESTS_PER_REFRESH  # 一次保活（教务课表页 + 认证中心各一次）折合多少次刷新
@@ -51,8 +52,13 @@ class Budget:
         return self.tokens
 
 
+# 热重载：换成新版的类（改 Budget 的逻辑才会生效），但继承被学校报错压下去的速率和剩余令牌
+_prev_budget = globals().get("_budget")
 _budget = Budget()
-last_tick: dict | None = None   # 最近一个 tick 的概要，管理员页展示用
+if _prev_budget is not None:
+    _budget.rate = min(_prev_budget.rate, REFRESH_BUDGET_RPS)
+    _budget.tokens = _prev_budget.tokens
+last_tick: dict | None = globals().get("last_tick")   # 最近一个 tick 的概要，管理员页展示用
 
 
 def run_once(budget: Budget | None = None) -> int:
@@ -124,6 +130,11 @@ def keepalive_once(budget: Budget) -> int:
 
 def _loop() -> None:
     while not _stop.wait(SCHEDULER_TICK * random.uniform(0.9, 1.1)):
+        with _thread_lock:
+            if not _refresh_wanted:  # 热重载后 SCHEDULER_ENABLED 关了：下个 tick 退出
+                if threading.current_thread() in _threads:
+                    _threads.remove(threading.current_thread())
+                return
         try:
             service.housekeeping()
         except Exception as e:
@@ -146,15 +157,20 @@ def _qr_loop() -> None:
 
 def start(refresh: bool = True) -> None:
     """扫码轮询总是启动（否则扫码登录无法完成）；refresh=False 时不跑后台定时刷新。"""
+    global _refresh_wanted
     with _thread_lock:
         _stop.clear()
+        _refresh_wanted = refresh
         _threads[:] = [t for t in _threads if t.is_alive()]
-        if _threads:
-            return  # 已经启动过（重复调用不应制造第二条轮询线程）
-        _threads.append(threading.Thread(target=_qr_loop, name="qr-pump", daemon=True))
-        if refresh:
-            _threads.append(threading.Thread(target=_loop, name="refresh-scheduler", daemon=True))
-        for t in _threads:
+        running = {t.name for t in _threads}
+        # 只补缺的线程：重复调用不制造第二条，挂掉的那条能拉起来
+        missing = []
+        if "qr-pump" not in running:
+            missing.append(threading.Thread(target=_qr_loop, name="qr-pump", daemon=True))
+        if refresh and "refresh-scheduler" not in running:
+            missing.append(threading.Thread(target=_loop, name="refresh-scheduler", daemon=True))
+        _threads.extend(missing)
+        for t in missing:
             t.start()
 
 

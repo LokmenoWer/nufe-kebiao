@@ -2,8 +2,8 @@
 
 - 密码只以 PBKDF2 哈希的形式放在 .env 的 ADMIN_PASSWORD_HASH 里；没配就整个后台不开放（404）。
   生成：python -m app.admin hash
-- 管理员会话只存在内存里（只有 1 个 worker），服务重启后需要重新登录。
-- 日志是进程内的环形缓冲，只保留最近 LOG_CAPACITY 条；更早的看 journalctl -u kebiao。
+- 管理员会话存在 SQLite（admin_sessions 表），服务热重载或重启后无需重新登录。
+- 日志是进程内的环形缓冲，只保留最近 LOG_CAPACITY 条（热重载不清空）；更早的看 journalctl -u kebiao。
 - 学号、姓名在页面上脱敏显示：管理员看排期不需要知道具体是谁。
 """
 from __future__ import annotations
@@ -22,16 +22,29 @@ import time
 
 from fastapi import Depends, HTTPException, Request, Response
 
-from . import android_releases, db, mobile_devices, polite, presence, refresh_policy, scheduler, service
+from . import (
+    android_releases,
+    crypto,
+    db,
+    mobile_devices,
+    polite,
+    presence,
+    refresh_policy,
+    reloader,
+    scheduler,
+    service,
+)
 from .config import COOKIE_PATH, COOKIE_SECURE, DB_PATH, SCHEDULER_ENABLED, SCHEDULER_TICK
 
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 ENABLED = bool(ADMIN_PASSWORD_HASH)
 ADMIN_COOKIE = "kb_admin"
 SESSION_TTL = 12 * 3600
+MAX_ADMIN_SESSIONS = 16
 PBKDF2_ITERATIONS = 600_000
+MAX_PBKDF2_ITERATIONS = 5_000_000
 LOG_CAPACITY = 2000
-STARTED_AT = time.time()
+STARTED_AT: float = globals().get("STARTED_AT") or time.time()
 
 log = logging.getLogger("kebiao.admin")
 
@@ -48,27 +61,35 @@ def hash_password(password: str, iterations: int = PBKDF2_ITERATIONS) -> str:
 def verify_password(password: str, stored: str) -> bool:
     try:
         algo, iterations, salt, expected = stored.split("$")
-        if algo != "pbkdf2_sha256":
+        iters = int(iterations)
+        if algo != "pbkdf2_sha256" or not (1 <= iters <= MAX_PBKDF2_ITERATIONS):
             return False
-        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), int(iterations))
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), iters)
         return hmac.compare_digest(dk, base64.b64decode(expected))
     except (ValueError, TypeError):
         return False
 
 
-# ---------- 会话（内存） ----------
+# ---------- 会话（SQLite 持久化） ----------
 
-_sessions: dict[str, tuple[float, str]] = {}   # token -> (过期时刻, csrf)
-_sessions_lock = threading.Lock()
+def _session_key(token: str) -> str:
+    """把当前密码哈希算进存储键：改密码后旧会话全部对不上，不必等 12 小时过期。"""
+    return crypto.token_hash(f"{ADMIN_PASSWORD_HASH}:{token}")
 
 
 def login(response: Response) -> str:
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     now = time.time()
-    with _sessions_lock:
-        for k in [k for k, (exp, _) in _sessions.items() if exp < now]:
-            del _sessions[k]
-        _sessions[token] = (now + SESSION_TTL, csrf)
+    with db.tx() as c:
+        c.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
+        c.execute(
+            "INSERT INTO admin_sessions(token_hash, csrf, created_at, expires_at) VALUES(?,?,?,?)",
+            (_session_key(token), csrf, now, now + SESSION_TTL))
+        c.execute(
+            """DELETE FROM admin_sessions WHERE token_hash NOT IN (
+                   SELECT token_hash FROM admin_sessions ORDER BY created_at DESC, rowid DESC LIMIT ?
+               )""",
+            (MAX_ADMIN_SESSIONS,))
     # SameSite=Strict：后台没有从别的站点跳进来的需要
     response.set_cookie(ADMIN_COOKIE, token, max_age=SESSION_TTL, httponly=True, secure=COOKIE_SECURE,
                         samesite="strict", path=COOKIE_PATH)
@@ -78,8 +99,8 @@ def login(response: Response) -> str:
 def logout(request: Request, response: Response) -> None:
     token = request.cookies.get(ADMIN_COOKIE)
     if token:
-        with _sessions_lock:
-            _sessions.pop(token, None)
+        with db.tx() as c:
+            c.execute("DELETE FROM admin_sessions WHERE token_hash=?", (_session_key(token),))
     response.delete_cookie(ADMIN_COOKIE, path=COOKIE_PATH, secure=COOKIE_SECURE, httponly=True, samesite="strict")
 
 
@@ -88,11 +109,14 @@ def current_admin(request: Request) -> str:
     if not ENABLED:
         raise HTTPException(404)
     token = request.cookies.get(ADMIN_COOKIE)
-    with _sessions_lock:
-        entry = _sessions.get(token or "")
-    if not entry or entry[0] < time.time():
+    if not token:
         raise HTTPException(401, "未登录")
-    return entry[1]
+    row = db.connect().execute(
+        "SELECT csrf FROM admin_sessions WHERE token_hash=? AND expires_at > ?",
+        (_session_key(token), time.time())).fetchone()
+    if not row:
+        raise HTTPException(401, "未登录")
+    return row["csrf"]
 
 
 def admin_csrf(request: Request, csrf: str = Depends(current_admin)) -> str:
@@ -109,6 +133,12 @@ class RingHandler(logging.Handler):
         self.records: collections.deque = collections.deque(maxlen=capacity)
         self.seq = 0
         self._ring_lock = threading.Lock()
+
+    def adopt(self, other: RingHandler) -> None:
+        """热重载时接过旧实例的缓冲：日志不丢，同时用上新版的类。"""
+        with other._ring_lock:
+            self.records.extend(other.records)
+            self.seq = other.seq
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -136,13 +166,19 @@ class RingHandler(logging.Handler):
         return out[-limit:]
 
 
+_prev_ring = globals().get("ring")
 ring = RingHandler()
+if _prev_ring is not None:
+    ring.adopt(_prev_ring)
 
 
 def install_log_capture() -> None:
     # uvicorn 的两个 logger 不向 root 传播，要单独挂；挂在 logger 上的脱敏 filter 先于 handler 执行
     for name in ("", "uvicorn", "uvicorn.access"):
         lg = logging.getLogger(name)
+        for handler in list(lg.handlers):
+            if type(handler).__name__ == "RingHandler" and handler is not ring:
+                lg.removeHandler(handler)  # 热重载前的旧实例
         if ring not in lg.handlers:
             lg.addHandler(ring)
 
@@ -306,6 +342,7 @@ def overview() -> dict:
         "phone": _phone_stats(conn, now),
         "device_stats": _device_stats(conn, now),
         "release_sync": android_releases.sync_state(),
+        "reload": reloader.status(),
     }
 
 

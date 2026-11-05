@@ -52,14 +52,21 @@ MIN_INTERVAL = _min_interval(os.getenv("UPSTREAM_MIN_INTERVAL"))
 JITTER = 0.2  # 在最小间隔之上再随机多等 0~0.2 秒
 TIMEOUT = _env_number("UPSTREAM_TIMEOUT", 20.0)
 
-_slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
-_pace_lock = threading.Lock()
-_last_request_at = 0.0
+_prev_concurrency = globals().get("_prev_concurrency")
+_slots: threading.BoundedSemaphore = (
+    globals()["_slots"] if "_slots" in globals() and _prev_concurrency == MAX_CONCURRENCY
+    else threading.BoundedSemaphore(MAX_CONCURRENCY)
+)
+_prev_concurrency = MAX_CONCURRENCY
+_pace_lock: threading.Lock = globals().get("_pace_lock") or threading.Lock()
+_last_request_at: float = globals().get("_last_request_at", 0.0)
 
 # 交互请求（登录、手动刷新、验证码）占用上游时，后台刷新让路
-_role: contextvars.ContextVar[str] = contextvars.ContextVar("upstream_role", default="interactive")
-_interactive_waiters = 0
-_waiters_lock = threading.Lock()
+_role: contextvars.ContextVar[str] = (
+    globals().get("_role") or contextvars.ContextVar("upstream_role", default="interactive")
+)
+_interactive_waiters: int = globals().get("_interactive_waiters", 0)
+_waiters_lock: threading.Lock = globals().get("_waiters_lock") or threading.Lock()
 
 
 class UpstreamYield(Exception):
@@ -79,9 +86,9 @@ MAX_PENALTY = 60.0           # 秒：出错时额外增加的请求间隔上限
 MAX_COOLDOWN = 600.0         # 秒：Retry-After 最多认 10 分钟
 DEFAULT_COOLDOWN = 30.0      # 秒：429/503 没给 Retry-After 时暂停多久
 INTERACTIVE_MAX_WAIT = 10.0  # 秒：暂停期间交互请求最多陪等多久
-_health_lock = threading.Lock()
-_penalty = 0.0
-_cooldown_until = 0.0
+_health_lock: threading.Lock = globals().get("_health_lock") or threading.Lock()
+_penalty: float = globals().get("_penalty", 0.0)
+_cooldown_until: float = globals().get("_cooldown_until", 0.0)
 
 
 def _retry_after(value: str | None) -> float | None:

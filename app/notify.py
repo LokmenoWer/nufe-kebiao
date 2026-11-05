@@ -26,8 +26,8 @@ RESEND_GAP = 60         # 秒：同一用户两次发验证码的最小间隔
 MAX_LISTED_CHANGES = 15
 
 # 每封验证 / 测试邮件都真的从我们的邮箱发出去：按人、按 IP 限量，防止被拿来轰炸别人的邮箱
-mails_by_user = RateLimiter(5, 3600)
-mails_by_ip = RateLimiter(10, 3600)
+mails_by_user = RateLimiter(5, 3600, prev=globals().get("mails_by_user"))
+mails_by_ip = RateLimiter(10, 3600, prev=globals().get("mails_by_ip"))
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(\.[A-Za-z0-9\-]{1,63})*\.[A-Za-z]{2,24}")
 

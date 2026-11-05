@@ -22,7 +22,22 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin, android_releases, cas, crypto, db, ics, mailer, mobile_devices, notify, presence, scheduler, service, widget
+from . import (
+    admin,
+    android_releases,
+    cas,
+    crypto,
+    db,
+    ics,
+    mailer,
+    mobile_devices,
+    notify,
+    presence,
+    reloader,
+    scheduler,
+    service,
+    widget,
+)
 from .config import (
     FORCE_HTTPS,
     PUBLIC_BASE_URL,
@@ -73,15 +88,25 @@ class _RedactTokenPaths(logging.Filter):
         return True
 
 
-logging.getLogger("uvicorn.access").addFilter(_RedactTokenPaths())
+_access_logger = logging.getLogger("uvicorn.access")
+# 先挂新的再摘旧的（热重载时）：脱敏不留空档，改过的脱敏规则也能立刻生效
+_old_redact = [f for f in _access_logger.filters if type(f).__name__ == "_RedactTokenPaths"]
+_access_logger.addFilter(_RedactTokenPaths())
+for _f in _old_redact:
+    _access_logger.removeFilter(_f)
 admin.install_log_capture()
 
 
-_upstream = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix="upstream")
+_upstream: ThreadPoolExecutor = (
+    globals().get("_upstream") or ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix="upstream")
+)
 
 
 async def _upstream_call(fn):
     """学校 I/O 放在专用线程池，避免占满 Starlette 默认线程池，把本地读接口堵住。"""
+    global _upstream
+    if getattr(_upstream, "_shutdown", False):
+        _upstream = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix="upstream")
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
     return await loop.run_in_executor(_upstream, lambda: ctx.run(fn))
@@ -94,15 +119,36 @@ async def lifespan(_app):
     db.init()
     mailer.start()
     scheduler.start(refresh=SCHEDULER_ENABLED)
+    reloader.install_signal_handler()
+    reloader.start_watcher()
     try:
         yield
     finally:
+        reloader.stop_watcher()
         scheduler.stop()
         mailer.stop()
         _upstream.shutdown(wait=False, cancel_futures=True)
 
 
-app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+class ReloadableApp:
+    """ASGI 热重载网关：对外保持稳定的 app 引用，热重载时原子切换内部 FastAPI 实例。"""
+
+    def __init__(self, target: FastAPI):
+        self._target = target
+
+    def set_target(self, target: FastAPI) -> None:
+        self._target = target
+
+    async def __call__(self, scope, receive, send) -> None:
+        await self._target(scope, receive, send)
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
+
+
+_gateway: ReloadableApp | None = globals().get("_gateway")
+_fastapi_app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app: FastAPI = _fastapi_app
 STATIC = ROOT / "static"
 
 # 只记录类型和路径：异常原文可能带 ticket / ticket 回调地址等敏感信息
@@ -404,8 +450,9 @@ def logout_all(response: Response, sess=Depends(csrf_protected)):
     return {"ok": True}
 
 
-def _ics_url(uid: int) -> str | None:
-    row = db.connect().execute("SELECT enc_ics_token FROM users WHERE id=?", (uid,)).fetchone()
+def _ics_url(uid: int, row=None) -> str | None:
+    if row is None:
+        row = db.connect().execute("SELECT enc_ics_token FROM users WHERE id=?", (uid,)).fetchone()
     if not row or not row["enc_ics_token"]:
         return None
     try:
@@ -416,8 +463,9 @@ def _ics_url(uid: int) -> str | None:
     return f"{PUBLIC_BASE_URL}/ics/{token}.ics"
 
 
-def _widget_token(uid: int) -> str | None:
-    row = db.connect().execute("SELECT enc_widget_token FROM users WHERE id=?", (uid,)).fetchone()
+def _widget_token(uid: int, row=None) -> str | None:
+    if row is None:
+        row = db.connect().execute("SELECT enc_widget_token FROM users WHERE id=?", (uid,)).fetchone()
     if not row or not row["enc_widget_token"]:
         return None
     try:
@@ -435,16 +483,28 @@ def _widget_links(token: str | None) -> dict:
     }
 
 
-def _record_use(uid: int) -> None:
-    """有人在用（网站 / 小组件 / 日历）：更新活跃度；数据比他的目标间隔还旧就排一次后台刷新。
-
-    纯本地数据库操作，不访问学校；出错只记日志，绝不影响请求本身。
-    """
+def _touch_use(uid: int) -> None:
+    """记下“还在用”。纯本地数据库操作，出错只记日志，绝不影响请求本身。"""
     try:
         service.touch(uid)
-        service.request_if_stale(uid)
     except Exception as e:
         log.warning("record use failed for user %s: %s", uid, type(e).__name__)
+
+
+def _queue_if_stale(uid: int, row=None) -> bool:
+    """数据比目标间隔还旧就排一次后台刷新，不访问学校。row 必须是 touch 之后读的：
+    目标间隔取决于 last_seen_at，用旧值会把刚回来的人当成还在沉寂。返回是否在排队。"""
+    try:
+        return service.request_if_stale(uid, row=row)
+    except Exception as e:
+        log.warning("record use failed for user %s: %s", uid, type(e).__name__)
+        return False
+
+
+def _record_use(uid: int) -> None:
+    """有人在用（网站 / 小组件 / 日历）：更新活跃度，必要时排一次后台刷新。"""
+    _touch_use(uid)
+    _queue_if_stale(uid)
 
 
 def _json_list(raw: str | None) -> list:
@@ -458,11 +518,17 @@ def _json_list(raw: str | None) -> list:
 @app.get("/api/me")
 def me(request: Request, response: Response, sess=Depends(current_session)):
     # 每次打开页面都会先调这里：顺手做会话滑动续期，记下“还在用”，数据过期就排一次后台刷新
+    uid = sess["id"]
     renew_session(request, response, sess)
-    _record_use(sess["id"])
-    outlook = service.refresh_outlook(sess["id"])
-    if device_hint_uid(request) != sess["id"]:
-        set_device_hint(response, sess["id"])  # 已登录的老会话也补上，下次扫码即可复用设备
+    _touch_use(uid)
+    row = db.connect().execute(
+        f"SELECT status, next_refresh_at, enc_ics_token, enc_widget_token, widget_fetch, "
+        f"{service._SIGNAL_COLS} FROM users WHERE id=?",
+        (uid,)).fetchone()
+    queued = _queue_if_stale(uid, row=row)
+    outlook = service.refresh_outlook(uid, row=None if queued else row)
+    if device_hint_uid(request) != uid:
+        set_device_hint(response, uid)  # 已登录的老会话也补上，下次扫码即可复用设备
     return {
         "student_id": sess["student_id"],
         "name": sess["name"],
@@ -481,10 +547,10 @@ def me(request: Request, response: Response, sess=Depends(current_session)):
         "semesters": _json_list(sess["semesters_json"]),
         "sso_short": service.sso_short(sess["cred_mode"], sess["sso_session_only"]),
         "keepalive": service.keepalive_state(sess),
-        "ics_url": _ics_url(sess["id"]),
-        "mail": notify.snapshot(sess["id"]),
-        **_widget_links(_widget_token(sess["id"])),
-        "widget_fetch": _widget_fetch_enabled(sess["id"]),
+        "ics_url": _ics_url(uid, row=row),
+        "mail": notify.snapshot(uid),
+        **_widget_links(_widget_token(uid, row=row)),
+        "widget_fetch": bool(row and row["widget_fetch"]),
     }
 
 
@@ -617,7 +683,7 @@ def ics_disable(sess=Depends(csrf_protected)):
 # ---------- iOS 桌面小组件（Scriptable） ----------
 
 WIDGET_SCRIPT = ROOT / "scriptable" / "nufe-kebiao-widget.js"
-_script_cache: tuple[int, str, str] | None = None
+_script_cache: tuple[int, str, str] | None = globals().get("_script_cache")
 
 
 def script_version(template: str) -> str:
@@ -639,7 +705,7 @@ def _widget_template() -> tuple[str, str]:
     return _script_cache[1], _script_cache[2]
 
 
-mobile_pair_by_user = RateLimiter(20, 900)
+mobile_pair_by_user = RateLimiter(20, 900, prev=globals().get("mobile_pair_by_user"))
 
 
 def _widget_user(token: str):
@@ -693,11 +759,11 @@ def widget_disable(sess=Depends(csrf_protected)):
 @app.get("/api/widget/script")
 def widget_script(sess=Depends(current_session)):
     """把本人的只读链接填进 Scriptable 脚本模板，设置页一键复制。"""
-    url = _widget_links(_widget_token(sess["id"]))["widget_url"]
-    if not url:
+    token = _widget_token(sess["id"])
+    url = _widget_links(token)["widget_url"]
+    if not url or not token:
         raise HTTPException(404, "请先生成小组件链接")
     template, _version = _widget_template()
-    token = _widget_token(sess["id"])
     script = template.replace("__WIDGET_URL__", url).replace("__WIDGET_FETCH_KEY__", crypto.widget_fetch_key(token))
     return PlainTextResponse(script, media_type="text/javascript; charset=utf-8", headers={"Cache-Control": "no-store"})
 
@@ -767,7 +833,7 @@ def _feed(user, refresh: int, via: str, delegate: bool):
         payload["fetch_key_required"] = _widget_fetch_enabled(user["id"])
     if delegate:
         try:
-            task = service.widget_fetch_task(user["id"])
+            task = service.widget_fetch_task(user["id"], pending=bool(payload["refresh"].get("pending")))
         except Exception as e:
             log.warning("widget fetch task failed for user %s: %s", user["id"], type(e).__name__)
         if task:
@@ -865,19 +931,21 @@ async def widget_upload(token: str, request: Request):
     size = request.headers.get("content-length") or "0"
     if not size.isdigit() or int(size) > WIDGET_UPLOAD_MAX:
         raise HTTPException(413, "上传内容过大")
+    if not await asyncio.to_thread(service.has_active_widget_task, user["id"]):
+        raise HTTPException(400, "任务不存在")
     raw = bytearray()
     async for chunk in request.stream():
         raw += chunk
         if len(raw) > WIDGET_UPLOAD_MAX:
             raise HTTPException(413, "上传内容过大")
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(400, "格式不正确") from None
-    if not isinstance(body, dict):
-        raise HTTPException(400, "格式不正确")
 
     def run():
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            raise HTTPException(400, "格式不正确") from None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "格式不正确")
         try:
             result = service.accept_widget_upload(user["id"], body)
         except service.WidgetUploadRejected as e:
@@ -944,7 +1012,7 @@ def ics_feed(token: str, request: Request):
 
 # ---------- 前端 ----------
 
-_asset_cache: tuple[tuple, str] | None = None
+_asset_cache: tuple[tuple, str] | None = globals().get("_asset_cache")
 
 
 def _static_files() -> list:
@@ -988,7 +1056,7 @@ def index():
 
 # ---------- 服务器管理员页 ----------
 
-admin_login_by_ip = RateLimiter(5, 900)
+admin_login_by_ip = RateLimiter(5, 900, prev=globals().get("admin_login_by_ip"))
 
 
 class AdminLoginIn(BaseModel):
@@ -1069,6 +1137,15 @@ def admin_request_refresh(body: AdminRefreshIn, _csrf=Depends(admin.admin_csrf))
     return {"ok": True}
 
 
+@app.post("/api/admin/reload")
+def admin_reload(_csrf=Depends(admin.admin_csrf)):
+    """管理员手动触发进程内热重载。"""
+    try:
+        return {"ok": True, **reloader.reload(trigger="admin")}
+    except reloader.ReloadError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 _assets = StaticFiles(directory=STATIC)
 
 
@@ -1123,3 +1200,10 @@ def healthz():
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+if _gateway is None:
+    _gateway = ReloadableApp(_fastapi_app)
+else:
+    _gateway.__class__ = ReloadableApp  # 网关对象要保持不变（uvicorn 握着它），但用上新版的类
+    _gateway.set_target(_fastapi_app)
+app = _gateway
