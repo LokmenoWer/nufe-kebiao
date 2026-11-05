@@ -62,6 +62,11 @@ class Repository(context: Context) {
         get() = prefs.getBoolean(KEY_WIDGET_OPENS_APP, false)
         set(value) = prefs.edit().putBoolean(KEY_WIDGET_OPENS_APP, value).apply()
 
+    /** 小组件上下课重画用闹钟时钟：部分 ROM 上更准时，但状态栏可能显示闹钟图标，所以默认关闭。 */
+    var widgetPunctual: Boolean
+        get() = prefs.getBoolean(KEY_WIDGET_PUNCTUAL, false)
+        set(value) = prefs.edit().putBoolean(KEY_WIDGET_PUNCTUAL, value).apply()
+
     /** 本机缓存，没有就是 null。 */
     fun cached(): Snapshot? = synchronized(cacheLock) {
         if (!cacheFile.exists()) return null
@@ -287,6 +292,7 @@ class Repository(context: Context) {
         private const val KEY_ALARM = "alarm_enabled"
         private const val KEY_LIVE_UPDATE = "live_update_enabled"
         private const val KEY_WIDGET_OPENS_APP = "widget_opens_app"
+        private const val KEY_WIDGET_PUNCTUAL = "widget_punctual"
         private const val KEY_DEVICE = "device_id"
         private const val KEY_CLOCK = "device_clock_offset"
         const val DEFAULT_REMIND_MINUTES = 10

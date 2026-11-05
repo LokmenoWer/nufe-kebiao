@@ -108,7 +108,7 @@ object Sync {
 
     /**
      * 按缓存排下一次上下课重画。同一个 PendingIntent 重复排只会替换；到点后 [redraw] 接着排下一次。
-     * 用户开着上课提醒的 ROM 上，状态栏本来就有闹钟图标，才用闹钟时钟；关了提醒不为小组件多显示一个闹钟。
+     * 闹钟时钟可能在状态栏显示图标，只在需要它的 ROM 上、用户打开“小组件准时切换”时才用，和上课通知开关无关。
      */
     fun armBoundary(context: Context) {
         val app = context.applicationContext
@@ -124,7 +124,7 @@ object Sync {
         }
         // 调试预览会拨时钟（Now.offsetMs），闹钟要换算回真实时间，否则排到过去会立刻响、反复重画
         val atMs = nextBoundaryMs(payload, Now.current()) - Now.offsetMs
-        Reminders.schedule(app, atMs, BOUNDARY_REQUEST, pending, Reminders.needsAlarmClock() && repo.alarmEnabled)
+        Reminders.schedule(app, atMs, BOUNDARY_REQUEST, pending, Reminders.needsAlarmClock() && repo.widgetPunctual)
     }
 
     internal fun scheduleNext(context: Context, atMs: Long) {

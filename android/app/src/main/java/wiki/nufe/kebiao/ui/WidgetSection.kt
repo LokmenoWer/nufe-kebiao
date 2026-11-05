@@ -18,6 +18,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,12 +38,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.State
+import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
@@ -64,6 +67,14 @@ internal fun WidgetSection() {
         opensApp = value
         repo.widgetOpensApp = value
         scope.launch { Sync.redraw(context) }
+    }
+
+    var punctual by remember { mutableStateOf(repo.widgetPunctual) }
+
+    fun setPunctual(value: Boolean) {
+        punctual = value
+        repo.widgetPunctual = value
+        scope.launch(Dispatchers.IO) { Sync.armBoundary(context) }
     }
 
     fun pin(receiver: Class<*>) {
@@ -115,6 +126,21 @@ internal fun WidgetSection() {
                     ModePill(text = "网页", selected = !opensApp) { setOpensApp(false) }
                     ModePill(text = "App", selected = opensApp) { setOpensApp(true) }
                 }
+            }
+        }
+        // 只有普通精确闹钟可能被延后的 ROM 才需要选；其他手机不用为它多显示一个闹钟
+        if (Reminders.needsAlarmClock()) {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 14.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("小组件准时切换", fontSize = 14.sp)
+                    Spacer(Modifier.height(2.dp))
+                    Hint("上下课时更准时地切换显示，状态栏可能出现闹钟图标；需要允许“闹钟和提醒”权限。")
+                }
+                Switch(checked = punctual, onCheckedChange = ::setPunctual)
             }
         }
     }

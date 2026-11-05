@@ -113,6 +113,7 @@ object Diagnostics {
                 }",
             )
             appendLine("小组件：今天 $todayIds 个，本周 $weekIds 个")
+            appendLine("小组件准时切换：${repo.widgetPunctual}，ROM 需要闹钟时钟：${Reminders.needsAlarmClock()}")
             appendLine()
             appendLine("--- 最近日志 ---")
             appendLine(logcat().takeLast(MAX_LOG_CHARS))
