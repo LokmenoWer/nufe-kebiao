@@ -66,6 +66,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     var snapshot by remember { mutableStateOf(repo.cached()) }
     var profile by remember { mutableStateOf<Profile?>(null) }
     val updater = remember { AppUpdater(context) }
+    val updateFlow = remember { UpdateFlow(context, updater, scope) }
     var update by remember { mutableStateOf(updater.cached()) }
     var updateDismissed by remember { mutableStateOf(update?.let(updater::isDismissed) == true) }
     var bound by remember { mutableStateOf(repo.deviceId != null) }
@@ -139,6 +140,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 promotedOk = Build.VERSION.SDK_INT < 36 ||
                     notificationManager?.canPostPromotedNotifications() == true
                 batteryOk = ignoringBatteryOptimizations(context)
+                updateFlow.onResume()
                 syncSilentlyIfDue()
             }
         }
@@ -268,6 +270,8 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
 
     // 打开 App 时一天最多查一次新版本；查不到不打扰，“关于”里可以手动查
     LaunchedEffect(Unit) {
+        updater.cleanInstalled()
+        updateFlow.resumeAfterRestart(update)
         if (updater.checkDue) {
             runCatching { updater.check() }
                 .onSuccess {
@@ -324,6 +328,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                             onRefresh = ::refresh,
                             onOpenSite = ::openSite,
                             update = update.takeUnless { updateDismissed },
+                            updateFlow = updateFlow,
                             onDismissUpdate = {
                                 update?.let(updater::dismiss)
                                 updateDismissed = true
@@ -345,6 +350,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                         Tab.About -> AboutScreen(
                             currentVersion = updater.currentVersion,
                             update = update,
+                            updateFlow = updateFlow,
                             onCheckUpdate = {
                                 val found = updater.check()
                                 update = found

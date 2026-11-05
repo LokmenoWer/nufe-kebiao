@@ -40,6 +40,7 @@ import wiki.nufe.kebiao.data.AppUpdate
 internal fun AboutScreen(
     currentVersion: String,
     update: AppUpdate?,
+    updateFlow: UpdateFlow,
     onCheckUpdate: suspend () -> AppUpdate?,
 ) {
     val context = LocalContext.current
@@ -98,12 +99,22 @@ internal fun AboutScreen(
                 "检查更新",
                 when {
                     checking -> "检查中…"
-                    update != null -> "新版本 ${update.version}"
-                    else -> checkResult ?: "点按检查"
+                    update == null -> checkResult ?: "点按检查"
+                    else -> when (val step = updateFlow.step) {
+                        UpdateStep.Idle -> "更新到 ${update.version}"
+                        is UpdateStep.Downloading -> step.percent?.let { "下载中 $it%" } ?: "下载中…"
+                        UpdateStep.NeedPermission -> "去允许安装"
+                        is UpdateStep.Failed -> "更新失败，用浏览器下载"
+                    }
                 },
             ) {
                 if (update != null) {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url)))
+                    when (updateFlow.step) {
+                        UpdateStep.Idle -> updateFlow.start(update)
+                        is UpdateStep.Downloading -> Unit
+                        UpdateStep.NeedPermission -> updateFlow.openPermissionSettings()
+                        is UpdateStep.Failed -> updateFlow.openInBrowser(update)
+                    }
                 } else if (!checking) {
                     checking = true
                     scope.launch {

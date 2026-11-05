@@ -36,6 +36,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -103,20 +104,49 @@ import wiki.nufe.kebiao.widget.roomText
 import wiki.nufe.kebiao.widget.size
 
 @Composable
-internal fun UpdateBanner(update: AppUpdate, onDismiss: () -> Unit) {
-    val context = LocalContext.current
+internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> Unit) {
+    val step = flow.step
     SectionCard {
         Text("发现新版本 ${update.version}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Hint("下载安装包后覆盖安装即可，课表链接和设置都会保留。")
+        when (step) {
+            UpdateStep.Idle -> Hint("点“立即更新”会自动下载，再由系统确认安装；课表链接和设置都会保留。")
+            is UpdateStep.Downloading -> {
+                Hint(if (step.percent != null) "正在下载 ${step.percent}%" else "正在下载…")
+                Spacer(Modifier.height(6.dp))
+                if (step.percent != null) {
+                    LinearProgressIndicator(progress = { step.percent / 100f }, modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+            UpdateStep.NeedPermission -> Hint("第一次更新要允许本 App“安装未知应用”，打开后回到这里会继续安装。")
+            is UpdateStep.Failed -> Text(step.message, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        }
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(
-                onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url))) },
-                contentPadding = PaddingValues(horizontal = 4.dp),
-            ) { Text("查看", fontSize = 13.sp) }
-            TextButton(onClick = onDismiss, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                Text("先不更新", fontSize = 13.sp)
+            val pad = PaddingValues(horizontal = 4.dp)
+            when (step) {
+                UpdateStep.Idle -> TextButton(onClick = { flow.start(update) }, contentPadding = pad) {
+                    Text("立即更新", fontSize = 13.sp)
+                }
+                is UpdateStep.Downloading -> TextButton(onClick = flow::cancel, contentPadding = pad) {
+                    Text("取消", fontSize = 13.sp)
+                }
+                UpdateStep.NeedPermission -> TextButton(onClick = flow::openPermissionSettings, contentPadding = pad) {
+                    Text("去允许", fontSize = 13.sp)
+                }
+                is UpdateStep.Failed -> {
+                    TextButton(onClick = { flow.start(update) }, contentPadding = pad) {
+                        Text("重试", fontSize = 13.sp)
+                    }
+                    TextButton(onClick = { flow.openInBrowser(update) }, contentPadding = pad) {
+                        Text("用浏览器下载", fontSize = 13.sp)
+                    }
+                }
+            }
+            if (step !is UpdateStep.Downloading) {
+                TextButton(onClick = onDismiss, contentPadding = pad) { Text("先不更新", fontSize = 13.sp) }
             }
         }
     }
@@ -155,6 +185,7 @@ internal fun HomeScreen(
     onRefresh: () -> Unit,
     onOpenSite: () -> Unit,
     update: AppUpdate?,
+    updateFlow: UpdateFlow,
     onDismissUpdate: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -196,7 +227,7 @@ internal fun HomeScreen(
             Spacer(Modifier.height(10.dp))
         }
         update?.let {
-            UpdateBanner(it, onDismissUpdate)
+            UpdateBanner(it, updateFlow, onDismissUpdate)
             Spacer(Modifier.height(14.dp))
         }
         snapshot?.payload?.takeIf { it.needsLogin }?.let { payload ->

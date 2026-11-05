@@ -14,6 +14,9 @@
     <!-- 国产 ROM 会把后台 App 冻结并推迟闹钟，需要用户允许后台运行 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- App 内更新：下载好新版本后打开系统安装界面，每次都由用户确认 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

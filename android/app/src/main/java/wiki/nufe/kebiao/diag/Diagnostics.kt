@@ -105,6 +105,7 @@ object Diagnostics {
                         ?.isIgnoringBatteryOptimizations(context.packageName) == true
                 }",
             )
+            appendLine("安装未知应用：${context.packageManager.canRequestPackageInstalls()}")
             appendLine("准时提醒：${Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true}")
             appendLine(
                 "系统实时提醒：${

@@ -62,4 +62,32 @@ class UpdateCheckTest {
         assertNull(UpdateCheck.pick(list(release("2.0.0", url = "https://evil.example/x")), "1.1.1"))
         assertNull(UpdateCheck.pick(list(release("2.0.0", url = "http://github.com/LokmenoWer/nufe-kebiao/releases/x")), "1.1.1"))
     }
+
+    @Test
+    fun onlyTrustsApkFromOwnReleases() {
+        fun asset(url: String) = release("2.0.0").put(
+            "assets", JSONArray().put(JSONObject().put("name", "app.apk").put("browser_download_url", url)),
+        )
+        val good = "https://github.com/LokmenoWer/nufe-kebiao/releases/download/2.0.0/app.apk"
+        assertEquals(good, UpdateCheck.pick(list(asset(good)), "1.1.1")?.apkUrl)
+        assertNull(UpdateCheck.pick(list(asset("https://evil.example/app.apk")), "1.1.1")?.apkUrl)
+        assertNull(UpdateCheck.pick(list(release("2.0.0")), "1.1.1")?.apkUrl)
+    }
+
+    @Test
+    fun mirrorReleaseIsItsOwnApk() {
+        val site = "https://kebiao.nufe.wiki/android/apk/"
+        val json = list(release("2.0.0", url = "${site}2.0.0.apk"))
+        assertEquals("${site}2.0.0.apk", UpdateCheck.pick(json, "1.1.1", site)?.apkUrl)
+    }
+
+    @Test
+    fun fallsBackToMirrorForDownload() {
+        val site = "https://kebiao.nufe.wiki/"
+        val mirror = "https://kebiao.nufe.wiki/android/apk/2.0.0.apk"
+        val github = "https://github.com/LokmenoWer/nufe-kebiao/releases/download/2.0.0/app.apk"
+        assertEquals(listOf(github, mirror), UpdateCheck.downloadSources(AppUpdate("2.0.0", "page", github), site))
+        assertEquals(listOf(mirror), UpdateCheck.downloadSources(AppUpdate("2.0.0", "page", mirror), site))
+        assertEquals(listOf(mirror), UpdateCheck.downloadSources(AppUpdate("2.0.0", "page"), site))
+    }
 }
