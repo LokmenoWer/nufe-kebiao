@@ -1,5 +1,9 @@
 package wiki.nufe.kebiao.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
@@ -17,6 +21,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -66,9 +72,9 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
                         now = now,
                         currentDay = currentDay,
                         tomorrow = tomorrow,
-                        modifier = Modifier.size(84.dp),
+                        modifier = Modifier.size(112.dp),
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(6.dp))
                     Column(Modifier.weight(1f)) {
                         if (next != null) {
                             Text(
@@ -79,7 +85,7 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 "${next.lesson.start}–${next.lesson.end}",
-                                fontSize = 15.sp,
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                             )
@@ -129,9 +135,13 @@ private fun RhythmRing(
     modifier: Modifier,
 ) {
     val handColor = MaterialTheme.colorScheme.onSurface
+    val spin = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        spin.animateTo(1f, tween(durationMillis = 1100, easing = FastOutSlowInEasing))
+    }
     Box(modifier, contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(96.dp)) {
-            val stroke = 7.dp.toPx()
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 8.dp.toPx()
             val inset = stroke / 2
             val arcSize = Size(size.width - stroke, size.height - stroke)
             drawArc(
@@ -159,7 +169,7 @@ private fun RhythmRing(
                 }
             }
             if (currentDay) {
-                val angle = (now.minutes / 1440f * 360f - 90f) * (Math.PI / 180).toFloat()
+                val angle = (now.minutes / 1440f * 360f - 90f + spin.value * 360f) * (Math.PI / 180).toFloat()
                 val radius = size.minDimension / 2 - stroke
                 val center = Offset(size.width / 2, size.height / 2)
                 val startRadius = size.minDimension * 0.28f
@@ -181,10 +191,10 @@ private fun RhythmRing(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 if (tomorrow) "明天" else "今天",
-                fontSize = 9.sp,
+                fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("${lessons.size} 节", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text("${lessons.size} 节", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -193,53 +203,92 @@ private fun RhythmRing(
 internal fun SemesterProgressCard(week: Int?, modifier: Modifier = Modifier) {
     if (week == null || week <= 0) return
     val current = week.coerceIn(1, TOTAL_WEEKS)
-    val outline = MaterialTheme.colorScheme.outline
+    val slotBorder = MaterialTheme.colorScheme.outline
+    val currentBorder = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+    val blank = MaterialTheme.colorScheme.surface
+    val fill = remember { Animatable(0f) }
+    LaunchedEffect(current) {
+        fill.snapTo(0f)
+        fill.animateTo(
+            current.toFloat(),
+            tween(durationMillis = 180 + current * 80, easing = LinearOutSlowInEasing),
+        )
+    }
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(26.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, outline.copy(alpha = 0.75f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.75f)),
     ) {
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("学期", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("学期进度", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             Canvas(Modifier.weight(1f).width(18.dp)) {
-                val gap = 1.5.dp.toPx()
+                val gap = 2.dp.toPx()
                 val height = (size.height - gap * (TOTAL_WEEKS - 1)) / TOTAL_WEEKS
+                val radius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
                 for (w in 1..TOTAL_WEEKS) {
-                    val top = (w - 1) * (height + gap)
-                    val color = weekColor(w).copy(alpha = if (w <= current) 1f else 0.18f)
-                    drawRoundRect(
-                        color = color,
-                        topLeft = Offset(0f, top),
-                        size = Size(size.width, height),
-                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
-                    )
-                    if (w == current) {
+                    val top = (TOTAL_WEEKS - w) * (height + gap)
+                    if (w <= current) {
+                        val reveal = (fill.value - (w - 1)).coerceIn(0f, 1f)
+                        if (reveal > 0f) {
+                            val h = height * reveal
+                            val r = CornerRadius(minOf(2.dp.toPx(), h / 2), minOf(2.dp.toPx(), h / 2))
+                            drawRoundRect(
+                                color = weekColor(w),
+                                topLeft = Offset(0f, top + height - h),
+                                size = Size(size.width, h),
+                                cornerRadius = r,
+                            )
+                        }
                         drawRoundRect(
-                            color = outline,
+                            color = slotBorder,
                             topLeft = Offset(0f, top),
                             size = Size(size.width, height),
-                            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                            cornerRadius = radius,
+                            style = Stroke(1.dp.toPx()),
+                        )
+                    } else {
+                        drawRoundRect(
+                            color = blank,
+                            topLeft = Offset(0f, top),
+                            size = Size(size.width, height),
+                            cornerRadius = radius,
+                        )
+                        drawRoundRect(
+                            color = slotBorder,
+                            topLeft = Offset(0f, top),
+                            size = Size(size.width, height),
+                            cornerRadius = radius,
+                            style = Stroke(1.dp.toPx()),
+                        )
+                    }
+                    if (w == current) {
+                        drawRoundRect(
+                            color = currentBorder,
+                            topLeft = Offset(0f, top),
+                            size = Size(size.width, height),
+                            cornerRadius = radius,
                             style = Stroke(1.dp.toPx()),
                         )
                     }
                 }
             }
             Spacer(Modifier.height(6.dp))
-            Text("$week/$TOTAL_WEEKS", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$week/$TOTAL_WEEKS", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
 private fun weekColor(week: Int): Color = when (week) {
     in 1..3 -> Color(0xFF8FD694)   // 浅绿
-    in 4..7 -> Color(0xFF2F9E44)   // 深绿
-    in 8..11 -> Color(0xFF4B63E0)  // 蓝
-    in 12..15 -> Color(0xFFE8590C) // 橙
+    in 4..6 -> Color(0xFF2F9E44)   // 深绿
+    in 7..9 -> Color(0xFF4B63E0)   // 蓝
+    in 10..12 -> Color(0xFF7048E8) // 紫
+    in 13..15 -> Color(0xFFE8590C) // 橙
     else -> Color(0xFFE03131)      // 红
 }
 

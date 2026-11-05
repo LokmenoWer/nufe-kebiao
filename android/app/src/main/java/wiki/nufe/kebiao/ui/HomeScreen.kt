@@ -223,7 +223,7 @@ internal fun HomeScreen(
     ) {
         HeaderBlock()
         Spacer(Modifier.height(12.dp))
-        StatusPill(plan, now)
+        EnterUp { StatusPill(plan, now) }
         if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
         if (message != null) {
             val isSuccess = message == "已绑定这台设备。"
@@ -242,11 +242,13 @@ internal fun HomeScreen(
             LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
             Spacer(Modifier.height(14.dp))
         }
-        TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
+        EnterUp(delayMillis = 70) {
+            TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
+        }
         Spacer(Modifier.height(14.dp))
         val week = snapshot?.payload?.week?.week
         Row(
-            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.Top,
         ) {
@@ -256,7 +258,7 @@ internal fun HomeScreen(
             if (week != null && week > 0) {
                 SemesterProgressCard(
                     week = week,
-                    modifier = Modifier.width(62.dp).fillMaxHeight(),
+                    modifier = Modifier.width(56.dp).fillMaxHeight(),
                 )
             }
         }
