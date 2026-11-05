@@ -194,6 +194,7 @@ internal fun HomeScreen(
     onDismissUpdate: () -> Unit,
     initialWeek: Boolean = false,
     viewPulse: Int = 0,
+    onViewConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var now by remember { mutableStateOf(Now.current()) }
@@ -241,7 +242,7 @@ internal fun HomeScreen(
             LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
             Spacer(Modifier.height(14.dp))
         }
-        TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse)
+        TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
         Spacer(Modifier.height(14.dp))
         WidgetSection()
         Spacer(Modifier.height(14.dp))
@@ -355,10 +356,14 @@ private fun TodayCardView(
     onRefresh: () -> Unit,
     initialWeek: Boolean,
     viewPulse: Int,
+    onViewConsumed: () -> Unit,
 ) {
     var mode by remember { mutableStateOf(CardMode.DAY) }
     LaunchedEffect(viewPulse, initialWeek) {
-        if (viewPulse > 0) mode = if (initialWeek) CardMode.WEEK else CardMode.DAY
+        if (viewPulse > 0) {
+            mode = if (initialWeek) CardMode.WEEK else CardMode.DAY
+            onViewConsumed()
+        }
     }
     var preferNextWeek by remember { mutableStateOf<Boolean?>(null) }
     var selectedCourse by remember { mutableStateOf<SelectedCourse?>(null) }
