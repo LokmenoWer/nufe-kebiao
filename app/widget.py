@@ -192,37 +192,6 @@ def term_bounds(activities: list, week1: dt.date | None) -> dict | None:
     return {"first_day": min(dates).isoformat(), "last_day": max(dates).isoformat()}
 
 
-def course_progress(activities: list, week1: dt.date | None, units: dict, colors: dict,
-                    now: dt.datetime) -> list[dict]:
-    """本学期每门课已上 / 总节数，只用于 App 的课程进度；不涉及出勤。"""
-    if not week1:
-        return []
-    today = now.date()
-    current_hm = now.strftime("%H:%M")
-    stats: dict[str, dict] = {}
-    for a in activities:
-        if not isinstance(a, dict):
-            continue
-        weekday = a.get("weekday")
-        weeks = [w for w in (a.get("weekIndexes") or []) if isinstance(w, int) and 1 <= w <= 60]
-        if not isinstance(weekday, int) or not 1 <= weekday <= 7 or not weeks:
-            continue
-        name = str(a.get("courseName") or "未命名课程")
-        end = (_lesson(a, units, colors) or {}).get("end")
-        entry = stats.setdefault(name, {
-            "name": name,
-            "color": colors.get(name, PALETTE[0]),
-            "done": 0,
-            "total": 0,
-        })
-        entry["total"] += len(weeks)
-        for week in weeks:
-            date = week1 + dt.timedelta(weeks=week - 1, days=weekday - 1)
-            if date < today or (date == today and end and end <= current_hm):
-                entry["done"] += 1
-    return sorted(stats.values(), key=lambda item: (-item["total"], item["name"]))
-
-
 def _week_block(monday: dt.date, activities: list, week1: dt.date | None, units: dict, colors: dict,
                 changes: list | None = None) -> dict:
     days = [_day(monday + dt.timedelta(days=i), activities, week1, units, colors, changes) for i in range(7)]
@@ -287,7 +256,6 @@ def build(view: dict | None, week1_iso: str | None, *, status: str = "ok", now: 
         # 周末本周已经没课时，week 模式改看下周
         "next_week": next_week,
         "term": term_bounds(activities, week1),
-        "progress": course_progress(activities, week1, units, colors, now),
         "upcoming": upcoming(today, activities, week1, units, colors, recent, known_days),
         "next_change": next_change(now, [today_d, tomorrow_d]),
         # 最近一次发现调课的时刻：脚本据此在标题栏提示，并提醒到 Scriptable 里重排上课通知

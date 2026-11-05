@@ -26,7 +26,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import wiki.nufe.kebiao.data.CourseProgress
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.lessonMs
@@ -153,46 +152,28 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
     }
 }
 
+private const val TOTAL_WEEKS = 17
+
 @Composable
-internal fun CourseProgressCard(progress: List<CourseProgress>, week: Int?) {
-    if (progress.isEmpty()) return
+internal fun SemesterProgressCard(week: Int?) {
+    if (week == null || week <= 0) return
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("课程进度", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("学期进度", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            week?.let {
-                Text("第 $it 周", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        progress.take(5).forEachIndexed { index, course ->
-            if (index > 0) Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(course.name, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text(
-                    "${course.done} / ${course.total} 节",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(5.dp))
-            LinearProgressIndicator(
-                progress = {
-                    if (course.total <= 0) 0f else (course.done.toFloat() / course.total).coerceIn(0f, 1f)
-                },
-                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
-                color = parseColor(course.color),
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-            )
-        }
-        if (progress.size > 5) {
-            Spacer(Modifier.height(8.dp))
             Text(
-                "还有 ${progress.size - 5} 门课程",
+                "第 $week 周 / $TOTAL_WEEKS 周",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        Spacer(Modifier.height(10.dp))
+        LinearProgressIndicator(
+            progress = { (week.toFloat() / TOTAL_WEEKS).coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(50)),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
     }
 }
 
