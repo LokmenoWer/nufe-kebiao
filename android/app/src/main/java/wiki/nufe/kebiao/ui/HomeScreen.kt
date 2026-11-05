@@ -11,11 +11,12 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,14 +59,15 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import wiki.nufe.kebiao.R
@@ -399,7 +401,18 @@ private fun TodayCardView(
     val weekFirstDay = weekCols.firstOrNull()?.day
     val weekChanged = weekCols.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
     val weekNote = snapshot?.let { headerNote(it, weekFirstDay, now, compact = false, changed = weekChanged) }
-    val activeNote = if (mode == CardMode.WEEK) weekNote else note
+    val activeNote = if (mode == CardMode.WEEK) {
+        val warning = weekNote?.takeIf { !it.text.startsWith("第 ") }
+        val text = warning?.text ?: weekBlock?.week?.let { "第 $it 周" } ?: weekNote?.text ?: "本周"
+        val label = if (warning == null && weekBlock?.week != null && weekCols.isNotEmpty()) {
+            "$text · ${weekCols.size} 天"
+        } else {
+            text
+        }
+        Note(label, warning?.tone ?: Tone.FAINT)
+    } else {
+        note
+    }
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -570,37 +583,28 @@ private fun TodayCardView(
                 }
             }
         }
-        val showFooter = (mode == CardMode.DAY && hiddenPast > 0) || mode == CardMode.WEEK
-        if (showFooter) {
+        if (mode == CardMode.DAY && hiddenPast > 0) {
             HorizontalDivider(
                 modifier = Modifier.padding(top = 14.dp),
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (mode == CardMode.DAY) {
-                    TextButton(
-                        onClick = { showAll = !showAll },
-                        contentPadding = PaddingValues(0.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
-                            Spacer(Modifier.width(2.dp))
-                            Icon(
-                                painter = painterResource(R.drawable.ic_chevron_down),
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .size(14.dp)
-                                    .rotate(if (showAll) 180f else 0f),
-                            )
-                        }
+                TextButton(
+                    onClick = { showAll = !showAll },
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            painter = painterResource(R.drawable.ic_chevron_down),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .rotate(if (showAll) 180f else 0f),
+                        )
                     }
-                } else {
-                    Text(
-                        weekBlock?.week?.let { "第 $it 周 · ${weekCols.size} 天" } ?: "这周没有课",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             }
         }
@@ -618,30 +622,70 @@ private fun ModeToggle(
     weekLabel: String,
     onSelect: (CardMode) -> Unit,
 ) {
+    val density = LocalDensity.current
+    var dayX by remember { mutableStateOf(0f) }
+    var dayWidth by remember { mutableStateOf(0f) }
+    var weekX by remember { mutableStateOf(0f) }
+    var weekWidth by remember { mutableStateOf(0f) }
+    val targetX = if (mode == CardMode.DAY) dayX else weekX
+    val targetWidth = if (mode == CardMode.DAY) dayWidth else weekWidth
+    val indicatorX by animateDpAsState(
+        targetValue = with(density) { targetX.toDp() },
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
+        label = "mode-indicator-x",
+    )
+    val indicatorWidth by animateDpAsState(
+        targetValue = with(density) { targetWidth.toDp() },
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 500f),
+        label = "mode-indicator-width",
+    )
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(50),
     ) {
-        Row(modifier = Modifier.padding(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            ModePill(text = dayLabel, selected = mode == CardMode.DAY) { onSelect(CardMode.DAY) }
-            ModePill(text = weekLabel, selected = mode == CardMode.WEEK) { onSelect(CardMode.WEEK) }
+        Box(Modifier.padding(2.dp)) {
+            if (targetWidth > 0f) {
+                Box(
+                    Modifier
+                        .offset(x = indicatorX)
+                        .width(indicatorWidth)
+                        .height(28.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.surface),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ModePill(
+                    text = dayLabel,
+                    selected = mode == CardMode.DAY,
+                    onClick = { onSelect(CardMode.DAY) },
+                    onPosition = { x, width ->
+                        dayX = x
+                        dayWidth = width
+                    },
+                )
+                ModePill(
+                    text = weekLabel,
+                    selected = mode == CardMode.WEEK,
+                    onClick = { onSelect(CardMode.WEEK) },
+                    onPosition = { x, width ->
+                        weekX = x
+                        weekWidth = width
+                    },
+                )
+            }
         }
     }
 }
 
 @Composable
-internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
-    val springSpec = spring<Float>(dampingRatio = 0.68f, stiffness = 620f)
-    val scale by animateFloatAsState(
-        targetValue = if (selected) 1.10f else 1f,
-        animationSpec = springSpec,
-        label = "mode-pill-scale",
-    )
-    val background by animateColorAsState(
-        targetValue = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
-        animationSpec = tween(120),
-        label = "mode-pill-bg",
-    )
+internal fun ModePill(
+    text: String,
+    selected: Boolean,
+    onPosition: (Float, Float) -> Unit = { _, _ -> },
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
     val content by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onSurface
         else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -650,14 +694,15 @@ internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
     )
     Box(
         modifier = Modifier
-            .zIndex(if (selected) 1f else 0f)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+            .onGloballyPositioned { coordinates ->
+                onPosition(coordinates.positionInParent().x, coordinates.size.width.toFloat())
             }
             .clip(RoundedCornerShape(50))
-            .background(background)
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
         Text(
