@@ -1,5 +1,6 @@
 package wiki.nufe.kebiao.ui
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -92,19 +93,48 @@ internal fun liveUpdateName(): String {
     }
 }
 
+internal fun isColorOsLike(): Boolean {
+    val id = "${Build.MANUFACTURER} ${Build.BRAND}".lowercase()
+    return listOf("oppo", "oneplus", "realme").any { it in id }
+}
+
 internal fun ignoringBatteryOptimizations(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(context.packageName) == true
 
-/** 国产 ROM 的“允许后台运行”入口通常就是电池优化白名单；申请失败时退回列表页。 */
+/**
+ * ColorOS 的电池白名单只解除 Android 的限制，系统自己的“耗电管理 / 自启动”还会冻结 App。
+ * 优先打开厂商自己的后台页，入口不存在时再退回应用详情，最后才用标准电池弹窗。
+ */
 internal fun openBatteryOptimizationSettings(context: Context) {
+    if (isColorOsLike()) {
+        val oemPages = listOf(
+            ComponentName("com.oplus.battery", "com.oplus.startupapp.view.StartupAppListActivity"),
+            ComponentName("com.oplus.battery", "com.oplus.powermanager.fuelgaue.PowerConsumptionActivity"),
+            ComponentName(
+                "com.coloros.safecenter",
+                "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            ),
+        )
+        for (page in oemPages) {
+            val intent = Intent().setComponent(page).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (runCatching { context.startActivity(intent) }.isSuccess) return
+        }
+        val details = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(details) }.isSuccess) return
+    }
     val direct = Intent(
         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
         Uri.parse("package:${context.packageName}"),
-    )
-    runCatching { context.startActivity(direct) }.onFailure {
-        runCatching {
-            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    if (runCatching { context.startActivity(direct) }.isSuccess) return
+    runCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
     }
 }
