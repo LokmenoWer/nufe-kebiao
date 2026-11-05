@@ -162,9 +162,15 @@ object Reminders {
      * 课前提醒也必须能唤醒进程：国产 ROM 上普通 setExact 会被延后，
      * 用用户可见的闹钟时钟排，失败时再退回精确 / 非精确闹钟。
      */
-    private fun schedule(context: Context, atMs: Long, requestCode: Int, pending: PendingIntent) {
+    internal fun schedule(
+        context: Context,
+        atMs: Long,
+        requestCode: Int,
+        pending: PendingIntent,
+        useAlarmClock: Boolean = needsAlarmClock(),
+    ) {
         val alarms = context.getSystemService(AlarmManager::class.java)
-        if (needsAlarmClock()) {
+        if (useAlarmClock) {
             val show = PendingIntent.getActivity(
                 context,
                 requestCode + SHOW_REQUEST_OFFSET,
@@ -185,7 +191,7 @@ object Reminders {
         alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pending)
     }
 
-    private fun needsAlarmClock(): Boolean {
+    internal fun needsAlarmClock(): Boolean {
         val id = "${Build.MANUFACTURER} ${Build.BRAND}".lowercase()
         return ALARM_CLOCK_OEMS.any { it in id }
     }
@@ -305,6 +311,7 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 Reminders.reschedule(app)
+                Sync.armBoundary(app)
                 Sync.schedule(app)
                 Sync.now(app)
             } finally {

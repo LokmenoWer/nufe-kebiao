@@ -68,6 +68,7 @@
         </provider>
 
         <receiver android:name=".remind.ReminderReceiver" android:exported="false" />
+        <receiver android:name=".sync.WidgetBoundaryReceiver" android:exported="false" />
         <receiver android:name=".remind.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

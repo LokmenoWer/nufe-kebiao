@@ -95,4 +95,17 @@ class SyncScheduleTest {
         val next = Sync.nextRedrawMs(payload(), twentySecondsBefore)
         assertEquals(lessonMs(date, "18:30"), next)
     }
+
+    @Test
+    fun boundaryIsLessonStartThenEndThenAfterMidnight() {
+        assertEquals(lessonMs(date, "18:30"), Sync.nextBoundaryMs(payload(), now("13:00")))
+        assertEquals(lessonMs(date, "20:50"), Sync.nextBoundaryMs(payload(), now("18:30")))
+        assertEquals(lessonMs("2026-11-04", "00:01"), Sync.nextBoundaryMs(payload(), now("20:50")))
+    }
+
+    @Test
+    fun boundaryWaitsForMidnightWhenCacheIsStale() {
+        val tomorrow = Now(lessonMs("2026-11-04", "13:00"))
+        assertEquals(lessonMs("2026-11-05", "00:01"), Sync.nextBoundaryMs(payload(), tomorrow))
+    }
 }

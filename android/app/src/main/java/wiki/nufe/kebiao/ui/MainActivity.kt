@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
         // 强制停止、覆盖安装都会清掉 AlarmManager 队列；每次打开都按缓存补回来。
         lifecycleScope.launch(Dispatchers.IO) {
             Reminders.reschedule(this@MainActivity)
+            Sync.armBoundary(this@MainActivity)
             Sync.schedule(this@MainActivity)
         }
         publishWidgetPreviews()
