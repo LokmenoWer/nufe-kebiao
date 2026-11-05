@@ -204,7 +204,7 @@ internal fun MineScreen(
             }
             if (profile != null) Hint(
                 if (mail?.bound == true) "此处仅展示脱敏邮箱，完整地址请前往网站设置页查看。"
-                else "绑定邮箱后，当后台刷新暂停或课表发生变动时可收到邮件提醒。",
+                else "绑定后，自动刷新暂停或连续失败时会发邮件提醒。",
             )
         }
 

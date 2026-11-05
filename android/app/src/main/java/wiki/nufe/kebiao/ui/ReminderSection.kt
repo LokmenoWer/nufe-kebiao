@@ -158,7 +158,7 @@ internal fun ReminderSection(
                     if (Build.VERSION.SDK_INT >= 36) {
                         "ColorOS 16+ 支持流体云实时状态，其他系统自动使用普通通知；开课 5 分钟后自动收起。"
                     } else {
-                        "需要 Android 16 / ColorOS 16 或更高版本。"
+                        "需要 Android 16 / ColorOS 16 或 HyperOS 3。"
                     },
                 )
                 if (!alarmEnabled) {
