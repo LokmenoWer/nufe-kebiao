@@ -730,6 +730,7 @@ function palette() {
     accent: new Color("#4b63e0"),
     live: new Color("#e03131"),
     warn: new Color("#e8590c"),
+    pastBg: dyn("#e6e8ee", "#2a2d34"), // 周视图 / 铺满里已经上过的课
   };
 }
 
@@ -1036,17 +1037,19 @@ function chipNeed(lesson, name, opts, fontScale, level) {
 /** 按 chipPlan 把卡片里的字写进去。 */
 function chipBody(chip, C, lesson, name, plan, nameWeight) {
   const { sz } = plan;
+  // 上过的课整张灰掉（调过的也不再标橙色）；“调”字还留着
+  const past = lesson.state === "past";
   if (plan.time) {
     addText(chip, plan.time, {
-      size: plan.timeSize, weight: "semibold", color: lesson.changed ? C.warn : tintText(lesson.color), lines: plan.timeLines, scale: 0.9,
+      size: plan.timeSize, weight: "semibold", color: past ? C.sub : lesson.changed ? C.warn : tintText(lesson.color), lines: plan.timeLines, scale: 0.9,
     });
   }
   // 没地方写时间时，调课标记挂在课名后面；课名写不全时允许再缩一些，免得只剩半截
   addText(chip, !plan.time && lesson.changed ? `${name}·调` : name, {
-    size: sz.name, weight: nameWeight, color: lesson.changed ? C.warn : C.text, lines: plan.nameLines, scale: plan.nameFull ? 0.9 : 0.7,
+    size: sz.name, weight: nameWeight, color: past ? C.sub : lesson.changed ? C.warn : C.text, lines: plan.nameLines, scale: plan.nameFull ? 0.9 : 0.7,
   });
   if (plan.room) addText(chip, plan.room, { size: sz.room, color: C.sub, lines: plan.roomLines, scale: 0.9 });
-  if (plan.teacher) addText(chip, lesson.teachers, { size: sz.room, color: C.faint, scale: 0.9 });
+  if (plan.teacher) addText(chip, lesson.teachers, { size: sz.room, color: past ? C.sub : C.faint, scale: 0.9 });
   // 把内容顶到上面：用定长空白而不是 addSpacer()——弹性 Spacer 自带约 8pt 最小高度，
   // 格子排得满时系统会从课名里砍掉一行给它（“经济学…”就是这么来的）
   if (plan.left >= 1) chip.addSpacer(Math.floor(plan.left));
@@ -1220,7 +1223,7 @@ function lessonChip(cell, C, lesson, { width, height, large, more, needTime }) {
   chip.size = new Size(width, height);
   chip.setPadding(2, 4, 1, 2); // 上下边距压到 3pt：两节课的格子只有 35pt 上下，多 2pt 就能多写一行课名
   chip.cornerRadius = 6;
-  chip.backgroundColor = new Color(lesson.color || "#4b63e0", lesson.state === "past" ? 0.08 : 0.2);
+  chip.backgroundColor = lesson.state === "past" ? C.pastBg : new Color(lesson.color || "#4b63e0", 0.2);
   if (lesson.state === "live" || (lesson.changed && lesson.state !== "past")) {
     chip.borderColor = lesson.state === "live" ? tint : C.warn;
     chip.borderWidth = 1.5;

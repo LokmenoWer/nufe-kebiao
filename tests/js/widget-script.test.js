@@ -470,6 +470,45 @@ test("本周（大号）：每天一列，课程名和教室都在", async () =>
   assert.ok(t.includes("金融学") && t.includes("宏观经济学"));
 });
 
+test("本周 / 铺满：上过的课整张灰掉（含调过的），没上的还是课程色", async () => {
+  const chips = (widget) => {
+    const out = [];
+    const walk = (n) => {
+      if (n.kind === "stack" && n.vertical && n.cornerRadius === 6 && n.backgroundColor) out.push(n);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(widget);
+    return out;
+  };
+  const chipOf = (list, name) => list.find((c) => c.texts().some((t) => t.startsWith(name)));
+  const textNodes = (chip) => chip.children.filter((c) => c.kind === "text");
+  const days = PAYLOAD.week.days.map((d) => (d.weekday === 1
+    ? { ...d, lessons: [{ ...L("高等数学", "08:20", "09:45"), changed: true }, L("概率论", "10:00", "12:15")] }
+    : d));
+  const payload = { ...PAYLOAD, week: { ...PAYLOAD.week, days } };
+  for (const parameter of ["week", "full"]) {
+    const { widget } = await runWidgetScript({ payload, family: "large", parameter, url: URL_OK, nowMs: NOW });
+    const list = chips(widget);
+    const past = chipOf(list, "高等数学");
+    const live = chipOf(list, "概率论");
+    const later = chipOf(list, "宏观经济学");
+    // 灰底（随深浅色变化），不是课程色
+    assert.equal(past.backgroundColor.hex, undefined, parameter);
+    assert.equal(past.backgroundColor.light.hex, "#e6e8ee", parameter);
+    assert.equal(past.backgroundColor.dark.hex, "#2a2d34", parameter);
+    assert.equal(later.backgroundColor.hex, "#4b63e0", parameter);
+    // 上过的课所有字同一个灰色；调过的也不再标橙色，也没有边框
+    const pastTexts = textNodes(past);
+    assert.ok(pastTexts.length >= 2, parameter);
+    for (const t of pastTexts) assert.equal(t.textColor.light.hex, "#5b6372", `${parameter}: ${t.text}`);
+    assert.ok(!past.borderWidth, parameter);
+    // 上课中、没上的不受影响
+    assert.equal(live.backgroundColor.hex, "#4b63e0", parameter);
+    assert.equal(live.borderWidth, 1.5, parameter);
+    assert.equal(textNodes(later).find((t) => t.text === "宏观经济学").textColor.light.hex, "#1a1d24", parameter);
+  }
+});
+
 test("锁屏：显示下一节 / 正在上的课", async () => {
   const { widget } = await runWidgetScript({ payload: PAYLOAD, family: "accessoryInline", url: URL_OK, nowMs: NOW });
   assert.deepEqual(widget.texts(), ["10:00 概率论 @B202"]);
