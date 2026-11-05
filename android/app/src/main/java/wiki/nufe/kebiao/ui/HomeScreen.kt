@@ -110,7 +110,7 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
         Text("发现新版本 ${update.version}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         when (step) {
-            UpdateStep.Idle -> Hint("点“立即更新”会自动下载，再由系统确认安装；课表链接和设置都会保留。")
+            UpdateStep.Idle -> Hint("点击“立即更新”将自动下载安装包并校验签名，原有课表连接与提醒设置均会保留。")
             is UpdateStep.Downloading -> {
                 Hint(if (step.percent != null) "正在下载 ${step.percent}%" else "正在下载…")
                 Spacer(Modifier.height(6.dp))
@@ -120,7 +120,7 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
             }
-            UpdateStep.NeedPermission -> Hint("第一次更新要允许本 App“安装未知应用”，打开后回到这里会继续安装。")
+            UpdateStep.NeedPermission -> Hint("首次应用内更新需授予“安装未知应用”权限，开启后返回即可继续安装。")
             is UpdateStep.Failed -> Text(step.message, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(6.dp))
@@ -163,7 +163,7 @@ internal fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit,
             color = MaterialTheme.colorScheme.error,
         )
         Spacer(Modifier.height(4.dp))
-        Hint("课表已暂停更新，现在显示的可能不是最新的。到网站重新登录一次，就会恢复自动更新。")
+        Hint("后台自动同步已暂停，当前展示的可能不是最新课表。请前往网站重新登录一次以恢复自动更新。")
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {

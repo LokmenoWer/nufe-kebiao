@@ -145,20 +145,20 @@ function attention(o) {
   const sc = o.scheduler;
   const st = o.user_status;
   if (!sc.enabled) out.push(["warn", "后台刷新已在配置中关闭（SCHEDULER_ENABLED=false）"]);
-  else if (!sc.alive["refresh-scheduler"]) out.push(["danger", "后台刷新线程没有在运行，需要重启服务"]);
-  if (sc.upstream_cooldown > 0) out.push(["danger", `学校要求暂停，还剩 ${sc.upstream_cooldown} 秒`]);
-  else if (sc.upstream_penalty > 0) out.push(["warn", `学校响应不稳，请求额外间隔 ${sc.upstream_penalty} 秒`]);
+  else if (!sc.alive["refresh-scheduler"]) out.push(["danger", "后台刷新线程未运行，请重启服务"]);
+  if (sc.upstream_cooldown > 0) out.push(["danger", `学校服务器要求暂停请求，剩余 ${sc.upstream_cooldown} 秒`]);
+  else if (sc.upstream_penalty > 0) out.push(["warn", `学校服务器响应异常，请求已附加 ${sc.upstream_penalty} 秒退避间隔`]);
   const paused = (st.captcha || 0) + (st.needs_rebind || 0);
-  if (paused) out.push(["warn", `${paused} 人的自动刷新已暂停，要等本人重新登录`]);
-  if (st.error) out.push(["warn", `${st.error} 人刷新出错，正在退避重试`]);
-  if (o.phone.failing) out.push(["warn", `${o.phone.failing} 人的手机代抓最近失败，由服务器兜底刷新`]);
-  if (o.release_sync.failing) out.push(["warn", `读取 GitHub 发布列表失败（${o.release_sync.last_error}），正在给旧结果`]);
+  if (paused) out.push(["warn", `${paused} 名用户的自动刷新已暂停，等待用户重新登录`]);
+  if (st.error) out.push(["warn", `${st.error} 名用户刷新出错，正处于退避重试阶段`]);
+  if (o.phone.failing) out.push(["warn", `${o.phone.failing} 名用户的手机代抓近期失败，已转由服务器兜底刷新`]);
+  if (o.release_sync.failing) out.push(["warn", `同步 GitHub Releases 失败（${o.release_sync.last_error}），当前返回已缓存的旧列表`]);
   if (o.reload && o.reload.needs_restart) {
     out.push(["warn", `热重载中途失败（${o.reload.last_reload_error}），模块可能新旧混杂，请尽快重启服务`]);
   } else if (o.reload && o.reload.last_reload_error) {
     out.push(["warn", `最近一次热重载失败（${o.reload.last_reload_error}），当前仍以第 ${o.reload.generation} 代代码运行`]);
   } else if (o.reload && !o.reload.in_sync) {
-    out.push(["warn", "磁盘上的代码和正在运行的不一致，需要热重载或重启才会生效"]);
+    out.push(["warn", "磁盘代码与当前运行版本不一致，请执行热重载或重启服务以生效"]);
   }
   return out;
 }
@@ -166,7 +166,7 @@ function attention(o) {
 function attentionBox(o) {
   const items = attention(o);
   if (!items.length) {
-    return h("div", { class: "adm-alert adm-alert-ok", attrs: { role: "status" } }, icon("check"), "运行正常，没有需要处理的事");
+    return h("div", { class: "adm-alert adm-alert-ok", attrs: { role: "status" } }, icon("check"), "系统运行正常，暂无待处理事项");
   }
   return h("div", { class: "adm-alerts", attrs: { role: "status" } }, items.map(([kind, text]) =>
     h("div", { class: `adm-alert adm-alert-${kind}` }, icon("alert"), text)));
@@ -260,25 +260,25 @@ const scheduleView = { filter: "all", q: "", data: null, list: null, seg: null }
 
 function keepaliveText(i) {
   const sso = i.sso_lost_at
-    ? `认证中心已不认（${fmtRel(i.sso_lost_at)}发现，最后一次认是 ${fmtRel(i.sso_touched_at)}）`
-    : i.sso_touched_at ? `认证中心最后确认 ${fmtRel(i.sso_touched_at)}` : "认证中心未确认";
-  return `保活：${i.keepalive_at ? `上次 ${fmtRel(i.keepalive_at)}` : "还没保活过"} · ${sso}`;
+    ? `认证中心会话已失效（${fmtRel(i.sso_lost_at)}检测到，上次有效于 ${fmtRel(i.sso_touched_at)}）`
+    : i.sso_touched_at ? `认证中心上次有效 ${fmtRel(i.sso_touched_at)}` : "认证中心尚未确认";
+  return `保活：${i.keepalive_at ? `上次 ${fmtRel(i.keepalive_at)}` : "尚未执行"} · ${sso}`;
 }
 
 function nextRefreshCell(i) {
   if (i.score !== null) return pill(`排队中 ${i.score}`, "pill-warn");
-  if (i.phone.running) return pill("手机正在抓", "pill-ok", "任务已交给手机，这段时间服务器不抢着刷");
-  if (i.phone.waiting) return pill("等手机代抓", "pill-ok", "已到期，先给手机留一段宽限，过了服务器再自己刷");
+  if (i.phone.running) return pill("手机代抓中", "pill-ok", "代抓任务已下发至手机，期间服务器暂不重复抓取");
+  if (i.phone.waiting) return pill("等待手机代抓", "pill-ok", "已到达刷新时间，优先预留窗口等待手机端拉取，超时后由服务器兜底");
   return i.next_refresh_at ? `${fmtTime(i.next_refresh_at)}（${fmtRel(i.next_refresh_at)}）` : "暂停";
 }
 
 function phoneCell(p) {
-  if (!p.linked) return "没有链接";
+  if (!p.linked) return "未生成链接";
   if (!p.enabled) return "用户已关闭";
   return [
     p.fails ? pill(`失败 ×${p.fails}`, "pill-warn") : null,
     p.fails ? " " : null,
-    p.ok_at ? `成功 ${fmtRel(p.ok_at)}` : p.fails ? null : "还没成功过",
+    p.ok_at ? `成功 ${fmtRel(p.ok_at)}` : p.fails ? null : "尚无成功记录",
   ];
 }
 
@@ -380,8 +380,8 @@ function renderAndroid(a) {
       td("最近使用", "num", fmtRel(x.last_seen_at)))), "还没有绑定的设备"),
     section("安装包镜像"),
     kv(
-      ["GitHub 同步", rel.failing ? `最后一次失败（${rel.last_error}，${fmtRel(rel.last_error_at)}），正在给旧结果`
-        : rel.last_ok_at ? `正常，${fmtRel(rel.last_ok_at)}读取` : "还没读取过"],
+      ["GitHub 同步", rel.failing ? `最近同步失败（${rel.last_error}，${fmtRel(rel.last_error_at)}），当前返回已缓存的旧列表`
+        : rel.last_ok_at ? `正常，${fmtRel(rel.last_ok_at)}同步` : "尚未同步"],
       ["最新正式版", rel.latest_stable || "—"]),
     h("div", { class: "adm-gap" }),
     table(["版本", "类型", "文件", "大小", "本站镜像"], rel.releases.map((x) => h("tr",
@@ -389,8 +389,8 @@ function renderAndroid(a) {
       td("类型", null, x.prerelease ? pill("预发布", "pill-warn") : pill("正式版", "pill-ok")),
       td("文件", "wrap", x.name),
       td("大小", "num", fmtSize(x.size)),
-      td("本站镜像", null, x.mirrored ? pill("已下载", "pill-ok") : pill("首次下载时获取")))), "没有可用的发布"),
-    h("p", { class: "hint adm-gap" }, "设备名是 App 上报的机型；这里只读，撤销设备由用户本人在设置页操作。"),
+      td("本站镜像", null, x.mirrored ? pill("已缓存", "pill-ok") : pill("首次下载时按需缓存")))), "暂无可用版本"),
+    h("p", { class: "hint adm-gap" }, "设备名称为客户端上报的机型；此处仅作展示，撤销设备请由用户本人在设置页操作。"),
   ];
 }
 
@@ -450,7 +450,7 @@ function buildLogs() {
   logSeq = 0;
   logBox = h("div", { class: "adm-log", attrs: { role: "log", "aria-live": "off" } });
   replace(body, h("div", { class: "adm-toolbar" }, level, search, follow),
-    logBox, h("p", { class: "hint adm-gap" }, "进程内只保留最近的日志，服务重启后清空；更早的请在服务器上运行 journalctl -u kebiao 查看。"));
+    logBox, h("p", { class: "hint adm-gap" }, "进程内存仅保留最近 2000 条日志，服务重启后清空；更早的历史日志请在服务器上执行 journalctl -u kebiao 查看。"));
   return (data) => {
     if (logSeq === 0 || data.seq < logSeq) logBox.replaceChildren();
     logBox.querySelector(".adm-empty")?.remove();

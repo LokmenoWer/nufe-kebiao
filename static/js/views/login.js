@@ -6,8 +6,8 @@ import { icon, REPO_URL } from "../icons.js";
 import { createSliderCaptcha } from "../components/slider-captcha.js";
 
 const INTRO = {
-  pwd: "服务器代你登录统一身份认证，只读取课表。密码不会明文落库。",
-  qr: "用学校官方 App 扫码并在手机上确认，与统一身份认证页面上的“扫码登录”相同，不涉及密码。",
+  pwd: "由服务器代登录学校统一身份认证并仅读取课表数据，密码绝不明文存储。",
+  qr: "使用学校官方 App 扫码并在手机上确认，与统一身份认证网页端“扫码登录”一致，全程不接触密码。",
 };
 
 function field(id, labelText, input) {
@@ -54,9 +54,9 @@ export function mountLogin(root, { onSuccess } = {}) {
 
   const introEl = h("p", { class: "auth-intro" }, INTRO.pwd);
   const qrRiskNote = h("div", { class: "callout callout-warn", hidden: true },
-    h("strong", {}, "扫码登录有很大风险掉登录。"),
-    "学校给扫码登录的登录态很短，本站会定时替你保持，但仍可能随时失效；掉登录后课表不再自动更新，要回来重新扫码。"
-    + "想稳定地自动刷新，请用账号密码登录。");
+    h("strong", {}, "扫码登录的登录态较易失效。"),
+    "学校为扫码登录签发的登录态有效期较短，本站虽会定时保活，但仍可能随时失效；一旦失效，课表将暂停自动更新，需重新扫码。"
+    + "若希望长期稳定自动刷新，建议使用账号密码登录。");
 
   // ---- 账号密码 ----
   const studentInput = h("input", {
@@ -84,8 +84,8 @@ export function mountLogin(root, { onSuccess } = {}) {
 
   const rememberInput = h("input", { type: "checkbox", name: "remember_password" });
   const riskNote = h("div", { class: "callout callout-warn", hidden: true },
-    "密码会用 AES-256-GCM 加密后保存在服务器上，只在登录态过期、后台刷新需要重新登录时解密使用，"
-    + "不写入日志。服务器一旦被攻破仍有泄露风险。不勾选时只保存登录态，过期后需要你回来重新登录。可随时在设置里删除。");
+    "密码将使用 AES-256-GCM 加密保存在服务器上，仅在登录态过期、后台刷新需要重新登录时解密使用，"
+    + "且绝不写入日志。若服务器遭受攻击，仍存在潜在泄露风险。不勾选时仅保存登录态，过期后需手动重新登录；保存后也可随时在设置中删除。");
 
   const passwordForm = h("form", { id: "password-form", class: "auth-form", novalidate: "", autocomplete: "on" },
     field("student-id", "学号", studentInput),
@@ -116,7 +116,7 @@ export function mountLogin(root, { onSuccess } = {}) {
     h("label", { class: "check" }, keepLoginInput,
       h("span", {}, "保持登录 180 天", h("span", { class: "muted" }, "（公共电脑请取消）"))),
     h("label", { class: "check" }, agreeInput,
-      h("span", {}, "我已了解本站为非官方工具，自愿授权本站代我登录并读取课表，并可随时删除账号与全部数据。")),
+      h("span", {}, "我已了解本站为非官方工具，自愿授权本站代登录并读取课表，且知悉可随时删除账号与全部数据。")),
     gateHint);
 
   const loginBtn = buttonWithIcon("登录并同步课表", "arrow-right", { type: "submit", form: "password-form" });
@@ -140,7 +140,7 @@ export function mountLogin(root, { onSuccess } = {}) {
   const captchaPanel = h("form", { class: "auth-step", hidden: true, novalidate: "" },
     h("div", { class: "step-heading" },
       h("h2", {}, "图形验证码"),
-      h("p", { class: "muted" }, "统一身份认证要求输入验证码。验证码只转交给你本人填写，程序不会识别或绕过。")),
+      h("p", { class: "muted" }, "统一身份认证要求输入图形验证码。验证码仅转发由你本人填写，程序不会自动识别或绕过。")),
     h("div", { class: "captcha-row" }, captchaImg, captchaRefreshBtn),
     field("captcha-code", "验证码", captchaInput),
     h("div", { class: "step-actions" },
@@ -157,7 +157,7 @@ export function mountLogin(root, { onSuccess } = {}) {
   const sliderPanel = h("div", { class: "auth-step", hidden: true },
     h("div", { class: "step-heading" },
       h("h2", {}, "安全验证"),
-      h("p", { class: "muted" }, "统一身份认证要求完成滑块拼图。拼图由你本人拖动，程序只转交结果，不会识别或代拖。")),
+      h("p", { class: "muted" }, "统一身份认证要求完成滑块验证。拼图由你本人拖动，程序仅转发操作结果，不会自动识别或代拖。")),
     slider.el,
     h("div", { class: "step-actions" },
       h("button", { type: "button", class: "btn btn-ghost", onClick: () => backToForm() }, "返回")),
@@ -197,7 +197,7 @@ export function mountLogin(root, { onSuccess } = {}) {
     brand,
     h("div", { class: "auth-heading" },
       h("h1", { id: "login-title" }, "登录"),
-      h("p", { class: "muted" }, "用南京财经大学统一身份认证账号登录，自动同步你的课表。")),
+      h("p", { class: "muted" }, "使用南京财经大学统一身份认证登录，自动同步教务系统课表。")),
     tabs,
     introEl,
     qrRiskNote,
@@ -210,8 +210,8 @@ export function mountLogin(root, { onSuccess } = {}) {
     smsPanel,
     h("details", { class: "auth-note" },
       h("summary", {}, "安全与隐私"),
-      h("p", {}, "本站不设独立密码：登录即用学校统一身份认证验证一次。默认只保存加密的登录态 cookie；"
-        + "登录态过期后需要你回来重新登录。所有课表数据都可在设置里一键删除。")));
+      h("p", {}, "本站不设独立密码，登录时直接通过学校统一身份认证校验身份。默认仅保存加密的登录态 Cookie，"
+        + "过期后需重新登录；所有账号与课表数据均可在设置中一键删除。")));
 
   const footer = h("footer", { class: "auth-footer" },
     h("p", {}, "非官方第三方工具，与南京财经大学无隶属关系。代登录可能受学校信息系统使用条款约束，请自行评估并对授权负责。"),

@@ -59,14 +59,14 @@ internal fun PermissionSetupDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "开启后，课前提醒、桌面小组件和${liveName}才能准时工作。系统会直接打开对应授权页。",
+                    "开启以下权限后，课前提醒、桌面小组件与${liveName}才能准时生效。点击对应项将直接跳转至系统授权页。",
                     fontSize = 13.sp,
                     lineHeight = 20.sp,
                 )
                 if (Build.VERSION.SDK_INT >= 33) {
                     PermissionDialogRow(
                         title = "通知",
-                        detail = "上课提醒和实时提醒",
+                        detail = "发送课前提醒与实时上课状态",
                         allowed = notificationsOk,
                         action = "允许",
                         onClick = onAllowNotifications,
@@ -75,7 +75,7 @@ internal fun PermissionSetupDialog(
                 if (Build.VERSION.SDK_INT >= 31) {
                     PermissionDialogRow(
                         title = "准时提醒",
-                        detail = "避免系统晚几分钟",
+                        detail = "使用精确闹钟，避免提醒延后",
                         allowed = exactOk,
                         action = "去设置",
                         onClick = onOpenExactAlarm,
@@ -84,7 +84,7 @@ internal fun PermissionSetupDialog(
                 if (Build.VERSION.SDK_INT >= 36) {
                     PermissionDialogRow(
                         title = "${liveName}提醒",
-                        detail = "课前显示倒计时卡片",
+                        detail = "在状态栏与通知栏展示课前倒计时卡片",
                         allowed = promotedOk,
                         action = "去设置",
                         onClick = onOpenPromoted,
@@ -92,7 +92,7 @@ internal fun PermissionSetupDialog(
                 }
                 PermissionDialogRow(
                     title = "后台运行",
-                    detail = "避免系统冻结、推迟上课提醒",
+                    detail = "避免应用在后台被系统冻结或推迟提醒",
                     allowed = batteryOk,
                     action = "去设置",
                     onClick = onOpenBattery,
@@ -154,7 +154,7 @@ internal fun SetupScreen(
         SectionCard {
             Text("连接课表", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
-            Hint("在网站 → 账号与设置 → 安卓 App（或桌面小组件）复制链接粘贴到这里，或直接点“在安卓 App 中打开”。")
+            Hint("在网站“账号与设置 → 安卓 App”中点击“在安卓 App 中打开”，或复制配对链接粘贴至下方。")
             Spacer(Modifier.height(16.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -237,7 +237,7 @@ internal fun SetupScreen(
             }
         }
         Spacer(Modifier.height(20.dp))
-        Hint("课堂提醒、桌面小组件和实时动态都从这条链接读取课表。链接只读，不要发给别人。")
+        Hint("课前提醒、桌面小组件与实时通知均通过此链接同步课表。链接本身为访问凭证，请勿转发给他人。")
         Spacer(Modifier.height(28.dp))
         Text(
             "非官方工具，与南京财经大学无隶属关系。",

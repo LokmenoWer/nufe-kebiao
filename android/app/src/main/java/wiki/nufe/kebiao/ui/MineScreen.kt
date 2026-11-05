@@ -119,7 +119,7 @@ internal fun MineScreen(
             color = MaterialTheme.colorScheme.onBackground,
         )
         Spacer(Modifier.height(4.dp))
-        Text("个人信息、链接和提醒。", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("管理个人资料、账号连接与系统权限。", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
 
         SectionCard {
@@ -147,7 +147,7 @@ internal fun MineScreen(
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        student?.code?.let { "学号 $it" } ?: if (bound) "正在同步…" else "这台设备还没绑定",
+                        student?.code?.let { "学号 $it" } ?: if (bound) "正在同步…" else "这台设备尚未绑定",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -158,7 +158,7 @@ internal fun MineScreen(
             Spacer(Modifier.height(4.dp))
             if (!bound) {
                 Spacer(Modifier.height(6.dp))
-                Hint("姓名、学号等个人信息不随课表链接传输，只发给绑定过的设备。到网站“账号与设置 → 安卓 App”点“绑定新设备”，再回到这里。")
+                Hint("姓名、学号等个人信息不包含在基础课表链接中，仅向已绑定设备提供。请前往网站“账号与设置 → 安卓 App”点击“绑定新设备”，再返回此处完成配对。")
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
@@ -203,8 +203,8 @@ internal fun MineScreen(
                 }
             }
             if (profile != null) Hint(
-                if (mail?.bound == true) "这里只显示打码邮箱，完整地址请到网站账号设置查看。"
-                else "绑定后，自动刷新暂停或连续失败时会发邮件提醒。",
+                if (mail?.bound == true) "此处仅展示脱敏邮箱，完整地址请前往网站设置页查看。"
+                else "绑定邮箱后，当后台刷新暂停或课表发生变动时可收到邮件提醒。",
             )
         }
 
@@ -308,7 +308,7 @@ internal fun MineScreen(
         SectionCard {
             Text("数据", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            Hint("桌面小组件、实时提醒和日历订阅都读取同一条只读链接。链接泄露后请在网站重新生成，或在这里移除。")
+            Hint("课表视图、桌面小组件与课前提醒均通过当前链接同步数据。若链接不慎外泄，请前往网站设置页重新生成，或在此处断开连接。")
         }
         Spacer(Modifier.height(110.dp))
     }
@@ -319,8 +319,8 @@ internal fun MineScreen(
             title = { Text("断开连接？") },
             text = {
                 Text(
-                    "断开后需要重新粘贴或绑定链接才能继续使用，课表、提醒和桌面小组件都会停止更新。" +
-                        "网站账号和网站上的设备记录不受影响；如需撤销设备，请到网站“安卓 App”里操作。",
+                    "断开后本机课表、课前提醒与桌面小组件将停止更新，需重新粘贴或配对链接才可恢复。" +
+                        "网站账号及已登记的设备记录不受影响；如需撤销设备授权，请前往网站“账号与设置 → 安卓 App”操作。",
                 )
             },
             confirmButton = {
@@ -376,7 +376,7 @@ private fun FeedbackDialog(
                     lineHeight = 20.sp,
                 )
                 Spacer(Modifier.height(4.dp))
-                Hint("诊断文件会自动隐藏小组件链接、密码和邮箱。")
+                Hint("诊断日志会自动对课表链接、密码与邮箱地址进行脱敏处理。")
                 Spacer(Modifier.height(10.dp))
                 FeedbackOption("1. GitHub Issue", "功能建议、可以公开讨论的问题", onClick = onGitHub)
                 HorizontalDivider(

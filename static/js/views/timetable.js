@@ -24,12 +24,12 @@ const STATUS_TEXT = {
 
 // 扫码登录只拿到会话级的认证中心登录态：本站定时替他保持，但学校仍可能让它失效
 function ssoKeepText(minutes) {
-  return `你是扫码登录的。学校给扫码登录的登录态较短，本站每 ${minutes || 20} 分钟替你保持一次，一般能一直自动刷新，`
-    + "但学校仍可能让它失效。用账号密码登录（可以不保存密码）最稳。";
+  return `当前为扫码登录。扫码登录态有效期较短，本站每 ${minutes || 20} 分钟自动保活一次以维持刷新，`
+    + "但学校侧仍可能使其失效。改用账号密码登录（无需保存密码）更加稳定。";
 }
-const SSO_LOST_TEXT = "学校的统一身份认证已不再接受本站保存的登录态。本站还在替你保持教务登录态，课表暂时照常刷新，"
-  + "但一旦中断就需要重新登录。建议现在退出，用账号密码重新登录（可以不保存密码）。";
-const SSO_REBIND_HINT = "（扫码登录的登录态较短，建议改用账号密码登录，可以不保存密码）";
+const SSO_LOST_TEXT = "统一身份认证登录态已失效。目前本站仍在维持教务系统会话，课表暂时照常刷新，"
+  + "但一旦中断即需重新登录。建议现在退出并改用账号密码登录（无需保存密码）。";
+const SSO_REBIND_HINT = "（扫码登录态有效期较短，建议改用账号密码登录，无需保存密码）";
 const ssoTipKey = (studentId) => `kb_sso_tip_${studentId || ""}`;
 
 function actionButton(label, iconName, onClick, { className = "btn btn-ghost btn-sm" } = {}) {
@@ -466,7 +466,7 @@ class TimetableController {
     }
     const currentWeek = this.currentWeek();
     if (!currentWeek || !this.state.timetable.week1_monday) {
-      showToast("这个学期还没有配置校历，无法定位到本周", { type: "warn" });
+      showToast("该学期尚未配置校历，暂无法定位到本周", { type: "warn" });
       return;
     }
     this.state.week = T.clamp(currentWeek, 1, this.maxWeek());
@@ -676,7 +676,7 @@ class TimetableController {
     } else if (tt) {
       parts.push("自动刷新已暂停");
     }
-    if (tt && !tt.week1_monday) parts.push("该学期未配置校历，日期和 ICS 可能不完整");
+    if (tt && !tt.week1_monday) parts.push("该学期未配置校历，具体日期与日历订阅可能不完整");
     this.meta.textContent = parts.join(" · ");
   }
 
@@ -753,11 +753,11 @@ class TimetableController {
       return;
     }
     if (!this.state.timetable) {
-      this.srStatus.textContent = "这个学期还没有课表";
+      this.srStatus.textContent = "该学期暂无课表数据";
       replace(this.viewHost, emptyState({
         iconName: "calendar",
-        title: "这个学期还没有课表",
-        text: "点击刷新，从教务系统获取这个学期的课程。",
+        title: "该学期暂无课表数据",
+        text: "点击下方按钮，从教务系统同步本学期课程。",
         actionLabel: "立即刷新",
         onAction: () => this.refresh(),
       }));
@@ -808,8 +808,8 @@ class TimetableController {
       if (!tt.week1_monday) {
         empty.push(emptyState({
           iconName: "calendar",
-          title: "还没有这一周的日期",
-          text: "教务系统没有返回本学期第 1 周的日期。可以在 semesters.json 里补充后刷新；课表本身仍然可用。",
+          title: "暂缺本周具体日期",
+          text: "教务系统未返回本学期第 1 周的起始日期，补充校历配置后刷新即可显示；课程安排本身仍可正常查看。",
           actionLabel: "立即刷新",
           onAction: () => this.refresh(),
         }));

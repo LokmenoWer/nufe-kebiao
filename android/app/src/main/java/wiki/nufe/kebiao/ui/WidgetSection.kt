@@ -138,7 +138,7 @@ internal fun WidgetSection() {
                 Column(Modifier.weight(1f)) {
                     Text("小组件准时切换", fontSize = 14.sp)
                     Spacer(Modifier.height(2.dp))
-                    Hint("上下课时更准时地切换显示，状态栏可能出现闹钟图标；需要允许“闹钟和提醒”权限。")
+                    Hint("在上下课时刻准时切换小组件状态（状态栏可能显示闹钟图标，需授予“闹钟和提醒”权限）。")
                 }
                 Switch(checked = punctual, onCheckedChange = ::setPunctual)
             }
@@ -159,7 +159,7 @@ internal fun WidgetSection() {
         AlertDialog(
             onDismissRequest = { showGuide = false },
             title = { Text("没加到桌面？") },
-            text = { Text("有的桌面（比如 OPPO、一加、vivo、华为）不让 App 直接添加小组件。请手动添加：$MANUAL_ADD") },
+            text = { Text("部分系统桌面（如 OPPO、一加、vivo、华为等）不支持从应用内直接添加小组件，请按以下步骤手动添加：\n\n$MANUAL_ADD") },
             confirmButton = { TextButton(onClick = { showGuide = false }) { Text("知道了") } },
         )
     }
@@ -170,14 +170,14 @@ private fun WidgetPickerDialog(onDismiss: () -> Unit, onPick: (Class<*>) -> Unit
     PopupCard(onDismissRequest = onDismiss) {
         Text("添加课表小组件", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Hint("选择一种放到桌面。")
+        Hint("选择一种样式添加到桌面。")
         Spacer(Modifier.height(10.dp))
-        WidgetOption("今天", "正在上课 / 下一节，课后自动切到明天", TodayReceiver::class.java, onPick)
+        WidgetOption("今天", "展示当前或下一节课倒计时，今日课程结束后自动切换为明日课表", TodayReceiver::class.java, onPick)
         HorizontalDivider(
             modifier = Modifier.padding(vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
-        WidgetOption("本周", "按节次排，写准确起止时间", WeekReceiver::class.java, onPick)
+        WidgetOption("本周", "标准教务课表网格，按节次排列并标注准确起止时间", WeekReceiver::class.java, onPick)
         Spacer(Modifier.height(4.dp))
         TextButton(
             onClick = onDismiss,

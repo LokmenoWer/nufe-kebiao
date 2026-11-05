@@ -8,9 +8,9 @@ internal const val FEEDBACK_EMAIL = "lokmenower@163.com"
 internal const val PIN_COOLDOWN_MS = 2_000L
 internal const val PIN_CHECK_DELAY_MS = 1_000L
 internal const val MANUAL_ADD =
-    "长按桌面空白处 → 小组件（OPPO / 一加是“卡片” → 拉到底“插件”）→ 找到“nufe课表”。\n" +
-        "小米 / 红米：长按桌面 → 小部件 → 推荐 → 全部应用 → 下方“安卓小部件”。\n" +
-        "vivo：长按桌面空白处 → 组件 → 拉到底点“应用挂件” → 找到“nufe课表” → 左右滑动选样式 → 添加挂件。"
+    "• 通用 / OPPO / 一加：长按桌面空白处 → 小组件（或“卡片” → 滑到底部点“插件”）→ 找到“nufe课表”。\n" +
+        "• 小米 / 红米：长按桌面空白处 → 添加小部件 → 全部应用 → 滑到底部点“安卓小部件” → 找到“nufe课表”。\n" +
+        "• vivo / iQOO：长按桌面空白处 → 原子组件 → 滑到底部点“应用挂件” → 找到“nufe课表”并添加。"
 
 internal val LiveRed = Color(0xFFE03131)
 internal val WarmOrange = Color(0xFFE8590C)

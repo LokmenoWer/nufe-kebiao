@@ -27,20 +27,20 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
     class: "widget-script", readonly: "", rows: "3", hidden: true, "aria-label": "配对链接，手动全选复制",
   });
   const devices = h("ul", { class: "device-list" });
-  const devicesHint = h("p", { class: "hint", hidden: true }, "已绑定的设备：可以读取你的姓名、学号等个人信息。");
+  const devicesHint = h("p", { class: "hint", hidden: true }, "已绑定的设备（可读取姓名、学号等个人信息，并支持手机端代抓课表）：");
 
   const steps = h("ol", { class: "widget-steps" },
-    h("li", {}, "下载安装最新版 ",
+    h("li", {}, "下载并安装最新版 ",
       h("a", { href: RELEASE_URL, target: "_blank", rel: "noopener noreferrer" }, "nufe课表 安卓 App"),
-      "；打不开 GitHub 时用", h("a", { href: "android/latest.apk" }, "本站下载"), "。"),
-    h("li", {}, "在手机浏览器里点上面的“在安卓 App 中打开”，或“复制配对链接”后在 App 里粘贴。"),
-    h("li", {}, "在 App 里点“添加课表小组件到桌面”，或长按桌面 → 小组件 → nufe课表。本周课表建议 4×3 以上。"),
-    h("li", {}, "上课提醒在 App 里选提前几分钟，并允许通知；国产系统请允许 App 自启动、后台运行。"));
+      "；若无法访问 GitHub，可直接从", h("a", { href: "android/latest.apk" }, "本站镜像下载"), "。"),
+    h("li", {}, "在手机浏览器中点击上方“在安卓 App 中打开”，或点击“复制配对链接”后打开 App 粘贴。"),
+    h("li", {}, "在 App 首页点击“添加课表小组件到桌面”，或长按手机桌面 → 小组件 → 找到“nufe课表”添加（本周课表建议使用 4×3 及以上尺寸）。"),
+    h("li", {}, "在 App 内开启“上课通知”并设定提前提醒时间；国产定制系统请在电池设置中允许 App 自启动与后台不受限运行。"));
 
   const el = h("div", { class: "widget-settings" },
-    h("p", { class: "hint" }, "用“nufe课表”App 查看今天的课、在桌面显示今天和本周的课，并在课前提醒。"
-      + "课表链接不含姓名、学号等个人信息，这些只发给绑定过的设备。绑定后 App 还会用手机的网络向学校获取课表，"
-      + "可在上面 iOS 模块的开关里关闭。手机丢失或链接泄露时请重新生成。"),
+    h("p", { class: "hint" }, "使用“nufe课表”安卓 App 查看今日与本周课程、添加桌面小组件并接收课前提醒。"
+      + "课表基础链接不包含姓名、学号等个人身份信息，个人信息仅向已完成绑定的设备提供；绑定后 App 还会协助使用手机网络向教务系统同步课表"
+      + "（可在上方 iOS 小组件模块中统一开关）。若手机丢失或链接外泄，请及时点击“重新生成”。"),
     h("div", { class: "button-row" }, createBtn, pairBtn, rotateBtn, disableBtn),
     pairRow,
     manual,
@@ -84,7 +84,7 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
   async function revoke(device) {
     if (!await confirmDialog({
       title: "撤销这台设备？",
-      message: `“${device.name}”将不能再读取个人信息，但只要有链接，课表仍然能读。手机丢失请改用“重新生成”。`,
+      message: `撤销后，“${device.name}”将无法再读取个人信息或参与手机代抓，但原链接仍可读取课表。若手机丢失或链接外泄，请使用“重新生成”。`,
       confirmText: "撤销",
       danger: true,
     })) return;
@@ -102,7 +102,7 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
       const result = await api.post("api/mobile/pair");
       pairUrl = result.pair_url;
       render();
-      status.textContent = `配对链接 ${Math.round(result.expires_in / 60)} 分钟内有效，只能用一次，不要发给别人。`;
+      status.textContent = `配对链接将在 ${Math.round(result.expires_in / 60)} 分钟后过期，仅限使用一次，请勿转发他人。`;
     } catch (error) {
       showToast(error.message, { type: "error" });
     }
@@ -120,7 +120,7 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
   async function rotate() {
     if (!await confirmDialog({
       title: "重新生成链接？",
-      message: "旧链接和所有已绑定设备会立即失效，App 里要重新配对。iOS 小组件共用这个凭证，也要重新复制脚本。",
+      message: "重新生成后，旧链接与所有已绑定设备将立即失效，安卓 App 需重新配对；iOS 小组件共用该凭证，也需重新复制脚本。",
       confirmText: "重新生成",
     })) return;
     await create();
@@ -130,21 +130,21 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
     try {
       await navigator.clipboard.writeText(pairUrl);
       manual.hidden = true;
-      status.textContent = "配对链接已复制，打开 nufe课表 App 粘贴即可。";
+      status.textContent = "配对链接已复制，请打开 nufe课表 App 粘贴。";
       showToast("配对链接已复制", { type: "success" });
     } catch {
       manual.value = pairUrl;
       manual.hidden = false;
       manual.focus();
       manual.select();
-      status.textContent = "浏览器没允许自动复制：链接已选中，请手动复制。";
+      status.textContent = "浏览器未允许自动写入剪贴板，链接已全选，请手动复制。";
     }
   }
 
   async function disable() {
     if (!await confirmDialog({
       title: "停用安卓 App 链接？",
-      message: "链接和所有已绑定设备会立即失效，App 和 iOS 小组件都会提示链接失效。",
+      message: "停用后链接与所有已绑定设备将立即失效，安卓 App 与 iOS 小组件均会提示链接失效。",
       confirmText: "停用",
       danger: true,
     })) return;

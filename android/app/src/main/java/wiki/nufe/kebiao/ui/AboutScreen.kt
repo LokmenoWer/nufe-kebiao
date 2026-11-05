@@ -76,8 +76,8 @@ internal fun AboutScreen(
             Text("把课程放在桌面。", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
             Text(
-                "给南京财经大学同学用的非官方课表工具：统一身份认证登录后同步教务课表，" +
-                    "提供网页、桌面小组件、实时提醒和日历订阅。",
+                "面向南京财经大学学生的非官方课表工具：通过学校统一身份认证自动同步教务课表，" +
+                    "提供网页端、桌面小组件、课前实时提醒与日历订阅服务。",
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
             )
