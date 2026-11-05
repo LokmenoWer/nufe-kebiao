@@ -164,14 +164,21 @@ fun solid(color: Color): ColorProvider = ColorProvider(day = color, night = colo
 fun openUrl(url: String): Action =
     actionStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
-fun openApp(context: Context): Action =
-    actionStartActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+fun openApp(context: Context, view: String? = null): Action {
+    val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    view?.let { intent.putExtra(MainActivity.EXTRA_VIEW, it) }
+    return actionStartActivity(intent)
+}
 
 /** 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。 */
 fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day"): Action {
     val snap = data.snapshot
     val site = data.site
-    return if (!data.opensApp && site != null && snap != null) openUrl(siteLink(site, snap.payload, day, view)) else openApp(context)
+    return if (!data.opensApp && site != null && snap != null) {
+        openUrl(siteLink(site, snap.payload, day, view))
+    } else {
+        openApp(context, view)
+    }
 }
 
 class RefreshAction : ActionCallback {

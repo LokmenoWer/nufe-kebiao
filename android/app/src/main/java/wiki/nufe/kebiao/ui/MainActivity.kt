@@ -25,15 +25,22 @@ import wiki.nufe.kebiao.widget.WeekReceiver
 
 class MainActivity : ComponentActivity() {
     private var incoming by mutableStateOf<String?>(null)
+    private var widgetView by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         Diag.i("app start")
         incoming = linkFrom(intent)
+        widgetView = intent?.getStringExtra(EXTRA_VIEW)
         setContent {
             KebiaoTheme {
-                AppRoot(incoming) { incoming = null }
+                AppRoot(
+                    incoming = incoming,
+                    widgetView = widgetView,
+                    consumeIncoming = { incoming = null },
+                    consumeWidgetView = { widgetView = null },
+                )
             }
         }
         // 强制停止、覆盖安装都会清掉 AlarmManager 队列；每次打开都按缓存补回来。
@@ -72,6 +79,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         linkFrom(intent)?.let { incoming = it }
+        intent.getStringExtra(EXTRA_VIEW)?.let { widgetView = it }
     }
 
     /** 网站设置页的“在安卓 App 中打开”（nufekebiao://setup?url=…&pair=…），或从别的 App 分享来的文字。 */
@@ -80,4 +88,8 @@ class MainActivity : ComponentActivity() {
         Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
         else -> null
     }?.takeIf { Repository.extractLink(it) != null }
+
+    companion object {
+        const val EXTRA_VIEW = "wiki.nufe.kebiao.extra.VIEW"
+    }
 }

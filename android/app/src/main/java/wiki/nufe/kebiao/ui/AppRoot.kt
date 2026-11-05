@@ -51,7 +51,12 @@ import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.WidgetVersion
 
 @Composable
-internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
+internal fun AppRoot(
+    incoming: String?,
+    widgetView: String?,
+    consumeIncoming: () -> Unit,
+    consumeWidgetView: () -> Unit,
+) {
     val context = LocalContext.current
     val repo = remember { Repository(context) }
     val scope = rememberCoroutineScope()
@@ -75,6 +80,8 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(Tab.Timetable) }
     var pagePulse by remember { mutableIntStateOf(0) }
+    var widgetWeek by remember { mutableStateOf(false) }
+    var widgetPulse by remember { mutableIntStateOf(0) }
     var notificationsOk by remember { mutableStateOf(Reminders.canNotify(context)) }
     var exactOk by remember {
         mutableStateOf(Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true)
@@ -296,6 +303,15 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         save(link)
     }
 
+    LaunchedEffect(widgetView) {
+        val view = widgetView ?: return@LaunchedEffect
+        consumeWidgetView()
+        tab = Tab.Timetable
+        pagePulse++
+        widgetWeek = view == "week"
+        widgetPulse++
+    }
+
     AppBackground {
         if (url == null || invalid) {
             SetupScreen(
@@ -333,6 +349,8 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                                 update?.let(updater::dismiss)
                                 updateDismissed = true
                             },
+                            initialWeek = widgetWeek,
+                            viewPulse = widgetPulse,
                         )
                         Tab.Mine -> MineScreen(
                             repo = repo,
