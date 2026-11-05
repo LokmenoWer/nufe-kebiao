@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -64,6 +65,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import wiki.nufe.kebiao.R
@@ -340,6 +342,15 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
 
 private enum class CardMode { DAY, WEEK }
 
+/** 二次函数缓动：切换周视图时先把高度变化做得更明显，再自然收住。 */
+private val QuadraticEaseInOut = Easing { fraction ->
+    if (fraction < 0.5f) {
+        2f * fraction * fraction
+    } else {
+        1f - (-2f * fraction + 2f).let { it * it } / 2f
+    }
+}
+
 private data class SelectedCourse(
     val day: Day,
     val slots: List<Slot>,
@@ -420,7 +431,18 @@ private fun TodayCardView(
                 onClick = onRefresh,
                 enabled = !busy,
                 contentPadding = PaddingValues(horizontal = 4.dp),
-            ) { Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp) }
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_refresh),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp)
+                }
+            }
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -437,7 +459,18 @@ private fun TodayCardView(
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                     modifier = Modifier.height(28.dp),
                 ) {
-                    Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            painter = painterResource(R.drawable.ic_chevron_right),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .rotate(if (showNext) 180f else 0f),
+                        )
+                    }
                 }
             }
             Spacer(Modifier.weight(1f))
@@ -455,70 +488,86 @@ private fun TodayCardView(
             Text("正在获取课表…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@SectionCard
         }
-        if (mode == CardMode.WEEK) {
-            WeekGridView(
-                columns = weekCols,
-                isHoliday = weekBlock?.week == null,
-                onSelectCourse = { selectedCourse = it },
-            )
-        } else {
-            AnimatedContent(
-                targetState = showAll,
-                transitionSpec = {
-                    (expandVertically(
-                        expandFrom = Alignment.Bottom,
-                        animationSpec = tween(320, easing = FastOutSlowInEasing),
-                    ) + fadeIn(tween(200))) togetherWith
-                        (shrinkVertically(
-                            shrinkTowards = Alignment.Bottom,
-                            animationSpec = tween(240, easing = FastOutSlowInEasing),
-                        ) + fadeOut(tween(120)))
-                },
-                label = "today-expand",
-            ) { expanded ->
-                val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
-                if (shown.isEmpty()) {
-                    Column {
-                        Text(plan.empty, fontSize = 14.sp)
-                        val preview = plan.preview
-                        if (preview != null) {
-                            Spacer(Modifier.height(12.dp))
-                            Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.height(8.dp))
-                            preview.slots.forEachIndexed { index, slot ->
-                                LessonRow(slot) {
-                                    selectedCourse = SelectedCourse(preview.day, listOf(slot))
-                                }
-                                if (index != preview.slots.lastIndex) Spacer(Modifier.height(12.dp))
-                            }
-                            if (preview.cancelled.isNotEmpty()) {
+        AnimatedContent(
+            targetState = mode,
+            transitionSpec = {
+                (expandVertically(
+                    expandFrom = Alignment.Top,
+                    animationSpec = tween(420, easing = QuadraticEaseInOut),
+                ) + fadeIn(tween(180))) togetherWith
+                    (shrinkVertically(
+                        shrinkTowards = Alignment.Top,
+                        animationSpec = tween(320, easing = QuadraticEaseInOut),
+                    ) + fadeOut(tween(160)))
+            },
+            contentAlignment = Alignment.TopCenter,
+            label = "card-mode",
+        ) { targetMode ->
+            if (targetMode == CardMode.WEEK) {
+                WeekGridView(
+                    columns = weekCols,
+                    isHoliday = weekBlock?.week == null,
+                    onSelectCourse = { selectedCourse = it },
+                )
+            } else {
+                AnimatedContent(
+                    targetState = showAll,
+                    transitionSpec = {
+                        (expandVertically(
+                            expandFrom = Alignment.Bottom,
+                            animationSpec = tween(320, easing = FastOutSlowInEasing),
+                        ) + fadeIn(tween(200))) togetherWith
+                            (shrinkVertically(
+                                shrinkTowards = Alignment.Bottom,
+                                animationSpec = tween(240, easing = FastOutSlowInEasing),
+                            ) + fadeOut(tween(120)))
+                    },
+                    label = "today-expand",
+                ) { expanded ->
+                    val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
+                    if (shown.isEmpty()) {
+                        Column {
+                            Text(plan.empty, fontSize = 14.sp)
+                            val preview = plan.preview
+                            if (preview != null) {
+                                Spacer(Modifier.height(12.dp))
+                                Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.height(8.dp))
-                                Text(
-                                    "停课：" + preview.cancelled.joinToString("、") { "${it.name} ${it.start}" },
-                                    fontSize = 11.sp,
-                                    color = WarmOrange,
-                                )
+                                preview.slots.forEachIndexed { index, slot ->
+                                    LessonRow(slot) {
+                                        selectedCourse = SelectedCourse(preview.day, listOf(slot))
+                                    }
+                                    if (index != preview.slots.lastIndex) Spacer(Modifier.height(12.dp))
+                                }
+                                if (preview.cancelled.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        "停课：" + preview.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                                        fontSize = 11.sp,
+                                        color = WarmOrange,
+                                    )
+                                }
                             }
                         }
-                    }
-                } else {
-                    Column {
-                        shown.forEachIndexed { index, slot ->
-                            LessonRow(slot) {
-                                plan.day?.let { d -> selectedCourse = SelectedCourse(d, listOf(slot)) }
+                    } else {
+                        Column {
+                            shown.forEachIndexed { index, slot ->
+                                LessonRow(slot) {
+                                    plan.day?.let { d -> selectedCourse = SelectedCourse(d, listOf(slot)) }
+                                }
+                                if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
                             }
-                            if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
                         }
                     }
                 }
-            }
-            if (plan.cancelled.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
-                    fontSize = 11.sp,
-                    color = WarmOrange,
-                )
+                if (plan.cancelled.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                        fontSize = 11.sp,
+                        color = WarmOrange,
+                    )
+                }
             }
         }
         val showFooter = (mode == CardMode.DAY && hiddenPast > 0) || mode == CardMode.WEEK
@@ -582,40 +631,40 @@ private fun ModeToggle(
 
 @Composable
 internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
-    val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = 360f)
+    val springSpec = spring<Float>(dampingRatio = 0.68f, stiffness = 620f)
     val scale by animateFloatAsState(
-        targetValue = if (selected) 1.06f else 1f,
+        targetValue = if (selected) 1.10f else 1f,
         animationSpec = springSpec,
         label = "mode-pill-scale",
     )
     val background by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
-        animationSpec = tween(180),
+        animationSpec = tween(120),
         label = "mode-pill-bg",
     )
     val content by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onSurface
         else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = tween(180),
+        animationSpec = tween(120),
         label = "mode-pill-fg",
     )
-    Surface(
-        color = background,
-        contentColor = content,
-        shape = RoundedCornerShape(50),
+    Box(
         modifier = Modifier
+            .zIndex(if (selected) 1f else 0f)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             }
             .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick),
+            .background(background)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
         Text(
             text = text,
             fontSize = 11.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            color = content,
         )
     }
 }
