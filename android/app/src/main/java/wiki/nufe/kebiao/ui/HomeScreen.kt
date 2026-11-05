@@ -521,49 +521,38 @@ private fun TodayCardView(
                 )
             }
         }
-        HorizontalDivider(
-            modifier = Modifier.padding(top = 14.dp),
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (mode == CardMode.DAY && hiddenPast > 0) {
-                TextButton(
-                    onClick = { showAll = !showAll },
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
-                        Spacer(Modifier.width(2.dp))
-                        Icon(
-                            painter = painterResource(R.drawable.ic_chevron_down),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .size(14.dp)
-                                .rotate(if (showAll) 180f else 0f),
-                        )
+        val showFooter = (mode == CardMode.DAY && hiddenPast > 0) || mode == CardMode.WEEK
+        if (showFooter) {
+            HorizontalDivider(
+                modifier = Modifier.padding(top = 14.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (mode == CardMode.DAY) {
+                    TextButton(
+                        onClick = { showAll = !showAll },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
+                            Spacer(Modifier.width(2.dp))
+                            Icon(
+                                painter = painterResource(R.drawable.ic_chevron_down),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .rotate(if (showAll) 180f else 0f),
+                            )
+                        }
                     }
+                } else {
+                    Text(
+                        weekBlock?.week?.let { "第 $it 周 · ${weekCols.size} 天" } ?: "这周没有课",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-            } else if (mode == CardMode.WEEK) {
-                Text(
-                    weekBlock?.week?.let { "第 $it 周 · ${weekCols.size} 天" } ?: "这周没有课",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = { mode = if (mode == CardMode.DAY) CardMode.WEEK else CardMode.DAY },
-                contentPadding = PaddingValues(0.dp),
-            ) {
-                Text(if (mode == CardMode.DAY) "查看本周" else "查看今天", fontSize = 12.sp)
-                Spacer(Modifier.width(2.dp))
-                Icon(
-                    painter = painterResource(R.drawable.ic_chevron_right),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(14.dp),
-                )
             }
         }
     }
