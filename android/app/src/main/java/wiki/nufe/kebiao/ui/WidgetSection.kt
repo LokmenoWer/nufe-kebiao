@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,7 +41,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
+import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.State
+import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 
@@ -52,6 +56,15 @@ internal fun WidgetSection() {
     var showPicker by remember { mutableStateOf(false) }
     var lastPinAt by remember { mutableLongStateOf(0L) }
     var showGuide by remember { mutableStateOf(false) }
+    val repo = remember { Repository(context) }
+    var opensApp by remember { mutableStateOf(repo.widgetOpensApp) }
+
+    fun setOpensApp(value: Boolean) {
+        if (value == opensApp) return
+        opensApp = value
+        repo.widgetOpensApp = value
+        scope.launch { Sync.redraw(context) }
+    }
 
     fun pin(receiver: Class<*>) {
         val now = SystemClock.elapsedRealtime()
@@ -90,6 +103,19 @@ internal fun WidgetSection() {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(18.dp),
             )
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = 14.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("点按小组件时打开", fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(50)) {
+                Row(modifier = Modifier.padding(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ModePill(text = "网页", selected = !opensApp) { setOpensApp(false) }
+                    ModePill(text = "App", selected = opensApp) { setOpensApp(true) }
+                }
+            }
         }
     }
 

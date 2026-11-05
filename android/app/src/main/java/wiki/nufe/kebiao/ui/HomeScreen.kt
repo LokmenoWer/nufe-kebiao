@@ -536,7 +536,7 @@ private fun ModeToggle(
 }
 
 @Composable
-private fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
+internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
     Surface(
         color = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
         contentColor = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,

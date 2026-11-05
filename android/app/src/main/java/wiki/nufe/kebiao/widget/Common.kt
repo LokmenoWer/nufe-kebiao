@@ -62,12 +62,18 @@ import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.ui.MainActivity
 
-/** 小组件画图需要的一切：缓存的课表、网站地址、链接是否失效。 */
-data class WidgetData(val snapshot: Snapshot?, val site: String?, val hasLink: Boolean, val linkInvalid: Boolean)
+/** 小组件画图需要的一切：缓存的课表、网站地址、链接是否失效、点击打开 App 还是网站。 */
+data class WidgetData(
+    val snapshot: Snapshot?,
+    val site: String?,
+    val hasLink: Boolean,
+    val linkInvalid: Boolean,
+    val opensApp: Boolean,
+)
 
 fun loadData(context: Context): WidgetData {
     val repo = Repository(context)
-    return WidgetData(repo.cached(), repo.siteUrl(), repo.widgetUrl != null, LinkState.isInvalid(context))
+    return WidgetData(repo.cached(), repo.siteUrl(), repo.widgetUrl != null, LinkState.isInvalid(context), repo.widgetOpensApp)
 }
 
 /**
@@ -161,11 +167,11 @@ fun openUrl(url: String): Action =
 fun openApp(context: Context): Action =
     actionStartActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
-/** 点小组件：打开网站上对应那天 / 那一周；没有网站地址时打开 App。 */
+/** 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。 */
 fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day"): Action {
     val snap = data.snapshot
     val site = data.site
-    return if (site != null && snap != null) openUrl(siteLink(site, snap.payload, day, view)) else openApp(context)
+    return if (!data.opensApp && site != null && snap != null) openUrl(siteLink(site, snap.payload, day, view)) else openApp(context)
 }
 
 class RefreshAction : ActionCallback {

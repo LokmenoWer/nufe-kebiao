@@ -57,6 +57,11 @@ class Repository(context: Context) {
         get() = prefs.getBoolean(KEY_LIVE_UPDATE, false)
         set(value) = prefs.edit().putBoolean(KEY_LIVE_UPDATE, value).apply()
 
+    /** 点小组件打开 App；默认 false 打开网站。 */
+    var widgetOpensApp: Boolean
+        get() = prefs.getBoolean(KEY_WIDGET_OPENS_APP, false)
+        set(value) = prefs.edit().putBoolean(KEY_WIDGET_OPENS_APP, value).apply()
+
     /** 本机缓存，没有就是 null。 */
     fun cached(): Snapshot? = synchronized(cacheLock) {
         if (!cacheFile.exists()) return null
@@ -281,6 +286,7 @@ class Repository(context: Context) {
         private const val KEY_REMIND = "remind_minutes"
         private const val KEY_ALARM = "alarm_enabled"
         private const val KEY_LIVE_UPDATE = "live_update_enabled"
+        private const val KEY_WIDGET_OPENS_APP = "widget_opens_app"
         private const val KEY_DEVICE = "device_id"
         private const val KEY_CLOCK = "device_clock_offset"
         const val DEFAULT_REMIND_MINUTES = 10
