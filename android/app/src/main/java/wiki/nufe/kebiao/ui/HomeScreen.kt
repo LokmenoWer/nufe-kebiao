@@ -6,7 +6,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Easing
@@ -62,6 +64,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -372,6 +375,7 @@ private fun TodayCardView(
     onViewConsumed: () -> Unit,
 ) {
     var mode by remember { mutableStateOf(CardMode.DAY) }
+    val view = LocalView.current
     LaunchedEffect(viewPulse, initialWeek) {
         if (viewPulse > 0) {
             mode = if (initialWeek) CardMode.WEEK else CardMode.DAY
@@ -391,8 +395,12 @@ private fun TodayCardView(
     val defaultWeek = payload?.let { weekToShow(it, now) }
     val showNext = preferNextWeek ?: (defaultWeek?.first == "下周")
     val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else (defaultWeek?.first ?: "本周")
-    val weekBlock = if (showNext && payload?.nextWeek != null) payload.nextWeek else defaultWeek?.second
-    val weekCols = remember(weekBlock, now.date, now.minutes) { weekColumns(weekBlock, now) }
+    val baseWeekBlock = defaultWeek?.second
+    val nextWeekBlock = payload?.nextWeek
+    val baseWeekCols = remember(baseWeekBlock, now.date, now.minutes) { weekColumns(baseWeekBlock, now) }
+    val nextWeekCols = remember(nextWeekBlock, now.date, now.minutes) { weekColumns(nextWeekBlock, now) }
+    val weekBlock = if (showNext && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
+    val weekCols = if (showNext && nextWeekBlock != null) nextWeekCols else baseWeekCols
     val weekRange = if (weekCols.isNotEmpty()) {
         val first = shortDate(weekCols.first().day.date)
         val last = shortDate(weekCols.last().day.date)
@@ -441,7 +449,10 @@ private fun TodayCardView(
                 Spacer(Modifier.width(6.dp))
             }
             TextButton(
-                onClick = onRefresh,
+                onClick = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    onRefresh()
+                },
                 enabled = !busy,
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
@@ -468,7 +479,10 @@ private fun TodayCardView(
             if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
                 Spacer(Modifier.width(8.dp))
                 TextButton(
-                    onClick = { preferNextWeek = !showNext },
+                    onClick = {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        preferNextWeek = !showNext
+                    },
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                     modifier = Modifier.height(28.dp),
                 ) {
@@ -518,11 +532,30 @@ private fun TodayCardView(
             label = "card-mode",
         ) { targetMode ->
             if (targetMode == CardMode.WEEK) {
-                WeekGridView(
-                    columns = weekCols,
-                    isHoliday = weekBlock?.week == null,
-                    onSelectCourse = { selectedCourse = it },
-                )
+                AnimatedContent(
+                    targetState = showNext,
+                    transitionSpec = {
+                        val direction = if (targetState) 1 else -1
+                        (slideInHorizontally(
+                            animationSpec = tween(360, easing = QuadraticEaseInOut),
+                            initialOffsetX = { it * direction },
+                        ) + fadeIn(tween(160))) togetherWith
+                            (slideOutHorizontally(
+                                animationSpec = tween(300, easing = QuadraticEaseInOut),
+                                targetOffsetX = { -it * direction },
+                            ) + fadeOut(tween(140)))
+                    },
+                    contentAlignment = Alignment.Center,
+                    label = "week-swipe",
+                ) { next ->
+                    val block = if (next && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
+                    val columns = if (next && nextWeekBlock != null) nextWeekCols else baseWeekCols
+                    WeekGridView(
+                        columns = columns,
+                        isHoliday = block?.week == null,
+                        onSelectCourse = { selectedCourse = it },
+                    )
+                }
             } else {
                 AnimatedContent(
                     targetState = showAll,
@@ -592,7 +625,10 @@ private fun TodayCardView(
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
-                    onClick = { showAll = !showAll },
+                    onClick = {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        showAll = !showAll
+                    },
                     contentPadding = PaddingValues(0.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -728,6 +764,7 @@ internal fun ModePill(
     onClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val view = LocalView.current
     val content by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onSurface
         else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -749,8 +786,10 @@ internal fun ModePill(
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = onClick,
-            )
+            ) {
+                view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                onClick()
+            }
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
         Text(
