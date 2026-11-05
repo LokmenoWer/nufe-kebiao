@@ -468,24 +468,25 @@ private fun TodayCardView(
             if (it.offline) "离线 · 缓存于 ${syncTime(it.fetchedAtMs)}"
             else "已同步 ${syncTime(it.fetchedAtMs)}"
         }
-        if (syncText != null) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                syncText,
-                fontSize = 11.sp,
-                color = if (snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            ModeToggle(
-                mode = mode,
-                dayLabel = plan?.title ?: "今天",
-                weekLabel = weekTitle,
-                onSelect = { mode = it },
-            )
+            if (mode == CardMode.DAY && plan != null && plan.slots.isNotEmpty()) {
+                Text(
+                    "还有 ${plan.slots.size} 门课",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else if (mode == CardMode.WEEK) {
+                Text(
+                    "共有 ${weekCols.sumOf { it.slots.size }} 门课",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.weight(1f))
             if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
-                Spacer(Modifier.width(8.dp))
                 TextButton(
                     onClick = {
                         view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
@@ -507,16 +508,14 @@ private fun TodayCardView(
                         )
                     }
                 }
+                Spacer(Modifier.width(8.dp))
             }
-            Spacer(Modifier.weight(1f))
-            if (mode == CardMode.DAY && plan != null && plan.slots.isNotEmpty()) {
-                Text(
-                    if (tomorrow) "明天还有 ${plan.slots.size} 门课" else "还有 ${plan.slots.size} 门课要上",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
+            ModeToggle(
+                mode = mode,
+                dayLabel = plan?.title ?: "今天",
+                weekLabel = weekTitle,
+                onSelect = { mode = it },
+            )
         }
         Spacer(Modifier.height(12.dp))
         if (snapshot == null || plan == null) {
@@ -626,30 +625,41 @@ private fun TodayCardView(
                 }
             }
         }
-        if (mode == CardMode.DAY && hiddenPast > 0) {
+        if (syncText != null || (mode == CardMode.DAY && hiddenPast > 0)) {
             HorizontalDivider(
                 modifier = Modifier.padding(top = 14.dp),
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
-                    onClick = {
-                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                        showAll = !showAll
-                    },
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
-                        Spacer(Modifier.width(2.dp))
-                        Icon(
-                            painter = painterResource(R.drawable.ic_chevron_down),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .size(14.dp)
-                                .rotate(if (showAll) 180f else 0f),
-                        )
+                if (syncText != null) {
+                    Text(
+                        syncText,
+                        fontSize = 11.sp,
+                        color = if (snapshot?.offline == true) WarmOrange
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (mode == CardMode.DAY && hiddenPast > 0) {
+                    TextButton(
+                        onClick = {
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                            showAll = !showAll
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
+                            Spacer(Modifier.width(2.dp))
+                            Icon(
+                                painter = painterResource(R.drawable.ic_chevron_down),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .rotate(if (showAll) 180f else 0f),
+                            )
+                        }
                     }
                 }
             }
