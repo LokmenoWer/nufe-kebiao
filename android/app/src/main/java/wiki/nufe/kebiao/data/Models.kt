@@ -18,6 +18,7 @@ data class Payload(
     val week: WeekBlock?,
     val nextWeek: WeekBlock?,
     val term: Term?,
+    val progress: List<CourseProgress> = emptyList(),
     val upcoming: Day?,
     val changedAt: Long?,
     val refresh: Refresh,
@@ -38,6 +39,7 @@ data class Payload(
                 week = o.optJSONObject("week")?.let(WeekBlock::parse),
                 nextWeek = o.optJSONObject("next_week")?.let(WeekBlock::parse),
                 term = o.optJSONObject("term")?.let { Term(it.optString("first_day"), it.optString("last_day")) },
+                progress = o.optJSONArray("progress").objects().map(CourseProgress::parse),
                 upcoming = o.optJSONObject("upcoming")?.let(Day::parse),
                 changedAt = o.long("changed_at"),
                 refresh = o.optJSONObject("refresh").let {
@@ -154,6 +156,17 @@ data class WeekBlock(val week: Int?, val monday: String, val days: List<Day>) {
 }
 
 data class Term(val firstDay: String, val lastDay: String)
+
+data class CourseProgress(val name: String, val color: String, val done: Int, val total: Int) {
+    companion object {
+        fun parse(o: JSONObject) = CourseProgress(
+            name = o.optString("name", "未命名课程"),
+            color = o.optString("color", "#4b63e0"),
+            done = o.optInt("done"),
+            total = o.optInt("total"),
+        )
+    }
+}
 
 data class Refresh(val pending: Boolean, val due: Boolean)
 
