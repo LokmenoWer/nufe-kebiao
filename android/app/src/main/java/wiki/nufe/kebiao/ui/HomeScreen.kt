@@ -2,6 +2,7 @@ package wiki.nufe.kebiao.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.text.format.DateFormat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
@@ -40,6 +41,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,7 +52,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -97,9 +98,6 @@ import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
 import wiki.nufe.kebiao.data.weekColumns
 import wiki.nufe.kebiao.data.weekToShow
-import wiki.nufe.kebiao.diag.Diag
-import wiki.nufe.kebiao.remind.LiveUpdates
-import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.widget.CHIP_GAP
 import wiki.nufe.kebiao.widget.CHIP_PAD_H
 import wiki.nufe.kebiao.widget.CHIP_PAD_V
@@ -203,13 +201,9 @@ internal fun HomeScreen(
     initialWeek: Boolean = false,
     viewPulse: Int = 0,
     onViewConsumed: () -> Unit = {},
+    onOpenSettings: () -> Unit,
 ) {
-    val context = LocalContext.current
     var now by remember { mutableStateOf(Now.current()) }
-    var liveUpdate by remember { mutableStateOf(repo.liveUpdateEnabled) }
-    var alarmEnabled by remember { mutableStateOf(repo.alarmEnabled) }
-    var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
-    var showWheel by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -230,7 +224,7 @@ internal fun HomeScreen(
             .padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
         HeaderBlock()
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(12.dp))
         StatusPill(plan, now)
         if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
         if (message != null) {
@@ -252,47 +246,38 @@ internal fun HomeScreen(
         }
         TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
         Spacer(Modifier.height(14.dp))
-        WidgetSection()
-        Spacer(Modifier.height(14.dp))
-        ReminderSection(
-            repo = repo,
-            minutes = minutes,
-            alarmEnabled = alarmEnabled,
-            onPickTime = { showWheel = true },
-            onAlarmToggle = { enabled ->
-                Diag.i("alarm enabled=$enabled")
-                alarmEnabled = enabled
-                repo.alarmEnabled = enabled
-                if (enabled && minutes == 0) {
-                    minutes = 10
-                    repo.remindMinutes = 10
-                }
-                if (!enabled) LiveUpdates.cancel(context)
-                Reminders.rescheduleAsync(context)
-            },
-            liveUpdate = liveUpdate,
-            onLiveUpdateChange = { checked ->
-                Diag.i("live update enabled=$checked")
-                liveUpdate = checked
-                repo.liveUpdateEnabled = checked
-                if (!checked) LiveUpdates.cancel(context)
-                Reminders.rescheduleAsync(context)
-            },
-        )
+        SettingsShortcut(repo = repo, onClick = onOpenSettings)
         Spacer(Modifier.height(110.dp))
     }
+}
 
-    if (showWheel) {
-        TimeWheelDialog(
-            initial = minutes,
-            onDismiss = { showWheel = false },
-            onConfirm = { selected ->
-                showWheel = false
-                minutes = selected
-                repo.remindMinutes = selected
-                Reminders.rescheduleAsync(context)
-            },
-        )
+@Composable
+private fun SettingsShortcut(repo: Repository, onClick: () -> Unit) {
+    SectionCard {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("桌面组件与上课提醒", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    if (repo.alarmEnabled) {
+                        "提醒已开启 · 提前 ${repo.remindMinutes} 分钟 · 在“我的”里管理"
+                    } else {
+                        "提醒已关闭 · 在“我的”里管理"
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                painter = painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
 
@@ -300,15 +285,15 @@ internal fun HomeScreen(
 internal fun HeaderBlock() {
     Text(
         "nufe课表",
-        fontSize = 34.sp,
+        fontSize = 28.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = (-0.5).sp,
         color = MaterialTheme.colorScheme.onBackground,
     )
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(2.dp))
     Text(
         stringResource(R.string.app_tagline),
-        fontSize = 15.sp,
+        fontSize = 14.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
@@ -345,6 +330,8 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
         }
     }
 }
+
+private fun syncTime(ms: Long): String = DateFormat.format("HH:mm", ms).toString()
 
 private enum class CardMode { DAY, WEEK }
 
@@ -458,16 +445,36 @@ private fun TodayCardView(
                 contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_refresh),
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp),
-                    )
+                    if (busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_refresh),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
                     Spacer(Modifier.width(3.dp))
                     Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp)
                 }
             }
+        }
+        val syncText = snapshot?.let {
+            if (it.offline) "离线 · 缓存于 ${syncTime(it.fetchedAtMs)}"
+            else "已同步 ${syncTime(it.fetchedAtMs)}"
+        }
+        if (syncText != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                syncText,
+                fontSize = 11.sp,
+                color = if (snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

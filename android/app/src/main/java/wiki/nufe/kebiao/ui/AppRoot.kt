@@ -352,6 +352,10 @@ internal fun AppRoot(
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
                             onViewConsumed = { widgetPulse = 0 },
+                            onOpenSettings = {
+                                tab = Tab.Mine
+                                pagePulse++
+                            },
                         )
                         Tab.Mine -> MineScreen(
                             repo = repo,
