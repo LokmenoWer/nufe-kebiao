@@ -11,8 +11,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Easing
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -69,10 +69,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Cancelled
 import wiki.nufe.kebiao.data.Day
@@ -689,41 +690,44 @@ internal fun SlidingToggle(
     val targetY = if (selectedIndex == 0) firstY else secondY
     val targetWidth = if (selectedIndex == 0) firstWidth else secondWidth
     val targetHeight = if (selectedIndex == 0) firstHeight else secondHeight
-    val springSpec = spring<Dp>(
-        dampingRatio = 0.72f,
-        stiffness = 500f,
-    )
-    val indicatorX by animateDpAsState(
-        targetValue = with(density) { targetX.toDp() },
-        animationSpec = springSpec,
-        label = "sliding-toggle-x",
-    )
-    val indicatorY by animateDpAsState(
-        targetValue = with(density) { targetY.toDp() },
-        animationSpec = springSpec,
-        label = "sliding-toggle-y",
-    )
-    val indicatorWidth by animateDpAsState(
-        targetValue = with(density) { targetWidth.toDp() },
-        animationSpec = springSpec,
-        label = "sliding-toggle-width",
-    )
-    val indicatorHeight by animateDpAsState(
-        targetValue = with(density) { targetHeight.toDp() },
-        animationSpec = springSpec,
-        label = "sliding-toggle-height",
-    )
+    val indicatorX = remember { Animatable(0f) }
+    val indicatorY = remember { Animatable(0f) }
+    val indicatorWidth = remember { Animatable(0f) }
+    val indicatorHeight = remember { Animatable(0f) }
+    var initialized by remember { mutableStateOf(false) }
+    val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = 500f)
+    LaunchedEffect(selectedIndex, targetX, targetY, targetWidth, targetHeight) {
+        if (targetWidth <= 0f || targetHeight <= 0f) return@LaunchedEffect
+        if (!initialized) {
+            // 首次排版直接落到目标位置，避免切换页面时自己播放一次滑入动画。
+            indicatorX.snapTo(targetX)
+            indicatorY.snapTo(targetY)
+            indicatorWidth.snapTo(targetWidth)
+            indicatorHeight.snapTo(targetHeight)
+            initialized = true
+        } else {
+            coroutineScope {
+                launch { indicatorX.animateTo(targetX, springSpec) }
+                launch { indicatorY.animateTo(targetY, springSpec) }
+                launch { indicatorWidth.animateTo(targetWidth, springSpec) }
+                launch { indicatorHeight.animateTo(targetHeight, springSpec) }
+            }
+        }
+    }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(50),
     ) {
         Box(Modifier.padding(2.dp)) {
-            if (targetWidth > 0f && targetHeight > 0f) {
+            if (initialized) {
                 Box(
                     Modifier
-                        .offset(x = indicatorX, y = indicatorY)
-                        .width(indicatorWidth)
-                        .height(indicatorHeight)
+                        .offset(
+                            x = with(density) { indicatorX.value.toDp() },
+                            y = with(density) { indicatorY.value.toDp() },
+                        )
+                        .width(with(density) { indicatorWidth.value.toDp() })
+                        .height(with(density) { indicatorHeight.value.toDp() })
                         .clip(RoundedCornerShape(50))
                         .background(MaterialTheme.colorScheme.surface),
                 )
