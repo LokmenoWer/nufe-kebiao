@@ -103,7 +103,7 @@ internal fun ReminderSection(
             Column(Modifier.weight(1f)) {
                 Text("上课通知", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(2.dp))
-                Hint("开启后会在设定的时间发送通知提醒上课")
+                Hint("开启后将在每节课前按设定时间发送上课提醒")
             }
             Switch(
                 checked = alarmEnabled,
@@ -156,7 +156,7 @@ internal fun ReminderSection(
                 Spacer(Modifier.height(2.dp))
                 Hint(
                     if (Build.VERSION.SDK_INT >= 36) {
-                        "仅 ColorOS 16+ 使用流体云，其他平台回退普通通知；开课 5 分钟后收起。"
+                        "ColorOS 16+ 支持流体云实时状态，其他系统自动使用普通通知；开课 5 分钟后自动收起。"
                     } else {
                         "需要 Android 16 / ColorOS 16 或 HyperOS 3。"
                     },
@@ -179,7 +179,7 @@ internal fun ReminderSection(
             manager?.canPostPromotedNotifications() != true
         ) {
             Spacer(Modifier.height(6.dp))
-            Hint("系统还没允许本应用的${liveName}提醒；到系统设置 → 通知与控制中心 → $liveName 里允许。")
+            Hint("尚未授予${liveName}权限，请前往系统“设置 → 通知与控制中心 → $liveName”中开启。")
             TextButton(
                 onClick = {
                     context.startActivity(
@@ -217,7 +217,7 @@ internal fun ReminderSection(
                 if (isColorOsLike()) {
                     "ColorOS 的电池白名单不等于后台放行；请在“耗电管理 / 自启动”里允许本应用。"
                 } else {
-                    "系统可能在后台冻结 App，导致提醒被推迟。"
+                    "系统可能会限制应用后台运行，导致课前提醒或小组件刷新被推迟。"
                 },
             )
             TextButton(

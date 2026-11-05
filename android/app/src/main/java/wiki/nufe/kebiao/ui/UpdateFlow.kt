@@ -61,7 +61,7 @@ internal class UpdateFlow(
                 step = UpdateStep.Idle
                 throw e
             } catch (_: UpdateRejectedException) {
-                step = UpdateStep.Failed("安装包校验没通过，请用浏览器下载。")
+                step = UpdateStep.Failed("安装包完整性或签名校验未通过，请改用浏览器下载。")
             } catch (_: Exception) {
                 step = UpdateStep.Failed("下载失败，请检查网络后重试。")
             }
@@ -74,7 +74,7 @@ internal class UpdateFlow(
 
     fun openPermissionSettings() {
         runCatching { context.startActivity(updater.permissionIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-            .onFailure { step = UpdateStep.Failed("打不开系统设置，请用浏览器下载。") }
+            .onFailure { step = UpdateStep.Failed("无法打开系统授权设置，请改用浏览器下载。") }
     }
 
     /** 从系统设置回来时接着装。 */
@@ -102,7 +102,7 @@ internal class UpdateFlow(
             step = UpdateStep.Idle
         } catch (_: ActivityNotFoundException) {
             Diag.w("update: no installer")
-            step = UpdateStep.Failed("这台手机打不开系统安装界面，请用浏览器下载。")
+            step = UpdateStep.Failed("无法拉起系统安装界面，请改用浏览器下载。")
         }
     }
 }

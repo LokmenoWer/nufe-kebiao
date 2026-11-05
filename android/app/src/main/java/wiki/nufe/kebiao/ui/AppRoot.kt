@@ -168,7 +168,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
         val link = Repository.extractLink(raw)
         if (link == null) {
             Diag.w("link format invalid")
-            message = "链接格式不对：应是以 /mobile/<token>.json 结尾的链接。"
+            message = "链接格式有误，请粘贴以 /mobile/<token>.json 结尾的配对链接。"
             return
         }
         busy = true
@@ -181,7 +181,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 if (snap == null || snap.offline) {
                     Diag.w("link validation offline")
                     repo.widgetUrl = previous
-                    message = "连不上服务器，无法校验链接；请检查网络后重试。"
+                    message = "无法连接服务器校验链接，请检查网络后重试。"
                     return@launch
                 }
                 snapshot = snap
@@ -205,7 +205,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 Diag.w("link invalid")
                 repo.widgetUrl = previous
                 invalid = true
-                message = "这条链接已失效，请在网站设置里重新生成。"
+                message = "这条链接已失效，请在网站设置页重新生成。"
             } catch (error: Exception) {
                 Diag.w("link validation failed: ${error.javaClass.simpleName}")
                 repo.widgetUrl = previous
@@ -226,7 +226,7 @@ internal fun AppRoot(incoming: String?, consumeIncoming: () -> Unit) {
                 if (snap != null) snapshot = snap
                 if (snap?.offline == true) {
                     Diag.w("refresh offline")
-                    message = "连不上服务器，显示的是缓存。"
+                    message = "当前无法连接服务器，已展示本机缓存课表。"
                 } else {
                     Diag.i("refresh ok")
                     snap?.let { LoginAlert.update(context, it.payload) }

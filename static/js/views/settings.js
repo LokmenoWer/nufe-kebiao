@@ -45,11 +45,11 @@ function keepaliveRows(me) {
   const keep = me.keepalive;
   if (!keep || me.status === "needs_rebind" || me.status === "captcha") return [];
   const pace = keep.paused
-    ? "已暂停（较长时间没打开本站），再次打开后恢复"
-    : `每 ${keep.every_minutes} 分钟 · 上次 ${keep.last_at ? T.relativeTime(keep.last_at) : "还没有"}`;
-  const lostNote = me.cred_mode === "password" ? "过期时会用保存的密码自动重新登录" : "教务登录态仍在保持";
-  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}发现），${lostNote}`;
-  return [["保持登录", pace], ["统一身份认证", sso]];
+    ? "已暂停（长期未访问本站），再次打开后自动恢复"
+    : `每 ${keep.every_minutes} 分钟 · 上次 ${keep.last_at ? T.relativeTime(keep.last_at) : "尚未执行"}`;
+  const lostNote = me.cred_mode === "password" ? "教务会话过期时将使用已存密码自动重登" : "教务系统会话仍在维持";
+  const sso = keep.sso_ok ? "有效" : `已失效（${T.relativeTime(keep.sso_lost_at)}检测到），${lostNote}`;
+  return [["登录保活", pace], ["统一身份认证", sso]];
 }
 
 export function openSettings({
@@ -176,17 +176,17 @@ export function openSettings({
 
     section("自动刷新",
       refreshInfo,
-      h("p", { class: "hint" }, "刷新频率自动调整：常打开、课表刚有变动时刷得更勤，放假、深夜或很久不用时放缓；"
-        + "每节课出门前（课前半小时）会再确认一次课表。同班有人先发现调课（含补课），你也会被优先刷新。"
-        + "对学校服务器的总请求量有全站上限。"),
+      h("p", { class: "hint" }, "刷新频率按需动态调整：经常访问或近期有调课时自动加密，假期、深夜或长期未用时自动放缓；"
+        + "每节课课前 30 分钟会再次确认排课，若同班同学先检测到调课（含补课），你的课表也会优先联动刷新。"
+        + "全站对学校服务器的请求总量设有保护上限。"),
       logDetails),
 
     emailSection ? section("邮件通知", emailSection.el) : null,
 
     section("日历订阅",
-      h("p", { class: "hint" }, "在 iOS / macOS 日历、Google 日历或 Outlook 里“添加订阅”并填入链接。链接本身就是凭证，泄露后请重新生成。"),
-      h("p", { class: "hint" }, "安卓：装开源的 ICSx⁵ 添加这个链接，课表会同步进系统日历，用日历自带的桌面小组件就能看。"
-        + "需要上课提醒就先在下面选好再复制（iOS 日历订阅默认会去掉提醒，iPhone 用小组件的提醒即可）。"),
+      h("p", { class: "hint" }, "在 iOS / macOS 日历、Google 日历或 Outlook 中选择“添加日历订阅”并填入下方链接。订阅链接本身即为访问凭证，如不慎泄露请及时重新生成。"),
+      h("p", { class: "hint" }, "若不安装专用 App，安卓端可通过开源应用 ICSx⁵ 订阅此链接，将课表同步至系统日历并使用系统日历小组件展示。"
+        + "如需日历课前提醒，请先在下方选好提醒时间再复制链接（iOS 日历订阅默认会忽略提醒，iPhone 建议使用桌面小组件的提醒功能）。"),
       h("label", { class: "field-inline" }, h("span", {}, "上课提醒"), alarmSelect),
       h("div", { class: "copy-row" }, icsInput, copyBtn),
       h("div", { class: "button-row" }, rotateBtn, disableBtn),
@@ -200,7 +200,7 @@ export function openSettings({
 
     h("section", { class: "settings-card danger-zone" },
       h("h3", {}, "删除数据"),
-      h("p", { class: "hint" }, "立即删除本站保存的登录态、加密密码、课表、刷新记录与订阅链接，不可恢复。"),
+      h("p", { class: "hint" }, "立即彻底删除本站保存的登录态、加密密码、课表数据、刷新记录、绑定设备与所有订阅链接，删除后不可恢复。"),
       h("div", { class: "button-row" }, deleteBtn)));
 
   content.setAttribute("aria-labelledby", "settings-title");
@@ -224,11 +224,11 @@ export function openSettings({
     statusPill.textContent = meta.label;
     statusPill.className = `pill pill-${meta.tone}`;
     credText.textContent = current.cred_mode === "password"
-      ? "已保存加密的密码：登录态过期时会自动重新登录。"
+      ? "已保存加密密码：当登录态过期时，系统会自动重新登录续期。"
       : current.sso_short
-        ? "只保存登录态，不保存密码。你是扫码登录的：学校给的登录态较短，本站会定时替你保持（见“自动刷新”）；"
-          + "改用账号密码登录（不保存密码也行）能稳定维持约半年。"
-        : "只保存登录态，不保存密码。登录态过期后需要你重新登录。";
+        ? "仅保存登录态，未保存密码。当前为扫码登录，学校签发的登录态较短，本站会定时自动保活（详见下方“自动刷新”）；"
+          + "若改用账号密码登录（无需保存密码），登录态可稳定维持约半年。"
+        : "仅保存登录态，未保存密码。登录态过期后需手动重新登录。";
     forgetBtn.hidden = current.cred_mode !== "password";
   }
 
@@ -273,7 +273,7 @@ export function openSettings({
   async function forgetPassword() {
     if (!await confirmDialog({
       title: "删除已保存的密码？",
-      message: "删除后登录态过期需要你手动重新登录。已经保存的登录态不会受影响。",
+      message: "删除后，当现有登录态过期时需手动重新登录；当前有效的登录态不受影响。",
       confirmText: "删除密码",
       danger: true,
     })) return;
@@ -303,7 +303,7 @@ export function openSettings({
   async function rotateIcs() {
     if (icsUrl && !await confirmDialog({
       title: "重新生成订阅链接？",
-      message: "旧链接会立即失效，已经订阅的日历需要手动换成新链接。",
+      message: "生成后旧链接将立即失效，已添加订阅的日历客户端需手动更换为新链接。",
       confirmText: "重新生成",
     })) return;
     try {
@@ -348,7 +348,7 @@ export function openSettings({
   async function logoutAll() {
     if (!await confirmDialog({
       title: "在所有设备上退出？",
-      message: "手机、电脑等其他浏览器都需要重新登录。",
+      message: "当前账号在手机、电脑等所有浏览器上的登录会话都将被清除，需重新登录。",
       confirmText: "全部退出",
     })) return;
     dialog.close("signed-out");
@@ -358,7 +358,7 @@ export function openSettings({
   async function deleteAccount() {
     if (!await confirmDialog({
       title: "删除账号与所有数据？",
-      message: "本站保存的登录态、加密密码、课表、刷新记录和订阅链接都会被立即删除，不可恢复。",
+      message: "本站保存的登录态、加密密码、课表数据、刷新记录、绑定设备及所有订阅链接将被立即清除，且不可恢复。",
       confirmText: "删除账号",
       danger: true,
     })) return;

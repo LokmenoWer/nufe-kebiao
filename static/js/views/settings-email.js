@@ -42,7 +42,7 @@ export function createEmailSection({ mail, onChange } = {}) {
     h("div", { class: "button-row" }, testBtn, removeBtn));
 
   const el = h("div", { class: "email-settings" },
-    h("p", { class: "hint" }, "绑定邮箱后，即使没打开网站，也能在自动刷新暂停或课表变动时收到提醒。邮箱加密保存，只用于这两类通知。"),
+    h("p", { class: "hint" }, "绑定邮箱后，即使未打开网页，也能在后台刷新暂停或课表发生变动时收到邮件提醒。邮箱地址加密存储，仅用于发送上述两类通知。"),
     bindBox,
     boundBox,
     status);
@@ -99,7 +99,7 @@ export function createEmailSection({ mail, onChange } = {}) {
       codeRow.hidden = false;
       codeInput.value = "";
       codeInput.focus();
-      status.textContent = `验证码已发送到 ${result.pending_email}，10 分钟内有效。没收到请看看垃圾箱。`;
+      status.textContent = `验证码已发送至 ${result.pending_email}（10 分钟内有效），若未收到请检查垃圾邮件箱。`;
       startResendCooldown(result.retry_after);
     } catch (error) {
       status.textContent = error.message;
@@ -110,7 +110,7 @@ export function createEmailSection({ mail, onChange } = {}) {
   async function verify() {
     const code = codeInput.value.trim();
     if (!/^\d{6}$/.test(code)) {
-      status.textContent = "请输入邮件里的 6 位验证码";
+      status.textContent = "请输入邮件中的 6 位数字验证码";
       codeInput.focus();
       return;
     }
@@ -148,7 +148,7 @@ export function createEmailSection({ mail, onChange } = {}) {
     testBtn.disabled = true;
     try {
       await api.post("api/email/test");
-      status.textContent = "测试邮件已发出，几分钟内没收到请检查垃圾箱。";
+      status.textContent = "测试邮件已发出，若数分钟内未收到请检查垃圾邮件箱。";
     } catch (error) {
       status.textContent = error.message;
     } finally {
@@ -159,7 +159,7 @@ export function createEmailSection({ mail, onChange } = {}) {
   async function removeEmail() {
     if (!await confirmDialog({
       title: "解绑通知邮箱？",
-      message: "解绑后不再发送任何邮件，邮箱地址会从本站删除。",
+      message: "解绑后将停止发送所有邮件通知，且邮箱地址会立即从本站删除。",
       confirmText: "解绑",
       danger: true,
     })) return;
