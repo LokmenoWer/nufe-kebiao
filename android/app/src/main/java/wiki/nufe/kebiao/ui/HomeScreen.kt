@@ -3,12 +3,15 @@ package wiki.nufe.kebiao.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,6 +57,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -569,11 +573,32 @@ private fun ModeToggle(
 
 @Composable
 internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
+    val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = 360f)
+    val scale by animateFloatAsState(
+        targetValue = if (selected) 1.06f else 1f,
+        animationSpec = springSpec,
+        label = "mode-pill-scale",
+    )
+    val background by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
+        animationSpec = tween(180),
+        label = "mode-pill-bg",
+    )
+    val content by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onSurface
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(180),
+        label = "mode-pill-fg",
+    )
     Surface(
-        color = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
-        contentColor = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        color = background,
+        contentColor = content,
         shape = RoundedCornerShape(50),
         modifier = Modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clip(RoundedCornerShape(50))
             .clickable(onClick = onClick),
     ) {
