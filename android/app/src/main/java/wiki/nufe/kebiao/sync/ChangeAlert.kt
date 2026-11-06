@@ -24,10 +24,13 @@ object ChangeAlert {
             NotificationChannel(CHANNEL, "调课通知", NotificationManager.IMPORTANCE_DEFAULT),
         )
         val open = PendingIntent.getActivity(context, ID, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val weeks = payload.changes.mapNotNull { it.week }.distinct().sorted()
+        val text = if (weeks.isEmpty()) "本机发现课程调整，点击查看详细信息。"
+        else "第${weeks.joinToString("、")}周调整了课程，点击查看详细信息。"
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle("课表有变化")
-            .setContentText("本机发现时间、地点、教师或停课变化，点开查看最新课表。")
+            .setContentText(text)
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()
