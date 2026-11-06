@@ -453,25 +453,25 @@ class TimetableParserTest {
         assertEquals(1, c1.size)
         assertEquals("moved", c1[0].kind)
         assertEquals(1, c1[0].week)
-        assertEquals("原 08:20", c1[0].detail)
-        // 2 从某天调到另一天（周一 → 周二）：旧日停课 + 新日新增
+        assertEquals("08:20 → 14:00", c1[0].detail)
+        // 2 从某天调到另一天：停课 + 新增合并成一条换日
         val movedDay = parse(activity(day = 2, weeks = listOf(1)), previous = base, now = at)
         val c2 = TimetableParser.payload(movedDay, at).changes
-        assertEquals(2, c2.size)
-        assertTrue(c2.any { it.kind == "cancelled" && it.detail == "停课" })
-        assertTrue(c2.any { it.kind == "added" && it.detail == "新增" })
+        assertEquals(1, c2.size)
+        assertEquals("moved", c2[0].kind)
+        assertEquals("周一 9/7 → 周二 9/8", c2[0].detail)
         // 3 某天停课
         val cancelled = parse(previous = base, now = at)
         val c3 = TimetableParser.payload(cancelled, at).changes
         assertEquals(1, c3.size)
         assertEquals("cancelled", c3[0].kind)
-        assertEquals("停课", c3[0].detail)
+        assertEquals("周一 9/7 停课", c3[0].detail)
         // 4 新增某课一节
         val added = parse(activity(weeks = listOf(1)), activity("新课程", day = 2, weeks = listOf(1)), previous = base, now = at)
         val c4 = TimetableParser.payload(added, at).changes
         assertEquals(1, c4.size)
         assertEquals("added", c4[0].kind)
-        assertEquals("新增", c4[0].detail)
+        assertEquals("周二 9/8 新增", c4[0].detail)
         assertEquals("新课程", c4[0].name)
     }
 }

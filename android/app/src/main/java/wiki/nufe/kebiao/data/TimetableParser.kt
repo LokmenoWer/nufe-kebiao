@@ -137,8 +137,12 @@ object TimetableParser {
         val lastWeek = maxOf(thisWeekNo + 1, all.maxOfOrNull { weekNo(it.date) } ?: thisWeekNo)
         val weeks = (0L until lastWeek.toLong()).map { w -> week(monday.plusWeeks(w)) }
         // 调课明细：从已投影的 lessons.changed/was 与 cancelled 里收集"今天及以后"的变动，供通知与详情卡展示。
-        val changeItems = mutableListOf<JSONObject>()
+        // 分类后：有 was 的算时间/地点移动；同名的"停课(旧日)+新增(新日)"合并成换日；落单的叫停课/新增。
         val todayStr = today.toString()
+        data class Cand(val week: Any?, val date: String, val weekday: Int, val name: String, val lesson: JSONObject)
+        val moved = mutableListOf<Cand>()
+        val adds = mutableListOf<Cand>()
+        val cancels = mutableListOf<Cand>()
         for (block in weeks) {
             val daysArr = block.optJSONArray("days") ?: continue
             for (i in 0 until daysArr.length()) {
@@ -146,25 +150,39 @@ object TimetableParser {
                 val dateStr = d.optString("date")
                 if (dateStr < todayStr) continue
                 val wk = if (d.isNull("week")) JSONObject.NULL else d.opt("week")
+                val wd = d.optInt("weekday")
                 d.optJSONArray("lessons")?.let { lessons ->
                     for (j in 0 until lessons.length()) {
                         val l = lessons.optJSONObject(j) ?: continue
-                        if (l.optBoolean("changed")) changeItems += JSONObject()
-                            .put("week", wk).put("date", dateStr).put("name", l.optString("name"))
-                            .put("detail", l.optString("was").ifEmpty { "新增" })
-                            .put("kind", if (l.has("was")) "moved" else "added")
+                        if (!l.optBoolean("changed")) continue
+                        val cand = Cand(wk, dateStr, wd, l.optString("name"), l)
+                        if (l.optString("was").isEmpty()) adds += cand else moved += cand
                     }
                 }
                 d.optJSONArray("cancelled")?.let { cancelled ->
                     for (j in 0 until cancelled.length()) {
                         val c = cancelled.optJSONObject(j) ?: continue
-                        changeItems += JSONObject()
-                            .put("week", wk).put("date", dateStr).put("name", c.optString("name"))
-                            .put("detail", "停课").put("kind", "cancelled")
+                        cancels += Cand(wk, dateStr, wd, c.optString("name"), c)
                     }
                 }
             }
         }
+        fun label(c: Cand) = "周${WEEKDAY[c.weekday]} ${shortDate(c.date)}"
+        fun item(c: Cand, detail: String, kind: String) = JSONObject()
+            .put("week", c.week).put("date", c.date).put("name", c.name).put("detail", detail).put("kind", kind)
+        val changeItems = mutableListOf<JSONObject>()
+        val usedAdds = mutableSetOf<Int>()
+        for (c in cancels) {
+            val pair = adds.withIndex().firstOrNull { (idx, a) -> idx !in usedAdds && a.name == c.name }
+            if (pair != null) {
+                usedAdds += pair.index
+                changeItems += item(pair.value, "${label(c)} → ${label(pair.value)}", "moved")
+            } else {
+                changeItems += item(c, "${label(c)} 停课", "cancelled")
+            }
+        }
+        adds.forEachIndexed { idx, a -> if (idx !in usedAdds) changeItems += item(a, "${label(a)} 新增", "added") }
+        moved.forEach { c -> changeItems += item(c, moveDetail(c.lesson), "moved") }
         val term = if (all.isEmpty()) JSONObject.NULL else JSONObject()
             .put("first_day", all.minOf { it.date }.toString())
             .put("last_day", all.maxOf { it.date }.toString())
@@ -377,6 +395,19 @@ object TimetableParser {
             cancelled.remove(before)
         }
         return cancelled.sortedWith(lessonOrder).map { it.lesson(colors) }
+    }
+
+    /** 把 was（"原 X"）配上现在值，写成"旧 → 新"：时间/节次/教师/地点分别取对应新字段。 */
+    private fun moveDetail(l: JSONObject): String {
+        val old = l.optString("was").removePrefix("原").trim()
+        val new = when {
+            old.startsWith("教师") -> l.optString("teachers")
+            old.startsWith("第") -> "第 ${l.optString("units")} 节"
+            old.contains("–") -> "${l.optString("start")}–${l.optString("end")}"
+            Regex("""\d{1,2}:\d{2}""").matches(old) -> l.optString("start")
+            else -> l.optString("room")
+        }
+        return "$old → $new"
     }
 
     private fun colors(names: List<String>): Map<String, String> {
