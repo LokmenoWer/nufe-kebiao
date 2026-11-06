@@ -55,7 +55,7 @@ import kotlin.coroutines.resume
 
 class SchoolLoginActivity : ComponentActivity() {
     private lateinit var web: WebView
-    private var status by mutableStateOf("只在学校页面输入密码；推荐勾选“记住我”，扫码登录通常只能维持数小时。")
+    private var status by mutableStateOf("请输入学号和密码，勾选“180天免登录”；验证码登录有效期较短，优先使用密码登录。")
     private var importing by mutableStateOf(false)
     private var pageLoading by mutableStateOf(true)
     private var captureJob: Job? = null
@@ -130,7 +130,6 @@ class SchoolLoginActivity : ComponentActivity() {
                     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                             TextButton(onClick = { finish() }) { Text("返回") }
-                            TextButton(onClick = { navigationCount = 0; web.loadUrl(SchoolUrls.SSO) }, enabled = !importing) { Text("重新加载") }
                             Button(onClick = { captureWhenReady() }, enabled = !importing) { Text("导入课表") }
                         }
                         Text(status, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
