@@ -37,8 +37,6 @@ import androidx.compose.ui.unit.sp
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Now
-import wiki.nufe.kebiao.data.State
-import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.widget.parseColor
 
 private const val TOTAL_WEEKS = 17
@@ -47,7 +45,6 @@ private const val TOTAL_WEEKS = 17
 internal fun TodayRhythmCard(plan: DayPlan?, now: Now, clock12h: Boolean = true) {
     val lessons = plan?.day?.lessons.orEmpty()
     val tomorrow = plan?.title == "明天"
-    val next = plan?.slots?.firstOrNull()
     val currentDay = plan?.day?.date == now.date
 
     SectionCard {
@@ -67,66 +64,15 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now, clock12h: Boolean = true)
                     )
                 }
                 Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     RhythmRing(
-                        lessons = plan?.day?.lessons.orEmpty(),
+                        lessons = lessons,
                         now = now,
                         currentDay = currentDay,
                         tomorrow = tomorrow,
                         clock12h = clock12h,
                         modifier = Modifier.size(112.dp),
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Column(Modifier.weight(1f)) {
-                        if (next != null) {
-                            Text(
-                                if (next.state == State.LIVE) "正在上课" else "下一节",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                "${next.lesson.start}–${next.lesson.end}",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                            )
-                            Text(
-                                "${next.lesson.name} · ${next.lesson.room.ifEmpty { "地点待定" }}",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                            )
-                            val target = if (next.state == State.LIVE) {
-                                lessonMs(plan?.day?.date.orEmpty(), next.lesson.end)
-                            } else {
-                                lessonMs(plan?.day?.date.orEmpty(), next.lesson.start)
-                            }
-                            val remain = target - now.ms
-                            if (remain > 0) {
-                                Spacer(Modifier.height(3.dp))
-                                Text(
-                                    if (next.state == State.LIVE) "还剩 ${remainText(remain)}"
-                                    else "${remainText(remain)}后上课",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        } else {
-                            val headline = when {
-                                tomorrow -> "明天没有课"
-                                (plan?.total ?: 0) > 0 -> "今天的课上完了"
-                                else -> "今天没有课"
-                            }
-                            Text(headline, fontSize = 13.sp)
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                plan?.preview?.title ?: "可以休息一下。",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
                 }
             }
         }
