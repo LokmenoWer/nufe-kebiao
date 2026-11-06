@@ -371,8 +371,8 @@ private fun TodayCardView(
     val payload = snapshot?.payload
     val defaultWeek = payload?.let { weekToShow(it, now) }
     val showNext = preferNextWeek ?: (defaultWeek?.first == "下周")
-    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else (defaultWeek?.first ?: "本周")
-    val baseWeekBlock = defaultWeek?.second
+    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else "本周"
+    val baseWeekBlock = payload?.week
     val nextWeekBlock = payload?.nextWeek
     val baseWeekCols = remember(baseWeekBlock, now.date, now.minutes) { weekColumns(baseWeekBlock, now) }
     val nextWeekCols = remember(nextWeekBlock, now.date, now.minutes) { weekColumns(nextWeekBlock, now) }
