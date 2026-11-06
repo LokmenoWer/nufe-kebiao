@@ -115,6 +115,7 @@ class SchoolLoginActivity : ComponentActivity() {
                     pageLoading = false
                     if (!SchoolUrls.allowed(url) || importing || completed) return
                     val uri = android.net.Uri.parse(url)
+                    if (uri.host == SchoolUrls.AUTH_HOST) applyMfaLayoutFix(view)
                     if (uri.host != SchoolUrls.JW_HOST || uri.path.orEmpty().trimEnd('/') == "/student/login") return
                     if (uri.path.orEmpty().startsWith("/student/for-std/course-table")) {
                         captureWhenReady()
@@ -249,6 +250,11 @@ class SchoolLoginActivity : ComponentActivity() {
         web.evaluateJavascript(script) { if (continuation.isActive) continuation.resume(it ?: "null") }
     }
 
+    /** 学校移动登录模板会把内容容器算成 height:0 + overflow:hidden，将已渲染好的多因子卡片整块裁掉；这里内联撑开并兜住 Vue 重渲染。 */
+    private fun applyMfaLayoutFix(view: WebView) {
+        view.evaluateJavascript(FIX_JS, null)
+    }
+
     override fun onDestroy() {
         captureJob?.cancel()
         web.stopLoading()
@@ -262,6 +268,25 @@ class SchoolLoginActivity : ComponentActivity() {
     }
 
     companion object {
+        private val FIX_JS = """
+            (() => {
+              const sel = '.mobile-page-center-box, .mobile-page-content-box';
+              const apply = () => {
+                document.querySelectorAll(sel).forEach(el => {
+                  if (el.style.height !== 'auto') el.style.setProperty('height', 'auto', 'important');
+                  if (el.style.minHeight !== '0px') el.style.setProperty('min-height', '0', 'important');
+                  if (el.style.overflow !== 'visible') el.style.setProperty('overflow', 'visible', 'important');
+                });
+              };
+              apply();
+              if (!window.__nufeFixObs) {
+                window.__nufeFixObs = new MutationObserver(apply);
+                window.__nufeFixObs.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class']});
+              }
+              return 'applied n=' + document.querySelectorAll(sel).length;
+            })()
+        """.trimIndent()
+
         private val PAGE_SCRIPT = """
             (() => {
               if (location.origin !== 'https://jwxt.nufe.edu.cn' || !location.pathname.startsWith('/student/for-std/course-table')) return '';
