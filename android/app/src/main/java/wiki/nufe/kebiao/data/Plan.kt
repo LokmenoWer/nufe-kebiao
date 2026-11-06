@@ -151,9 +151,9 @@ fun buildTodayPlan(payload: Payload, now: Now): DayPlan {
         normalDay && tomorrow != null && tomorrow.lessons.isNotEmpty() ->
             base.copy(tomorrowHint = "明天还有 ${tomorrow.lessons.size} 节课",
                 preview = previewOf(tomorrow, now), showPreviewTitle = false)
-        // 上课日且明天没课：说明"明天没课，好好休息吧!"，下面列"下次上课"。
+        // 上课日且明天没课：今天上完课才补一句"明天没课"；今天本就空堂时不再重复，只预告下次上课。
         normalDay ->
-            base.copy(tomorrowHint = "明天没课，好好休息吧!",
+            base.copy(tomorrowHint = if (all.isEmpty()) null else "明天没课，好好休息吧!",
                 preview = nextClassDay(payload, now, null)?.let { previewOf(it, now) })
         // 假期 / 开学前 / 结课：只给"下次上课"预告。
         else -> base.copy(preview = nextClassDay(payload, now, tomorrow)?.let { previewOf(it, now) })
