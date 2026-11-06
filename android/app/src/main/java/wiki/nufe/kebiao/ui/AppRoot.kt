@@ -84,8 +84,9 @@ internal fun AppRoot(
     var fetchJob by remember { mutableStateOf<Job?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(Tab.Timetable) }
-    // 调课详情卡的"✕"关闭只在本进程内生效：切标签不丢，清理 App 后台（进程重启）后自动复原。
-    var changeDismissed by remember { mutableStateOf(setOf<String>()) }
+    // 调课详情卡"✕"关闭持久化到 prefs：关掉后即使清后台重开也不再出现，直到出现新的变动。
+    val changeSeenPrefs = remember { context.getSharedPreferences("kebiao", Context.MODE_PRIVATE) }
+    var changeDismissed by remember { mutableStateOf(changeSeenPrefs.getStringSet("change_seen", emptySet())?.toSet().orEmpty()) }
     var pagePulse by remember { mutableIntStateOf(0) }
     var widgetWeek by remember { mutableStateOf(false) }
     var widgetPulse by remember { mutableIntStateOf(0) }
@@ -319,7 +320,10 @@ internal fun AppRoot(
                                 updateDismissed = true
                             },
                             dismissedChanges = changeDismissed,
-                            onDismissChange = { changeDismissed = changeDismissed + it },
+                            onDismissChange = {
+                                changeDismissed = changeDismissed + it
+                                changeSeenPrefs.edit().putStringSet("change_seen", changeDismissed).apply()
+                            },
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
                             onViewConsumed = { widgetPulse = 0 },

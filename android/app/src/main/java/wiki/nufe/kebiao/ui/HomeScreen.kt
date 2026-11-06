@@ -193,7 +193,11 @@ private fun ChangeDetailBanner(
             ) { Text("✕", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         changes.forEachIndexed { i, c ->
-            if (i > 0) Spacer(Modifier.height(10.dp))
+            if (i > 0) {
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                Spacer(Modifier.height(12.dp))
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(

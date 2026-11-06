@@ -207,7 +207,7 @@ class Repository(context: Context) {
         session.clear()
         File(app.filesDir, "profile.enc").delete()
         prefs.edit().remove("school_user_agent").remove("local_error").remove("local_offline")
-            .remove("change_alert_at").putBoolean("needs_login", true).apply()
+            .remove("change_alert_at").remove("change_seen").putBoolean("needs_login", true).apply()
         DeviceKeys.reset()
         LoginAlert.clear(app)
         ChangeAlert.clear(app)
