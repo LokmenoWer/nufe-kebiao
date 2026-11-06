@@ -266,11 +266,12 @@ private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: Day
     Spacer(GlanceModifier.height(6.dp))
     if (small) {
         if (plan.showPreviewTitle) {
-            Label(preview.title, size = 11.sp, bold = true, color = GlanceTheme.colors.primary, lines = 1)
+            // 把第一节时间并进“下次上课”这行，允许换行，避免 2×2 下被截断。
+            Label("${preview.title} ${first.start}", size = 11.sp, bold = true, color = GlanceTheme.colors.primary, lines = 2)
             Spacer(GlanceModifier.height(2.dp))
-            Label("${first.start} · ${first.name}", size = 13.sp, bold = true, lines = 2, color = chipText(first.color))
-        } else {
             Label(first.name, size = 13.sp, bold = true, lines = 2, color = chipText(first.color))
+        } else {
+            Label("${first.start} · ${first.name}", size = 13.sp, bold = true, lines = 2, color = chipText(first.color))
         }
         if (preview.slots.size > 1) Label("共 ${preview.slots.size} 节", size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
         return
