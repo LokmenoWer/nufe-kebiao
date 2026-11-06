@@ -36,19 +36,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- 网站设置页的“在安卓 App 中打开”：nufekebiao://setup?url=<小组件链接> -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="nufekebiao" android:host="setup" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
         </activity>
+        <activity android:name=".ui.SchoolLoginActivity" android:exported="false" />
 
         <receiver android:name=".widget.TodayReceiver" android:exported="true" android:label="@string/widget_today">
             <intent-filter>
