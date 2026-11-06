@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><title>合成课表测试</title></head><body>
+<script>
+var personId = 900001;
+var currentSemester = {
+  'calendarAssoc': {'id': 1, 'name': '不是学期名'},
+  'nested': [{'id': 2}],
+  'remark': 'escaped \' quote and } brace',
+  'id': 901,
+  'name': '2026-2027-1'
+};
+</script>
+<select id="other"><option value="901">错误选项</option></select>
+<select class="semester" id='allSemesters'>
+  <option value='900'>2025-2026-2</option>
+  <option selected value="901"> 2026-2027-1 </option>
+</select>
+</body></html>

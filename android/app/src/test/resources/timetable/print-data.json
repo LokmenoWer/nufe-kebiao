@@ -1,0 +1,32 @@
+{
+  "studentTableVms": [{
+    "name": "测试同学",
+    "code": "SYNTHETIC-001",
+    "department": "不得持久化的合成字段",
+    "personId": 900001,
+    "activities": [
+      {
+        "courseName": "测试数学",
+        "teachers": [{"name": "甲老师(合成工号)", "id": 700001}, "乙老师（测试学院）"],
+        "weekday": "1", "startUnit": "1", "endUnit": "2",
+        "weekIndexes": [3, "1", 2, 2], "weeksStr": "1~3",
+        "room": "A101", "building": "合成教学楼", "campus": "仙林",
+        "startTime": "8:20:00", "endTime": "09:45:00",
+        "studentName": "不得持久化"
+      },
+      {
+        "courseName": "测试写作", "teachers": [{"teacherName": "丙老师(测试)"}],
+        "weekday": 2, "startUnit": 1, "endUnit": 2,
+        "weekIndexes": [1, 3], "weeksStr": "1~3(单)",
+        "room": "", "building": "B楼", "campus": "红山",
+        "startTime": "", "endTime": ""
+      },
+      {
+        "courseName": "测试实践", "teachers": [],
+        "weekday": 0, "startUnit": 0, "endUnit": 0,
+        "weekIndexes": [], "weeksStr": ""
+      }
+    ]
+  }],
+  "rawStudent": {"secret": "合成的敏感字段，不可复制"}
+}
