@@ -14,10 +14,15 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -125,6 +130,8 @@ internal fun SetupScreen(
     message: String?,
     onLogin: () -> Unit,
 ) {
+    var agreed by remember { mutableStateOf(false) }
+    var showDisclaimer by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -135,23 +142,46 @@ internal fun SetupScreen(
     ) {
         Text(
             "nufe课表",
-            fontSize = 34.sp,
+            fontSize = 44.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = (-0.5).sp,
+            letterSpacing = (-1).sp,
             color = MaterialTheme.colorScheme.onBackground,
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Text("你的课程，一眼掌握", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(36.dp))
+        Spacer(Modifier.height(40.dp))
         Button(
             onClick = onLogin,
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
+            enabled = agreed && !busy,
+            modifier = Modifier.height(52.dp),
             shape = RoundedCornerShape(16.dp),
         ) { Text(if (busy) "正在登录…" else "前往学校官网导入课表", fontSize = 14.sp) }
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = agreed, onCheckedChange = { agreed = it })
+            Text("我已阅读并同意", fontSize = 13.sp)
+            TextButton(onClick = { showDisclaimer = true }) { Text("《免责声明》", fontSize = 13.sp) }
+        }
         if (message != null) {
             Spacer(Modifier.height(12.dp))
             Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, lineHeight = 18.sp)
         }
+    }
+
+    if (showDisclaimer) {
+        AlertDialog(
+            onDismissRequest = { showDisclaimer = false },
+            title = { Text("免责声明") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("本应用（nufe课表）是个人开发的非官方工具，与南京财经大学不存在任何隶属、授权或合作关系。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("课表、姓名、学号仅从学校教务系统读取并只保存在本机，App 不向任何第三方上传或留存这些数据；登录凭据加密保存在本机，App 不保存你的密码。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("本应用按“现状”提供，不保证数据准确、完整或及时，课程安排以学校教务系统为准；因使用本应用造成的任何影响，开发者不承担责任。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("请勿用于违反校规、法律或侵犯他人权益的用途。", fontSize = 13.sp, lineHeight = 20.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = { agreed = true; showDisclaimer = false }) { Text("同意并继续") } },
+            dismissButton = { TextButton(onClick = { showDisclaimer = false }) { Text("关闭") } },
+        )
     }
 }
