@@ -202,6 +202,7 @@ internal fun HomeScreen(
     initialWeek: Boolean = false,
     viewPulse: Int = 0,
     onViewConsumed: () -> Unit = {},
+    rhythmClock12h: Boolean = true,
 ) {
     var now by remember { mutableStateOf(Now.current()) }
 
@@ -255,7 +256,7 @@ internal fun HomeScreen(
             verticalAlignment = Alignment.Top,
         ) {
             Box(Modifier.weight(1f)) {
-                TodayRhythmCard(plan, now)
+                TodayRhythmCard(plan, now, clock12h = rhythmClock12h)
             }
             if (week != null && week > 0) {
                 SemesterProgressCard(
@@ -1257,14 +1258,3 @@ private fun noteColor(tone: Tone): Color = when (tone) {
     Tone.FAINT -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
-private fun remainText(ms: Long): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    val hours = total / 3600
-    val minutes = total % 3600 / 60
-    return when {
-        hours >= 1 && minutes >= 1 -> "$hours 小时 $minutes 分钟"
-        hours >= 1 -> "$hours 小时"
-        minutes >= 1 -> "$minutes 分钟"
-        else -> "$total 秒"
-    }
-}

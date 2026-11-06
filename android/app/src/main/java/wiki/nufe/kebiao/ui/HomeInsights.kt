@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import wiki.nufe.kebiao.data.DayPlan
+import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.lessonMs
@@ -43,7 +44,7 @@ import wiki.nufe.kebiao.widget.parseColor
 private const val TOTAL_WEEKS = 17
 
 @Composable
-internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
+internal fun TodayRhythmCard(plan: DayPlan?, now: Now, clock12h: Boolean = true) {
     val lessons = plan?.day?.lessons.orEmpty()
     val tomorrow = plan?.title == "明天"
     val next = plan?.slots?.firstOrNull()
@@ -72,6 +73,7 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
                         now = now,
                         currentDay = currentDay,
                         tomorrow = tomorrow,
+                        clock12h = clock12h,
                         modifier = Modifier.size(112.dp),
                     )
                     Spacer(Modifier.width(6.dp))
@@ -131,17 +133,46 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
     }
 }
 
+/** 环上的一段课：分钟数以当天 0 点为起点，12 小时制下可能为负（窗口跨到前一天）。 */
+private data class RingSegment(val start: Int, val end: Int, val color: Color, val past: Boolean)
+
+/**
+ * 12 小时制像真实钟表：一圈 12 小时，只画一个 12 小时窗口里的课，避免上午 8 点和晚上 8 点叠在一起。
+ * 今天的窗口是“现在往前 2 小时到往后 10 小时”，能覆盖正在上的课和到晚上的课；
+ * 预告明天时没有“现在”，窗口从明天第一节课所在的整点开始。
+ * 24 小时制一圈是整天，0 点在正上方。
+ */
+private fun ringSegments(lessons: List<Lesson>, now: Now, currentDay: Boolean, clock12h: Boolean): List<RingSegment> {
+    val (windowStart, windowEnd) = when {
+        !clock12h -> 0 to 24 * 60
+        currentDay -> (now.minutes - 120).let { it to it + 12 * 60 }
+        else -> ((lessons.minOfOrNull { it.startMinutes } ?: 8 * 60) / 60 * 60).let { it to it + 12 * 60 }
+    }
+    return lessons.mapNotNull { lesson ->
+        val start = lesson.startMinutes.coerceIn(windowStart, windowEnd)
+        val end = lesson.endMinutes.coerceIn(start, windowEnd)
+        if (end <= start) return@mapNotNull null
+        RingSegment(start, end, parseColor(lesson.color), past = currentDay && lesson.endMinutes <= now.minutes)
+    }
+}
+
 @Composable
 private fun RhythmRing(
-    lessons: List<wiki.nufe.kebiao.data.Lesson>,
+    lessons: List<Lesson>,
     now: Now,
     currentDay: Boolean,
     tomorrow: Boolean,
+    clock12h: Boolean,
     modifier: Modifier,
 ) {
     val handColor = MaterialTheme.colorScheme.onSurface
     // 底环跟随主题：写死黑色在暗色模式下几乎看不见。
     val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+    val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+    val period = if (clock12h) 12 * 60 else 24 * 60
+    val segments = remember(lessons, now.date, now.minutes, currentDay, clock12h) {
+        ringSegments(lessons, now, currentDay, clock12h)
+    }
     val spin = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         spin.animateTo(1f, tween(durationMillis = 1100, easing = FastOutSlowInEasing))
@@ -151,6 +182,12 @@ private fun RhythmRing(
             val stroke = 8.dp.toPx()
             val inset = stroke / 2
             val arcSize = Size(size.width - stroke, size.height - stroke)
+            val center = Offset(size.width / 2, size.height / 2)
+            fun angleOf(minutes: Int) = Math.floorMod(minutes, period) / period.toFloat() * 360f - 90f
+            fun polar(degrees: Float, radius: Float): Offset {
+                val rad = degrees * (Math.PI / 180).toFloat()
+                return Offset(center.x + kotlin.math.cos(rad) * radius, center.y + kotlin.math.sin(rad) * radius)
+            }
             drawArc(
                 color = trackColor,
                 startAngle = -90f,
@@ -160,36 +197,36 @@ private fun RhythmRing(
                 size = arcSize,
                 style = Stroke(stroke, cap = StrokeCap.Round),
             )
-            lessons.forEach { lesson ->
-                val start = lesson.startMinutes.coerceIn(0, 24 * 60)
-                val end = lesson.endMinutes.coerceIn(start, 24 * 60)
-                if (end > start) {
-                    drawArc(
-                        color = parseColor(lesson.color),
-                        startAngle = start / 1440f * 360f - 90f,
-                        sweepAngle = (end - start) / 1440f * 360f,
-                        useCenter = false,
-                        topLeft = Offset(inset, inset),
-                        size = arcSize,
-                        style = Stroke(stroke, cap = StrokeCap.Round),
-                    )
-                }
+            // 12 / 3 / 6 / 9 点（24 小时制是 0 / 6 / 12 / 18 点）的刻度，让表盘一眼能读。
+            val tickOuter = size.minDimension / 2 - stroke - 3.dp.toPx()
+            val tickInner = tickOuter - 4.dp.toPx()
+            for (quarter in 0 until 4) {
+                val degrees = quarter * 90f - 90f
+                drawLine(
+                    color = tickColor,
+                    start = polar(degrees, tickInner),
+                    end = polar(degrees, tickOuter),
+                    strokeWidth = 1.5.dp.toPx(),
+                    cap = StrokeCap.Round,
+                )
+            }
+            segments.forEach { segment ->
+                drawArc(
+                    color = if (segment.past) segment.color.copy(alpha = 0.35f) else segment.color,
+                    startAngle = angleOf(segment.start),
+                    sweepAngle = (segment.end - segment.start) / period.toFloat() * 360f,
+                    useCenter = false,
+                    topLeft = Offset(inset, inset),
+                    size = arcSize,
+                    style = Stroke(stroke, cap = StrokeCap.Round),
+                )
             }
             if (currentDay) {
-                val angle = (now.minutes / 1440f * 360f - 90f + spin.value * 360f) * (Math.PI / 180).toFloat()
-                val radius = size.minDimension / 2 - stroke
-                val center = Offset(size.width / 2, size.height / 2)
-                val startRadius = size.minDimension * 0.28f
+                val degrees = angleOf(now.minutes) + spin.value * 360f
                 drawLine(
                     color = handColor,
-                    start = Offset(
-                        center.x + kotlin.math.cos(angle) * startRadius,
-                        center.y + kotlin.math.sin(angle) * startRadius,
-                    ),
-                    end = Offset(
-                        center.x + kotlin.math.cos(angle) * radius,
-                        center.y + kotlin.math.sin(angle) * radius,
-                    ),
+                    start = polar(degrees, size.minDimension * 0.28f),
+                    end = polar(degrees, size.minDimension / 2 - stroke),
                     strokeWidth = 1.5.dp.toPx(),
                     cap = StrokeCap.Round,
                 )
@@ -302,14 +339,17 @@ private fun weekColor(week: Int): Color = when (week) {
 private fun clock(minutes: Int): String =
     String.format(java.util.Locale.ROOT, "%02d:%02d", minutes / 60, minutes % 60)
 
-private fun remainText(ms: Long): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    val hours = total / 3600
-    val minutes = total % 3600 / 60
+/**
+ * 剩余时间按分钟向上取整：还差 1 分 30 秒显示“2 分钟”，与流体云胶囊的“剩 N 分钟”一致。
+ * 首页每 30 秒才刷新一次，显示秒数反而不准。
+ */
+internal fun remainText(ms: Long): String {
+    val total = ((ms.coerceAtLeast(0) + 59_999L) / 60_000L).coerceAtLeast(1L)
+    val hours = total / 60
+    val minutes = total % 60
     return when {
         hours >= 1 && minutes >= 1 -> "$hours 小时 $minutes 分钟"
         hours >= 1 -> "$hours 小时"
-        minutes >= 1 -> "$minutes 分钟"
-        else -> "$total 秒"
+        else -> "$minutes 分钟"
     }
 }

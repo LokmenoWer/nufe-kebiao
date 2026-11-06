@@ -82,6 +82,7 @@ internal fun AppRoot(
     var pagePulse by remember { mutableIntStateOf(0) }
     var widgetWeek by remember { mutableStateOf(false) }
     var widgetPulse by remember { mutableIntStateOf(0) }
+    var rhythmClock12h by remember { mutableStateOf(repo.rhythmClock12h) }
     var notificationsOk by remember { mutableStateOf(Reminders.canNotify(context)) }
     var exactOk by remember {
         mutableStateOf(Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true)
@@ -351,6 +352,7 @@ internal fun AppRoot(
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
                             onViewConsumed = { widgetPulse = 0 },
+                            rhythmClock12h = rhythmClock12h,
                         )
                         Tab.Mine -> MineScreen(
                             repo = repo,
@@ -364,6 +366,11 @@ internal fun AppRoot(
                             onOpenSite = ::openSite,
                             onPair = ::save,
                             onRemove = ::removeLink,
+                            rhythmClock12h = rhythmClock12h,
+                            onRhythmClockChange = { twelve ->
+                                rhythmClock12h = twelve
+                                repo.rhythmClock12h = twelve
+                            },
                         )
                         Tab.About -> AboutScreen(
                             currentVersion = updater.currentVersion,

@@ -76,6 +76,8 @@ internal fun MineScreen(
     onOpenSite: () -> Unit,
     onPair: (String) -> Unit,
     onRemove: () -> Unit,
+    rhythmClock12h: Boolean = true,
+    onRhythmClockChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val liveName = liveUpdateName()
@@ -253,6 +255,29 @@ internal fun MineScreen(
             ) { Text("断开连接", fontSize = 14.sp) }
         }
 
+        Spacer(Modifier.height(14.dp))
+        SectionCard {
+            Text("首页显示", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("今日节奏表盘", fontSize = 14.sp)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        if (rhythmClock12h) "和钟表一样，显示接下来半天的课" else "一圈是一整天，0 点在正上方",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                SlidingToggle(
+                    firstLabel = "12 小时",
+                    secondLabel = "24 小时",
+                    selectedIndex = if (rhythmClock12h) 0 else 1,
+                    onSelect = { index -> onRhythmClockChange(index == 0) },
+                )
+            }
+        }
         Spacer(Modifier.height(14.dp))
         WidgetSection()
         Spacer(Modifier.height(14.dp))
