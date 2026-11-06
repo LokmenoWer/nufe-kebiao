@@ -933,7 +933,7 @@ private fun WeekGridView(
         val cellInnerW = (colW - CHIP_PAD_H - 3f).coerceAtLeast(20f)
         val gridH = 380f
         val layout = remember(cells, totalW) {
-            layoutGrid(cells, gridH, cellInnerW, measure, labelH, endH)
+            layoutGrid(cells, gridH, cellInnerW, measure, labelH, endH, maxFontScale = 1.0f)
         }
         if (layout == null) {
             Text(if (isHoliday) "假期中" else "这周没有课", fontSize = 14.sp)

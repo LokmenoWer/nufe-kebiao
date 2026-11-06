@@ -418,7 +418,7 @@ private fun hm(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
  * 纵轴优先按节次；有课没写节次又补不上时退回按真实时间。
  * labelH / endH：开始时间（含粗体）、下课时间标签的高度。
  */
-fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float): GridLayout? {
+fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float, maxFontScale: Float = 1.5f): GridLayout? {
     val all = columns.flatten()
     if (all.isEmpty()) return null
     val unitAxis = unitAxis(all)
@@ -438,6 +438,7 @@ fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextM
     val marks = Marks(FloatArray(n) { if (it in ends) endH else 0f }, FloatArray(n) { if (it in starts) labelH else 0f })
     for (level in 0 until LEVELS) {
         for (fs in FONT_SCALES) {
+            if (fs > maxFontScale) continue   // App 固定高度里不让课少的周把字放大到 1.5 倍
             // 教师、楼名不值得缩字：只有课名、时间、教室这些要紧的才往小里挤
             if (level <= 1 && fs < 1f) continue
             val cons = cellSpans.map { s ->
