@@ -160,7 +160,7 @@ internal fun MineScreen(
             Spacer(Modifier.height(14.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             Spacer(Modifier.height(4.dp))
-            Hint("姓名、学号仅从本机加密资料读取，不向项目服务器发送。学校未提供的资料不会补填。")
+            Hint("所有个人信息仅保存在本地")
         }
 
         Spacer(Modifier.height(14.dp))
