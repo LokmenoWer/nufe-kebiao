@@ -262,7 +262,7 @@ internal fun HomeScreen(
             if (week != null && week > 0) {
                 SemesterProgressCard(
                     week = week,
-                    modifier = Modifier.width(56.dp).fillMaxHeight(),
+                    modifier = Modifier.width(72.dp).fillMaxHeight(),
                 )
             }
         }
@@ -597,7 +597,7 @@ private fun TodayCardView(
                     if (shown.isEmpty()) {
                         Column {
                             Text(
-                                plan.empty,
+                                "⭐️ ${plan.empty}",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = if (isRestMessage(plan.empty)) SuccessGreen else MaterialTheme.colorScheme.onSurface,
@@ -1218,6 +1218,7 @@ private fun LessonRow(slot: Slot, onClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(IntrinsicSize.Max)
             .clip(RoundedCornerShape(10.dp))
             .let { if (onClick != null) it.clickable(onClick = onClick) else it }
             .alpha(if (slot.state == State.PAST) 0.45f else 1f),
@@ -1226,7 +1227,7 @@ private fun LessonRow(slot: Slot, onClick: (() -> Unit)? = null) {
         Box(
             Modifier
                 .width(3.dp)
-                .height(38.dp)
+                .fillMaxHeight()
                 .clip(RoundedCornerShape(2.dp))
                 .background(parseColor(lesson.color)),
         )

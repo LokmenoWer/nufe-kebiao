@@ -250,8 +250,9 @@ private fun LessonRow(context: Context, slot: Slot, date: String?, showTeacher: 
  */
 @Composable
 private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: DayPlan, small: Boolean) {
-    Label(plan.empty, size = if (small) 13.sp else 14.sp, bold = true, lines = 2,
-        color = if (isRestMessage(plan.empty)) solid(REST) else GlanceTheme.colors.onSurface)
+    val headlineRest = isRestMessage(plan.empty)
+    Label("⭐️ ${plan.empty}", size = if (small) 13.sp else 14.sp, bold = true, lines = 2,
+        color = if (headlineRest) solid(REST) else GlanceTheme.colors.onSurface)
     plan.tomorrowHint?.let { hint ->
         Spacer(GlanceModifier.height(2.dp))
         Label(hint, size = 12.sp, lines = 1,

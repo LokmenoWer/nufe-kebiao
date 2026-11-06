@@ -216,7 +216,7 @@ internal fun SemesterProgressCard(week: Int?, modifier: Modifier = Modifier) {
         ) {
             Text("学期进度", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
-            Canvas(Modifier.weight(1f).width(18.dp)) {
+            Canvas(Modifier.weight(1f).width(30.dp)) {
                 val gap = 2.dp.toPx()
                 val height = (size.height - gap * (TOTAL_WEEKS - 1)) / TOTAL_WEEKS
                 val radius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
@@ -267,8 +267,6 @@ internal fun SemesterProgressCard(week: Int?, modifier: Modifier = Modifier) {
                     }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            Text("$current/$TOTAL_WEEKS", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
