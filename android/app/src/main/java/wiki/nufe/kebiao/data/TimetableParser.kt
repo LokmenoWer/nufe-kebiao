@@ -131,6 +131,11 @@ object TimetableParser {
         val thisMonday = today.minusDays((today.dayOfWeek.value - 1).toLong())
         val thisWeek = week(thisMonday)
         val nextWeek = week(thisMonday.plusWeeks(1))
+        // 全学期分周：周视图可左右滑到本周之前/下周之后的任意一周，至少覆盖到"下周"。
+        val weekNo = { d: LocalDate -> Math.floorDiv(ChronoUnit.DAYS.between(monday, d), 7).toInt() + 1 }
+        val thisWeekNo = weekNo(thisMonday)
+        val lastWeek = maxOf(thisWeekNo + 1, all.maxOfOrNull { weekNo(it.date) } ?: thisWeekNo)
+        val weeks = (0L until lastWeek.toLong()).map { w -> week(monday.plusWeeks(w)) }
         val term = if (all.isEmpty()) JSONObject.NULL else JSONObject()
             .put("first_day", all.minOf { it.date }.toString())
             .put("last_day", all.maxOf { it.date }.toString())
@@ -142,7 +147,7 @@ object TimetableParser {
             .put("semester_id", sid).put("updated_at", timetable.opt("updated_at"))
             .put("status", status).put("has_calendar", true)
             .put("today", day(today)).put("tomorrow", day(today.plusDays(1)))
-            .put("week", thisWeek).put("next_week", nextWeek).put("term", term)
+            .put("week", thisWeek).put("next_week", nextWeek).put("weeks", JSONArray(weeks)).put("term", term)
             .put("upcoming", upcoming ?: JSONObject.NULL)
             .put("changed_at", changes.maxOfOrNull { it.at } ?: JSONObject.NULL)
             .put("refresh", JSONObject().put("pending", false).put("due", false))

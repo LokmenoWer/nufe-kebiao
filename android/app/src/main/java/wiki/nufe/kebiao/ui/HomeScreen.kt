@@ -399,7 +399,8 @@ private fun TodayCardView(
             onViewConsumed()
         }
     }
-    var preferNextWeek by remember { mutableStateOf<Boolean?>(null) }
+    var preferWeek by remember { mutableStateOf<Int?>(null) }
+    var weekDir by remember { mutableStateOf(1) }
     var selectedCourse by remember { mutableStateOf<SelectedCourse?>(null) }
     val tomorrow = plan?.title == "明天"
     var showAll by remember(plan?.day?.date) { mutableStateOf(false) }
@@ -409,15 +410,19 @@ private fun TodayCardView(
     val hiddenPast = fullSlots.count { it.state == State.PAST }
 
     val payload = snapshot?.payload
-    val defaultWeek = payload?.let { weekToShow(it, now) }
-    val showNext = preferNextWeek ?: (defaultWeek?.first == "下周")
-    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else "本周"
-    val baseWeekBlock = payload?.week
-    val nextWeekBlock = payload?.nextWeek
-    val baseWeekCols = remember(baseWeekBlock, now.date, now.minutes) { weekColumns(baseWeekBlock, now) }
-    val nextWeekCols = remember(nextWeekBlock, now.date, now.minutes) { weekColumns(nextWeekBlock, now) }
-    val weekBlock = if (showNext && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
-    val weekCols = if (showNext && nextWeekBlock != null) nextWeekCols else baseWeekCols
+    val weeks = payload?.weeks.orEmpty()
+    val currentWeekNo = payload?.week?.week
+    val defaultWeekNo = payload?.let { weekToShow(it, now).second?.week ?: it.week?.week ?: 1 } ?: 1
+    val viewWeekNo = if (weeks.isEmpty()) defaultWeekNo else (preferWeek ?: defaultWeekNo).coerceIn(1, weeks.size)
+    val weekBlock = weeks.getOrNull(viewWeekNo - 1)
+    val weekCols = remember(weekBlock, now.date, now.minutes) { weekColumns(weekBlock, now) }
+    val weekTitle = when {
+        currentWeekNo == null -> "本周"
+        viewWeekNo == currentWeekNo -> "本周"
+        viewWeekNo == currentWeekNo + 1 -> "下周"
+        else -> "第${viewWeekNo}周"
+    }
+    val canSwitchWeek = weeks.size > 1
     val weekRange = if (weekCols.isNotEmpty()) {
         val first = shortDate(weekCols.first().day.date)
         val last = shortDate(weekCols.last().day.date)
@@ -426,15 +431,9 @@ private fun TodayCardView(
     val weekFirstDay = weekCols.firstOrNull()?.day
     val weekChanged = weekCols.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
     val weekNote = snapshot?.let { headerNote(it, weekFirstDay, now, compact = false, changed = weekChanged) }
+    // 周视图不再显示"第 x 周"小字（周次已并入上方标题），只保留需登录/有调课等警告。
     val activeNote = if (mode == CardMode.WEEK) {
-        val warning = weekNote?.takeIf { !it.text.startsWith("第 ") }
-        val text = warning?.text ?: weekBlock?.week?.let { "第 $it 周" } ?: weekNote?.text ?: "本周"
-        val label = if (!showNext && warning == null && weekBlock?.week != null && weekCols.isNotEmpty()) {
-            "$text · ${weekCols.size} 天"
-        } else {
-            text
-        }
-        Note(label, warning?.tone ?: Tone.FAINT)
+        weekNote?.takeIf { !it.text.startsWith("第 ") }
     } else {
         note
     }
@@ -444,7 +443,7 @@ private fun TodayCardView(
             if (mode == CardMode.WEEK) {
                 SlidingWeekLabel(
                     text = weekTitle,
-                    slideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
+                    slideDir = weekDir,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -518,35 +517,11 @@ private fun TodayCardView(
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
-                TextButton(
-                    onClick = {
-                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                        preferNextWeek = !showNext
-                    },
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                    modifier = Modifier.height(28.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
-                        Spacer(Modifier.width(2.dp))
-                        Icon(
-                            painter = painterResource(R.drawable.ic_chevron_right),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .size(14.dp)
-                                .rotate(if (showNext) 180f else 0f),
-                        )
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-            }
             ModeToggle(
                 mode = mode,
                 dayLabel = plan?.title ?: "今天",
                 weekLabel = weekTitle,
-                weekSlideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
+                weekSlideDir = weekDir,
                 onSelect = { mode = it },
             )
         }
@@ -572,11 +547,10 @@ private fun TodayCardView(
             label = "card-mode",
         ) { targetMode ->
             if (targetMode == CardMode.WEEK) {
-                val canSwitchWeek = payload?.week != null && nextWeekBlock != null
                 val swipeThreshold = with(LocalDensity.current) { 56.dp.toPx() }
                 AnimatedContent(
-                    targetState = showNext,
-                    modifier = Modifier.pointerInput(canSwitchWeek, showNext) {
+                    targetState = viewWeekNo,
+                    modifier = Modifier.pointerInput(canSwitchWeek, viewWeekNo) {
                         if (!canSwitchWeek) return@pointerInput
                         var dragged = 0f
                         detectHorizontalDragGestures(
@@ -586,21 +560,22 @@ private fun TodayCardView(
                                 change.consume()
                             },
                             onDragEnd = {
-                                // 左滑看下周、右滑回本周；已经在目标周时不重复切换。
+                                // 左滑看更晚的周、右滑看更早的周；越界或原地不动则不切换。
                                 val target = when {
-                                    dragged <= -swipeThreshold -> true
-                                    dragged >= swipeThreshold -> false
+                                    dragged <= -swipeThreshold -> viewWeekNo + 1
+                                    dragged >= swipeThreshold -> viewWeekNo - 1
                                     else -> null
                                 }
-                                if (target != null && target != showNext) {
+                                if (target != null && target in 1..weeks.size && target != viewWeekNo) {
                                     view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                                    preferNextWeek = target
+                                    weekDir = if (target > viewWeekNo) 1 else -1
+                                    preferWeek = target
                                 }
                             },
                         )
                     },
                     transitionSpec = {
-                        val direction = if (targetState) 1 else -1
+                        val direction = weekDir
                         (slideInHorizontally(
                             animationSpec = tween(360, easing = QuadraticEaseInOut),
                             initialOffsetX = { it * direction },
@@ -612,9 +587,9 @@ private fun TodayCardView(
                     },
                     contentAlignment = Alignment.Center,
                     label = "week-swipe",
-                ) { next ->
-                    val block = if (next && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
-                    val columns = if (next && nextWeekBlock != null) nextWeekCols else baseWeekCols
+                ) { week ->
+                    val block = weeks.getOrNull(week - 1)
+                    val columns = remember(block, now.date, now.minutes) { weekColumns(block, now) }
                     WeekGridView(
                         columns = columns,
                         isHoliday = block?.week == null,
