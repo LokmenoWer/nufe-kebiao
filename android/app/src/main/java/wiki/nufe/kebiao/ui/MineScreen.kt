@@ -9,7 +9,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -177,9 +176,7 @@ internal fun MineScreen(
             Spacer(Modifier.height(6.dp))
             Hint(if (needsLogin) "请在本机重新登录学校账号以恢复刷新；离线课表与提醒仍可使用。"
                 else "登录会话只保存在本机，后台刷新由手机直接访问学校。")
-            TextButton(onClick = onLogin, enabled = !busy, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                Text(if (needsLogin) "重新登录学校账号" else "重新登录 / 重新导入课表", fontSize = 14.sp)
-            }
+            ConnectionRow("重新前往教务系统导入课表", onLogin)
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             ConnectionRow(
                 "应用设置",
