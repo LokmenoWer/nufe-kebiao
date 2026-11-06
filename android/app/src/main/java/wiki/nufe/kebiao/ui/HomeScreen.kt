@@ -1,8 +1,8 @@
 package wiki.nufe.kebiao.ui
 
-import android.content.Intent
-import android.net.Uri
-import android.text.format.DateFormat
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
@@ -88,7 +88,6 @@ import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.AppUpdate
-import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.data.State
@@ -125,7 +124,7 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
         Text("发现新版本 ${update.version}", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         when (step) {
-            UpdateStep.Idle -> Hint("点击“立即更新”将自动下载安装包并校验签名，原有课表连接与提醒设置均会保留。")
+            UpdateStep.Idle -> Hint("点击“立即更新”将自动下载安装包并校验签名，本机课表与提醒设置均会保留。")
             is UpdateStep.Downloading -> {
                 Hint(if (step.percent != null) "正在下载 ${step.percent}%" else "正在下载…")
                 Spacer(Modifier.height(6.dp))
@@ -169,24 +168,19 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
 
 /** 自动刷新停了：小字标题栏容易看漏，这里写清楚怎么恢复。 */
 @Composable
-internal fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit, onOpenSite: () -> Unit) {
+internal fun LoginBanner(busy: Boolean, onLogin: () -> Unit) {
     SectionCard {
         Text(
-            if (captcha) "需要重新验证" else "登录已失效",
+            "需要登录学校账号",
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.error,
         )
         Spacer(Modifier.height(4.dp))
-        Hint("后台自动同步已暂停，当前展示的可能不是最新课表。请前往网站重新登录一次以恢复自动更新。")
+        Hint("当前展示本机保存的课表，仍可离线查看，但可能不是最新安排。首次升级或学校会话失效后，请在 App 内登录并重新导入，恢复自动刷新。")
         Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                Text("去网站登录", fontSize = 13.sp)
-            }
-            TextButton(onClick = onRefresh, enabled = !busy, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                Text("已登录，刷新", fontSize = 13.sp)
-            }
+        TextButton(onClick = onLogin, enabled = !busy, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text("在 App 内登录", fontSize = 13.sp)
         }
     }
 }
@@ -194,10 +188,11 @@ internal fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit,
 @Composable
 internal fun HomeScreen(
     snapshot: Snapshot?,
+    needsLogin: Boolean,
     busy: Boolean,
     message: String?,
     onRefresh: () -> Unit,
-    onOpenSite: () -> Unit,
+    onLogin: () -> Unit,
     update: AppUpdate?,
     updateFlow: UpdateFlow,
     onDismissUpdate: () -> Unit,
@@ -231,10 +226,9 @@ internal fun HomeScreen(
         EnterUp { StatusPill(plan, now) }
         if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
         if (message != null) {
-            val isSuccess = message == "已绑定这台设备。"
             Text(
                 message,
-                color = if (isSuccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.error,
                 fontSize = 12.sp,
             )
             Spacer(Modifier.height(10.dp))
@@ -243,8 +237,11 @@ internal fun HomeScreen(
             UpdateBanner(it, updateFlow, onDismissUpdate)
             Spacer(Modifier.height(14.dp))
         }
-        snapshot?.payload?.takeIf { it.needsLogin }?.let { payload ->
-            LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
+        if (needsLogin) {
+            LoginBanner(busy, onLogin)
+            Spacer(Modifier.height(14.dp))
+        } else if (snapshot?.offline == true) {
+            SectionCard { Hint("学校暂时不可达，正在使用本机课表；联网后可再次刷新。") }
             Spacer(Modifier.height(14.dp))
         }
         EnterUp(delayMillis = 70) {
@@ -321,7 +318,19 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
     }
 }
 
-private fun syncTime(ms: Long): String = DateFormat.format("HH:mm", ms).toString()
+private fun syncTime(ms: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+    .withZone(ZoneId.of("Asia/Shanghai"))
+    .format(Instant.ofEpochMilli(ms))
+
+internal fun homeSyncText(snapshot: Snapshot): String {
+    val updated = snapshot.payload.updatedAt?.takeIf { it > 0L }
+    val time = when {
+        updated != null -> "上次更新 ${syncTime(updated * 1000L)}"
+        snapshot.fetchedAtMs > 0L -> "缓存保存于 ${syncTime(snapshot.fetchedAtMs)}"
+        else -> "上次更新时间未知"
+    }
+    return if (snapshot.offline) "离线 · $time" else time
+}
 
 private enum class CardMode { DAY, WEEK }
 
@@ -490,10 +499,7 @@ private fun TodayCardView(
                 }
             }
         }
-        val syncText = snapshot?.let {
-            if (it.offline) "离线 · 缓存于 ${syncTime(it.fetchedAtMs)}"
-            else "已同步 ${syncTime(it.fetchedAtMs)}"
-        }
+        val syncText = snapshot?.let(::homeSyncText)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (mode == CardMode.DAY && plan != null && plan.slots.isNotEmpty()) {
@@ -769,7 +775,7 @@ private fun ModeToggle(
     )
 }
 
-/** 两段式滑动开关：选中白色胶囊在两端之间滑动，今天/本周和网页/App 共用。 */
+/** 两段式滑动开关：选中白色胶囊在今天 / 本周之间滑动。 */
 @Composable
 internal fun SlidingToggle(
     firstLabel: String,

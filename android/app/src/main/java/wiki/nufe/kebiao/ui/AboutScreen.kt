@@ -84,8 +84,8 @@ internal fun AboutScreen(
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                "面向南京财经大学学生的非官方课表工具：通过学校统一身份认证自动同步教务课表，" +
-                    "提供网页端、桌面小组件、课前实时提醒与日历订阅服务。",
+                "面向南京财经大学学生的非官方课表工具：在本机登录学校统一身份认证，直接从教务系统导入课表，" +
+                    "提供离线日课表、周课表、桌面小组件与课前实时提醒。",
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
             )
@@ -96,7 +96,7 @@ internal fun AboutScreen(
         Spacer(Modifier.height(14.dp))
         SectionCard {
             SectionTitle("产品信息")
-            AboutRow("官方网站", SITE_URL) {
+            AboutRow("官网介绍与下载", SITE_URL) {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL)))
             }
             AboutRow("GitHub 仓库", "LokmenoWer/nufe-kebiao") {
@@ -166,9 +166,11 @@ internal fun AboutScreen(
             title = { Text("隐私与数据说明") },
             text = {
                 Text(
-                    "App 通过你提供的课表只读链接获取课表；完成设备配对后，服务器才会向这台设备返回姓名、学号和脱敏邮箱。\n\n" +
-                        "App 本机保存链接、课表缓存、提醒设置和配对信息。断开连接会清除本机链接、缓存与配对，网站账号和服务器上的设备记录不受影响，需要在网站另行操作。\n\n" +
-                        "App 不读取短信、通讯录、相册或位置信息。",
+                    "App 直接访问南京财经大学统一认证与教务系统。学号、密码、登录会话及个人课表不上传至项目服务器；学校按其规则处理登录与验证。\n\n" +
+                        "App 不保存密码。登录会话与姓名、学号使用本机密钥加密保存；课表保存在 App 私有目录，供离线查看、桌面组件和本地提醒使用。会话过期不删除课表，需要你在 App 内重新登录。\n\n" +
+                        "“我的 → 清除本机数据”会删除本机课表、个人资料与登录态，并停止课程提醒。升级遗留的课表仅在本机展示，不会自动访问旧服务；本机清除不代表删除此前已存于旧服务的数据。\n\n" +
+                        "官网仅用于产品介绍与下载，更新检查不携带学校凭据。App 不读取短信、通讯录、相册或位置信息。",
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
                     fontSize = 13.sp,
                     lineHeight = 20.sp,
                 )
