@@ -431,9 +431,11 @@ private fun TodayCardView(
     val weekFirstDay = weekCols.firstOrNull()?.day
     val weekChanged = weekCols.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
     val weekNote = snapshot?.let { headerNote(it, weekFirstDay, now, compact = false, changed = weekChanged) }
-    // 周视图不再显示"第 x 周"小字（周次已并入上方标题），只保留需登录/有调课等警告。
+    // 周视图：有警告优先显示；本周/下周标题不含周次，用小字补"第x周"，其它周标题已有"第x周"则不重复。
     val activeNote = if (mode == CardMode.WEEK) {
-        weekNote?.takeIf { !it.text.startsWith("第 ") }
+        val warning = weekNote?.takeIf { !it.text.startsWith("第 ") }
+        warning ?: if (weekTitle == "本周" || weekTitle == "下周")
+            weekBlock?.week?.let { Note("第 $it 周", Tone.FAINT) } else null
     } else {
         note
     }
