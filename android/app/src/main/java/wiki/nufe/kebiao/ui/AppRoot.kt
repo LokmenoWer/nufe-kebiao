@@ -84,6 +84,8 @@ internal fun AppRoot(
     var fetchJob by remember { mutableStateOf<Job?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(Tab.Timetable) }
+    // 调课详情卡的"✕"关闭只在本进程内生效：切标签不丢，清理 App 后台（进程重启）后自动复原。
+    var changeDismissed by remember { mutableStateOf(setOf<String>()) }
     var pagePulse by remember { mutableIntStateOf(0) }
     var widgetWeek by remember { mutableStateOf(false) }
     var widgetPulse by remember { mutableIntStateOf(0) }
@@ -316,6 +318,8 @@ internal fun AppRoot(
                                 update?.let(updater::dismiss)
                                 updateDismissed = true
                             },
+                            dismissedChanges = changeDismissed,
+                            onDismissChange = { changeDismissed = changeDismissed + it },
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
                             onViewConsumed = { widgetPulse = 0 },

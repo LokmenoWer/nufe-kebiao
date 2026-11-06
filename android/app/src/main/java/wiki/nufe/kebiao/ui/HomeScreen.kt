@@ -1,6 +1,5 @@
 package wiki.nufe.kebiao.ui
 
-import android.content.Context
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -47,7 +46,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -172,7 +170,7 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
 
 private fun changeKey(c: TimetableChange) = "${c.date}|${c.name}|${c.kind}|${c.detail}"
 
-/** 调课详情卡：左右切换多条明细，"前往查看"跳到当周课表并让该条消失；只剩一条时不显示左右箭头。 */
+/** 调课详情卡：所有变动向下平铺，每行一条 + "前往查看"跳到当周；右上角"✕"关闭整卡。 */
 @Composable
 private fun ChangeDetailBanner(
     changes: List<TimetableChange>,
@@ -180,44 +178,34 @@ private fun ChangeDetailBanner(
     onDismiss: (String) -> Unit,
 ) {
     if (changes.isEmpty()) return
-    var index by remember { mutableIntStateOf(0) }
-    val safe = index.coerceIn(0, changes.lastIndex)
-    val cur = changes[safe]
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (changes.size > 1) {
-                IconButton(onClick = { if (safe > 0) index = safe - 1 }, enabled = safe > 0) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_chevron_right),
-                        contentDescription = "上一条",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp).rotate(180f),
-                    )
-                }
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    (cur.week?.let { "第 $it 周" } ?: "本学期") + " · " + cur.name,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(cur.detail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (changes.size > 1) {
-                IconButton(onClick = { if (safe < changes.lastIndex) index = safe + 1 }, enabled = safe < changes.lastIndex) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_chevron_right),
-                        contentDescription = "下一条",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
+            Text(
+                "调课提示",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = { changes.forEach { onDismiss(changeKey(it)) } },
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+            ) { Text("✕", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        Spacer(Modifier.height(4.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = { onJump(cur.week); onDismiss(changeKey(cur)) }) { Text("前往查看", fontSize = 13.sp) }
+        changes.forEachIndexed { i, c ->
+            if (i > 0) Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        (c.week?.let { "第 $it 周" } ?: "本学期") + " · " + c.name,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(c.detail, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(onClick = { onJump(c.week) }) { Text("前往查看", fontSize = 13.sp) }
+            }
         }
     }
 }
@@ -252,20 +240,17 @@ internal fun HomeScreen(
     update: AppUpdate?,
     updateFlow: UpdateFlow,
     onDismissUpdate: () -> Unit,
+    dismissedChanges: Set<String> = emptySet(),
+    onDismissChange: (String) -> Unit = {},
     initialWeek: Boolean = false,
     viewPulse: Int = 0,
     onViewConsumed: () -> Unit = {},
     rhythmClock12h: Boolean = true,
 ) {
     var now by remember { mutableStateOf(Now.current()) }
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("kebiao", Context.MODE_PRIVATE) }
-    var seenChanges by remember {
-        mutableStateOf(prefs.getStringSet("change_seen", emptySet())?.toSet().orEmpty())
-    }
     var jumpWeek by remember { mutableStateOf<Int?>(null) }
     var jumpPulse by remember { mutableIntStateOf(0) }
-    val pendingChanges = snapshot?.payload?.changes.orEmpty().filter { changeKey(it) !in seenChanges }
+    val pendingChanges = snapshot?.payload?.changes.orEmpty().filter { changeKey(it) !in dismissedChanges }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -305,10 +290,7 @@ internal fun HomeScreen(
             ChangeDetailBanner(
                 changes = pendingChanges,
                 onJump = { wk -> jumpWeek = wk; jumpPulse++ },
-                onDismiss = { key ->
-                    seenChanges = seenChanges + key
-                    prefs.edit().putStringSet("change_seen", seenChanges).apply()
-                },
+                onDismiss = onDismissChange,
             )
             Spacer(Modifier.height(14.dp))
         }
