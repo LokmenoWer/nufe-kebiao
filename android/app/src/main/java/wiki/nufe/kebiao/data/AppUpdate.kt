@@ -132,7 +132,7 @@ class AppUpdater(context: Context) {
         update
     }
 
-    private fun siteUrl() = (Repository(app).siteUrl() ?: DEFAULT_SITE).trimEnd('/')
+    private fun siteUrl() = DEFAULT_SITE
 
     /**
      * 下载新版本并确认它确实是这个 App 的新版本，返回可以安装的文件。之前下载好的直接复用。

@@ -4,8 +4,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * `/mobile/<token>.json` 的内容（服务端 app/widget.py 的 build()）。
- * 周次、缺失时间的兜底、课程颜色都由服务端算好，这里只解析，不重算。
+ * 本机整学期课表缓存投影出的展示数据（TimetableParser.payload()）。
+ * 周次、缺失时间的兜底、课程颜色都由本机解析器算好，这里只解析，不重算。
  */
 data class Payload(
     val now: String?,
@@ -50,7 +50,7 @@ data class Payload(
     }
 }
 
-/** `/mobile/<token>/profile` 的内容：个人信息只给配对过的设备，不在课表 JSON 里。 */
+/** 本机加密课表缓存里的个人信息（姓名 / 学号）；不含邮箱，也不向任何服务器索取。 */
 data class Profile(val student: StudentInfo?, val mail: MailInfo?) {
     companion object {
         fun parse(text: String): Profile {
