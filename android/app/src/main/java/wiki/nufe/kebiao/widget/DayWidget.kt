@@ -32,6 +32,7 @@ import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.WEEKDAY
 import wiki.nufe.kebiao.data.buildTodayPlan
 import wiki.nufe.kebiao.data.headerNote
+import wiki.nufe.kebiao.data.isRestMessage
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
 
@@ -243,36 +244,52 @@ private fun LessonRow(context: Context, slot: Slot, date: String?, showTeacher: 
     }
 }
 
-/** 没课：说明原因，能预告就把下次上课的头几节列出来。 */
+/**
+ * 今天没有待上的课：先说清"上完了 / 本来没课 / 假期"，再给一行明天说明，
+ * 最后用分隔线隔开——明天有课就直接列明天课表，没课就重点显示"下次上课"。
+ */
 @Composable
 private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: DayPlan, small: Boolean) {
-    Label(plan.empty, size = if (small) 13.sp else 14.sp, bold = true, lines = 2)
+    Label(plan.empty, size = if (small) 13.sp else 14.sp, bold = true, lines = 2,
+        color = if (isRestMessage(plan.empty)) solid(REST) else GlanceTheme.colors.onSurface)
+    plan.tomorrowHint?.let { hint ->
+        Spacer(GlanceModifier.height(2.dp))
+        Label(hint, size = 12.sp, lines = 1,
+            color = if (isRestMessage(hint)) solid(REST) else GlanceTheme.colors.onSurfaceVariant)
+    }
     if (plan.cancelled.isNotEmpty()) Label(cancelledText(plan.cancelled), size = 10.sp, color = solid(WARN), lines = 2)
     val preview = plan.preview ?: return
+    val first = preview.slots.firstOrNull()?.lesson ?: return
+    Spacer(GlanceModifier.height(6.dp))
+    WidgetDivider()
+    Spacer(GlanceModifier.height(6.dp))
     if (small) {
-        // 小号和 iOS 一样：“明天 周二 10:00”，下面大字写第一节课名
-        val first = preview.slots.first().lesson
-        Spacer(GlanceModifier.defaultWeight())
-        Label("${preview.title.replace(" · ", " ")} ${first.start}", size = 11.sp, bold = true,
-            color = GlanceTheme.colors.onSurfaceVariant)
-        Label(first.name, size = 14.sp, bold = true, lines = 2, color = chipText(first.color))
+        if (plan.showPreviewTitle) {
+            Label(preview.title, size = 11.sp, bold = true, color = GlanceTheme.colors.primary, lines = 1)
+            Spacer(GlanceModifier.height(2.dp))
+            Label("${first.start} · ${first.name}", size = 13.sp, bold = true, lines = 2, color = chipText(first.color))
+        } else {
+            Label(first.name, size = 13.sp, bold = true, lines = 2, color = chipText(first.color))
+        }
         if (preview.slots.size > 1) Label("共 ${preview.slots.size} 节", size = 10.sp, color = GlanceTheme.colors.onSurfaceVariant)
         return
     }
-    Spacer(GlanceModifier.height(6.dp))
-    Label(preview.title, size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)
-    Spacer(GlanceModifier.height(3.dp))
+    // showPreviewTitle：这是"下次上课"（以后某天），标题 + 第一节时间放大、用主色，明确不是明天。
+    if (plan.showPreviewTitle) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Label(preview.title, size = 12.sp, bold = true, color = GlanceTheme.colors.primary)
+            Spacer(GlanceModifier.width(8.dp))
+            Label(first.start, size = 18.sp, bold = true, color = GlanceTheme.colors.primary)
+        }
+        Spacer(GlanceModifier.height(4.dp))
+    }
     val size = LocalSize.current
-    val room = ((size.height.value - PADDING.value * 2 - HEADER_H - 50) / (if (small) 16 else ROW_H)).toInt()
+    val room = ((size.height.value - PADDING.value * 2 - HEADER_H - 50) / ROW_H).toInt()
     val count = maxOf(1, room)
     Column(modifier = GlanceModifier.fillMaxWidth().clickable(openDay(context, data, preview.day))) {
         for (slot in preview.slots.take(count)) {
-            if (small) {
-                Label("${slot.lesson.start} ${slot.lesson.name}", size = 12.sp, color = chipText(slot.lesson.color))
-            } else {
-                LessonRow(context, slot, null)
-                Spacer(GlanceModifier.height(4.dp))
-            }
+            LessonRow(context, slot, null)
+            Spacer(GlanceModifier.height(4.dp))
         }
         val more = preview.slots.size - count
         if (more > 0) Label("还有 $more 节", size = 11.sp, color = GlanceTheme.colors.onSurfaceVariant)

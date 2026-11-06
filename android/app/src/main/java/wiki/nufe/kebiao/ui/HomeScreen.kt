@@ -95,6 +95,7 @@ import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.WEEKDAY
 import wiki.nufe.kebiao.data.annotate
 import wiki.nufe.kebiao.data.buildTodayPlan
+import wiki.nufe.kebiao.data.isRestMessage
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
@@ -595,12 +596,41 @@ private fun TodayCardView(
                     val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
                     if (shown.isEmpty()) {
                         Column {
-                            Text(plan.empty, fontSize = 14.sp)
+                            Text(
+                                plan.empty,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isRestMessage(plan.empty)) SuccessGreen else MaterialTheme.colorScheme.onSurface,
+                            )
+                            plan.tomorrowHint?.let { hint ->
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    hint,
+                                    fontSize = 13.sp,
+                                    color = if (isRestMessage(hint)) SuccessGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             val preview = plan.preview
                             if (preview != null) {
                                 Spacer(Modifier.height(12.dp))
-                                Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(Modifier.height(8.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                                Spacer(Modifier.height(12.dp))
+                                if (plan.showPreviewTitle) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            preview.title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        preview.slots.firstOrNull()?.lesson?.let { first ->
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                first.start, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                }
                                 preview.slots.forEachIndexed { index, slot ->
                                     LessonRow(slot) {
                                         selectedCourse = SelectedCourse(preview.day, listOf(slot))

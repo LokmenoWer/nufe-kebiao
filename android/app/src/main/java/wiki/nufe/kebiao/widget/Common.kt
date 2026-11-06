@@ -98,6 +98,7 @@ val PADDING = 12.dp
 val LIVE = Color(0xFFE03131)
 val WARN = Color(0xFFE8590C)
 val ACCENT = Color(0xFF4B63E0)
+val REST = Color(0xFF2F9E44)   // 没课、可以休息时的绿色
 
 fun parseColor(hex: String): Color = try {
     Color(android.graphics.Color.parseColor(hex))
@@ -223,14 +224,15 @@ fun noteColor(tone: Tone): ColorProvider = when (tone) {
     Tone.FAINT -> GlanceTheme.colors.onSurfaceVariant
 }
 
-/** 标题栏：粗体标题、灰色副标题，右边一句提示和刷新按钮。 */
+/** 标题栏：粗体标题、副标题（可自定义颜色/加粗），右边一句提示和刷新按钮。 */
 @Composable
-fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = false) {
+fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = false,
+           subtitleColor: ColorProvider = GlanceTheme.colors.onSurfaceVariant, subtitleBold: Boolean = false) {
     Row(modifier = GlanceModifier.fillMaxWidth().height(22.dp), verticalAlignment = Alignment.CenterVertically) {
         Label(title, size = if (compact) 13.sp else 14.sp, bold = true, color = GlanceTheme.colors.primary)
         if (subtitle.isNotEmpty()) {
             Spacer(GlanceModifier.width(6.dp))
-            Label(subtitle, size = 12.sp, color = GlanceTheme.colors.onSurfaceVariant)
+            Label(subtitle, size = 12.sp, bold = subtitleBold, color = subtitleColor, lines = 1)
         }
         Spacer(GlanceModifier.defaultWeight())
         if (note != null) Label(note.text, size = 11.sp, color = noteColor(note.tone))
@@ -244,6 +246,12 @@ fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = fals
             )
         }
     }
+}
+
+/** 细分隔线：把"没课休息"和"下次上课"两块内容隔开，避免误读。 */
+@Composable
+fun WidgetDivider(modifier: GlanceModifier = GlanceModifier.fillMaxWidth()) {
+    Spacer(modifier.height(1.dp).background(GlanceTheme.colors.outline))
 }
 
 /** 系统自己走的倒计时（Chronometer），不需要每秒重画小组件。 */
