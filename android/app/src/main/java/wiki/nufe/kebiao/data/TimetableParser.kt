@@ -136,6 +136,35 @@ object TimetableParser {
         val thisWeekNo = weekNo(thisMonday)
         val lastWeek = maxOf(thisWeekNo + 1, all.maxOfOrNull { weekNo(it.date) } ?: thisWeekNo)
         val weeks = (0L until lastWeek.toLong()).map { w -> week(monday.plusWeeks(w)) }
+        // 调课明细：从已投影的 lessons.changed/was 与 cancelled 里收集"今天及以后"的变动，供通知与详情卡展示。
+        val changeItems = mutableListOf<JSONObject>()
+        val todayStr = today.toString()
+        for (block in weeks) {
+            val daysArr = block.optJSONArray("days") ?: continue
+            for (i in 0 until daysArr.length()) {
+                val d = daysArr.optJSONObject(i) ?: continue
+                val dateStr = d.optString("date")
+                if (dateStr < todayStr) continue
+                val wk = if (d.isNull("week")) JSONObject.NULL else d.opt("week")
+                d.optJSONArray("lessons")?.let { lessons ->
+                    for (j in 0 until lessons.length()) {
+                        val l = lessons.optJSONObject(j) ?: continue
+                        if (l.optBoolean("changed")) changeItems += JSONObject()
+                            .put("week", wk).put("date", dateStr).put("name", l.optString("name"))
+                            .put("detail", l.optString("was").ifEmpty { "新增" })
+                            .put("kind", if (l.has("was")) "moved" else "added")
+                    }
+                }
+                d.optJSONArray("cancelled")?.let { cancelled ->
+                    for (j in 0 until cancelled.length()) {
+                        val c = cancelled.optJSONObject(j) ?: continue
+                        changeItems += JSONObject()
+                            .put("week", wk).put("date", dateStr).put("name", c.optString("name"))
+                            .put("detail", "停课").put("kind", "cancelled")
+                    }
+                }
+            }
+        }
         val term = if (all.isEmpty()) JSONObject.NULL else JSONObject()
             .put("first_day", all.minOf { it.date }.toString())
             .put("last_day", all.maxOf { it.date }.toString())
@@ -149,6 +178,7 @@ object TimetableParser {
             .put("today", day(today)).put("tomorrow", day(today.plusDays(1)))
             .put("week", thisWeek).put("next_week", nextWeek).put("weeks", JSONArray(weeks)).put("term", term)
             .put("upcoming", upcoming ?: JSONObject.NULL)
+            .put("changes", JSONArray(changeItems))
             .put("changed_at", changes.maxOfOrNull { it.at } ?: JSONObject.NULL)
             .put("refresh", JSONObject().put("pending", false).put("due", false))
             .put("delegate", false).put("poll_after", JSONObject.NULL).toString())

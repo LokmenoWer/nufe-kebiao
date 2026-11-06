@@ -18,6 +18,7 @@ data class Payload(
     val week: WeekBlock?,
     val nextWeek: WeekBlock?,
     val weeks: List<WeekBlock> = emptyList(),
+    val changes: List<TimetableChange> = emptyList(),
     val term: Term?,
     val upcoming: Day?,
     val changedAt: Long?,
@@ -39,6 +40,7 @@ data class Payload(
                 week = o.optJSONObject("week")?.let(WeekBlock::parse),
                 nextWeek = o.optJSONObject("next_week")?.let(WeekBlock::parse),
                 weeks = o.optJSONArray("weeks").objects().map(WeekBlock::parse),
+                changes = o.optJSONArray("changes").objects().map(TimetableChange::parse),
                 term = o.optJSONObject("term")?.let { Term(it.optString("first_day"), it.optString("last_day")) },
                 upcoming = o.optJSONObject("upcoming")?.let(Day::parse),
                 changedAt = o.long("changed_at"),
@@ -156,6 +158,19 @@ data class WeekBlock(val week: Int?, val monday: String, val days: List<Day>) {
 }
 
 data class Term(val firstDay: String, val lastDay: String)
+
+/** 一条调课明细：第几周、日期、课程名、变更说明（原时间/原地点/停课/新增）、类型。 */
+data class TimetableChange(val week: Int?, val date: String, val name: String, val detail: String, val kind: String) {
+    companion object {
+        fun parse(o: JSONObject) = TimetableChange(
+            week = if (o.isNull("week")) null else o.optInt("week"),
+            date = o.optString("date"),
+            name = o.optString("name"),
+            detail = o.optString("detail"),
+            kind = o.optString("kind"),
+        )
+    }
+}
 
 data class Refresh(val pending: Boolean, val due: Boolean)
 
