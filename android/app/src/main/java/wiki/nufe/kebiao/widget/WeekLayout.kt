@@ -116,7 +116,7 @@ class TextMeasure(context: Context) {
 }
 
 /** 楼名 + 编号（“德业楼Z4-106”）里的编号；编号里没有字母（“食工楼203”）就拆不开，返回 null。 */
-fun roomCode(room: String): String? = Regex("""^[一-鿿]+(?=[A-Za-z])""").find(room)
+fun roomCode(room: String): String? = Regex("""^[\s一-鿿]+(?=[A-Za-z])""").find(room)
     ?.let { room.substring(it.range.last + 1) }?.takeIf { it.isNotEmpty() }
 
 /** 一段字实际用的字号：时间按列宽单独定了字号就用它的，否则按基准乘版面字号。 */
@@ -153,7 +153,7 @@ fun timePiece(l: Lesson, m: TextMeasure, innerW: Float, fs: Float): Piece {
  * 时间轴上没有这节课的准确时间（按节次排时同一节开始的课差几分钟、或者很矮的小组件里标签被省掉）时，
  * 卡片自己保留时间，仍然是教室在前：放不下就只写开始时间。
  */
-fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean = true): List<List<Piece>> {
+fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean = true, nameLines: Int = 6): List<List<Piece>> {
     val more = if (cell.hidden > 0) " +${cell.hidden}" else ""
     val c = cell.cancelled
     if (c != null) {
@@ -170,12 +170,14 @@ fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boole
     val name = (if (l.changed) "调 " else "") + l.name + more
     val time = timePiece(l, m, innerW, fs)
     val start = Piece(l.start, Kind.TIME, 1, time.sp)
-    val roomFull = roomFull(l, m, roomSp(fs), innerW)
-    val roomShort = roomShort(l, m, roomSp(fs), innerW)
+    val roomSplit = if (nameLines > 6) 5 else 3
+    val roomCodeLines = if (nameLines > 6) 3 else 2
+    val roomFull = roomFull(l, m, roomSp(fs), innerW, roomSplit)
+    val roomShort = roomShort(l, m, roomSp(fs), innerW, roomCodeLines)
     val roomLine = roomShort?.copy(maxLines = 1)
     val was = l.was?.let { Piece(it, Kind.WAS, 2) }
     val teacher = l.teachers.takeIf { it.isNotEmpty() }?.let { Piece(it, Kind.TEACHER, 1) }
-    val fullName = Piece(name, Kind.NAME, 6)
+    val fullName = Piece(name, Kind.NAME, nameLines)
     val rich = listOf(
         listOfNotNull(fullName, time, roomFull, was, teacher),
         listOfNotNull(fullName, time, roomFull, was),
@@ -202,20 +204,21 @@ fun variants(cell: Cell, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boole
 
 private fun roomSp(fs: Float) = pieceSp(Kind.ROOM) * fs
 
-/** 教室写全：一行放不下时楼名单独一行（“德业楼\nZ4-106”），编号不被拆开。 */
-private fun roomFull(l: Lesson, m: TextMeasure, sp: Float, innerW: Float): Piece? {
+/** 教室写全：一行放不下时楼名单独一行（“德业楼\nZ4-106”），编号不被拆开。splitLines 控制楼名可换几行。 */
+private fun roomFull(l: Lesson, m: TextMeasure, sp: Float, innerW: Float, splitLines: Int = 3): Piece? {
     if (l.room.isEmpty()) return null
     val code = roomCode(l.room)
-    if (m.fits(l.room, sp, false, innerW) || code == null) return Piece(l.room, Kind.ROOM, 2)
-    return Piece("${l.room.removeSuffix(code)}\n$code", Kind.ROOM, 3)
+    if (m.fits(l.room, sp, false, innerW)) return Piece(l.room, Kind.ROOM, 2)
+    if (code == null) return Piece(l.room, Kind.ROOM, splitLines)
+    return Piece("${l.room.removeSuffix(code)}\n$code", Kind.ROOM, splitLines)
 }
 
-/** 教室只写编号（“Z4-106”）：一行放不下整个教室时省掉楼名。 */
-private fun roomShort(l: Lesson, m: TextMeasure, sp: Float, innerW: Float): Piece? {
+/** 教室只写编号（“Z4-106”）：一行放不下整个教室时省掉楼名。codeLines 控制编号可换几行。 */
+private fun roomShort(l: Lesson, m: TextMeasure, sp: Float, innerW: Float, codeLines: Int = 2): Piece? {
     if (l.room.isEmpty()) return null
     val code = roomCode(l.room)
-    if (m.fits(l.room, sp, false, innerW) || code == null) return Piece(l.room, Kind.ROOM, 2)
-    return Piece(code, Kind.ROOM, 2)
+    if (m.fits(l.room, sp, false, innerW) || code == null) return Piece(l.room, Kind.ROOM, codeLines)
+    return Piece(code, Kind.ROOM, codeLines)
 }
 
 fun piecesHeight(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float): Float =
@@ -223,24 +226,24 @@ fun piecesHeight(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float):
         m.height(p.text, p.size(fs), pieceBold(p.kind), innerW, p.maxLines).toDouble()
     }.toFloat()
 
-/** 课名必须写全的几档（maxLines = 6）：课名真要几行就算几行，超过 6 行就不算这一档。 */
-fun fullyFits(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float): Boolean = pieces.all { p ->
-    p.maxLines < 6 || m.lines(p.text, p.size(fs), pieceBold(p.kind), innerW) <= p.maxLines
+/** 课名必须写全的几档（maxLines = nameLines）：课名真要几行就算几行，超过 nameLines 行就不算这一档。 */
+fun fullyFits(pieces: List<Piece>, m: TextMeasure, innerW: Float, fs: Float, nameLines: Int = 6): Boolean = pieces.all { p ->
+    p.maxLines < nameLines || m.lines(p.text, p.size(fs), pieceBold(p.kind), innerW) <= p.maxLines
 }
 
 /** 某张卡片在某档字号下写到 level 这一档要多高；这档写不全返回 null。 */
-fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean): Float? {
-    val all = variants(cell, m, innerW, fs, onAxis)
+fun need(cell: Cell, level: Int, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean, nameLines: Int = 6): Float? {
+    val all = variants(cell, m, innerW, fs, onAxis, nameLines)
     val pieces = all[level.coerceAtMost(all.size - 1)]
-    if (!fullyFits(pieces, m, innerW, fs)) return null
+    if (!fullyFits(pieces, m, innerW, fs, nameLines)) return null
     return piecesHeight(pieces, m, innerW, fs)
 }
 
 /** 卡片实际拿到 height 高时，写得最全、又放得下的那一档。 */
-fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean): List<Piece> {
-    val all = variants(cell, m, innerW, fs, onAxis)
+fun bestPieces(cell: Cell, height: Float, m: TextMeasure, innerW: Float, fs: Float, onAxis: Boolean, nameLines: Int = 6): List<Piece> {
+    val all = variants(cell, m, innerW, fs, onAxis, nameLines)
     for (pieces in all) {
-        if (fullyFits(pieces, m, innerW, fs) && piecesHeight(pieces, m, innerW, fs) <= height + 0.5f) return pieces
+        if (fullyFits(pieces, m, innerW, fs, nameLines) && piecesHeight(pieces, m, innerW, fs) <= height + 0.5f) return pieces
     }
     return all.last()
 }
@@ -414,40 +417,62 @@ private fun timeAxis(all: List<Cell>): Axis {
 
 private fun hm(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
 
-/**
- * 纵轴优先按节次；有课没写节次又补不上时退回按真实时间。
- * labelH / endH：开始时间（含粗体）、下课时间标签的高度。
- */
-fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float, maxFontScale: Float = 1.5f): GridLayout? {
+/** 把一列列的课预处理成布局要用的东西：纵轴、每节课的上下分界线、时间轴标签、标签占高。 */
+private class Prepared(
+    val axis: Axis,
+    val n: Int,
+    val spans: List<Span>,
+    val starts: Map<Int, AxisLabel>,
+    val ends: Map<Int, String>,
+    val marks: Marks,
+    val byUnit: Boolean,
+)
+
+private fun Prepared.markSpans(shownStarts: Map<Int, AxisLabel>, shownEnds: Map<Int, String>) {
+    for (s in spans) s.onAxis = shownStarts[s.a]?.time == hm(s.cell.start) && shownEnds[s.b] == hm(s.cell.end)
+}
+
+private fun prepare(columns: List<List<Cell>>, labelH: Float, endH: Float): Prepared? {
     val all = columns.flatten()
     if (all.isEmpty()) return null
     val unitAxis = unitAxis(all)
     val axis = unitAxis ?: timeAxis(all)
     val n = axis.ideal.size + 1
-    val cellSpans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, axis.startIdx(it), axis.endIdx(it)) } }
+    val spans = columns.flatMapIndexed { col, cells -> cells.map { Span(it, col, axis.startIdx(it), axis.endIdx(it)) } }
     // 每条线下方标从它开始的最早时间、上方标在它下课的最晚时间；按节次排时同一节的课可能差几分钟，
     // 对不上的那几节课卡片上自己写时间
-    val starts = cellSpans.groupBy { it.a }.mapValues { (k, list) -> AxisLabel(hm(list.minOf { it.cell.start }), axis.unitAt[k]) }
-    val ends = cellSpans.groupBy { it.b }.mapValues { (_, list) -> hm(list.maxOf { it.cell.end }) }
-    fun markOnAxis(shownStarts: Map<Int, AxisLabel>, shownEnds: Map<Int, String>) {
-        for (s in cellSpans) {
-            s.onAxis = shownStarts[s.a]?.time == hm(s.cell.start) && shownEnds[s.b] == hm(s.cell.end)
-        }
-    }
-    markOnAxis(starts, ends)
+    val starts = spans.groupBy { it.a }.mapValues { (k, list) -> AxisLabel(hm(list.minOf { it.cell.start }), axis.unitAt[k]) }
+    val ends = spans.groupBy { it.b }.mapValues { (_, list) -> hm(list.maxOf { it.cell.end }) }
     val marks = Marks(FloatArray(n) { if (it in ends) endH else 0f }, FloatArray(n) { if (it in starts) labelH else 0f })
+    val p = Prepared(axis, n, spans, starts, ends, marks, unitAxis != null)
+    p.markSpans(starts, ends)
+    return p
+}
+
+/**
+ * 纵轴优先按节次；有课没写节次又补不上时退回按真实时间。
+ * labelH / endH：开始时间（含粗体）、下课时间标签的高度。
+ */
+fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextMeasure, labelH: Float, endH: Float, maxFontScale: Float = 1.5f, nameLines: Int = 6): GridLayout? {
+    val p = prepare(columns, labelH, endH) ?: return null
+    val axis = p.axis
+    val n = p.n
+    val cellSpans = p.spans
+    val starts = p.starts
+    val ends = p.ends
+    val marks = p.marks
     for (level in 0 until LEVELS) {
         for (fs in FONT_SCALES) {
             if (fs > maxFontScale) continue   // App 固定高度里不让课少的周把字放大到 1.5 倍
             // 教师、楼名不值得缩字：只有课名、时间、教室这些要紧的才往小里挤
             if (level <= 1 && fs < 1f) continue
             val cons = cellSpans.map { s ->
-                val h = need(s.cell, level, m, innerW, fs, s.onAxis) ?: return@map null
+                val h = need(s.cell, level, m, innerW, fs, s.onAxis, nameLines) ?: return@map null
                 Triple(s.a, s.b, h + CHIP_GAP)
             }
             if (cons.any { it == null }) continue
             val bounds = solve(axis.ideal, axis.gap, cons.filterNotNull(), marks, height) ?: continue
-            return GridLayout(bounds, starts, ends, cellSpans, fs, unitAxis != null)
+            return GridLayout(bounds, starts, ends, cellSpans, fs, p.byUnit)
         }
     }
     // 全都摆不下（很矮的小组件）：纯按比例，时间轴标签从上往下能放几个放几个，被省掉时间的课卡片上自己写
@@ -461,6 +486,23 @@ fun layoutGrid(columns: List<List<Cell>>, height: Float, innerW: Float, m: TextM
         if (key >= 0) shownStarts[key] = starts.getValue(key) else shownEnds[-1 - key] = ends.getValue(-1 - key)
         lastBottom = top + h
     }
-    markOnAxis(shownStarts, shownEnds)
-    return GridLayout(bounds, shownStarts, shownEnds, cellSpans, FONT_SCALES.last(), unitAxis != null)
+    p.markSpans(shownStarts, shownEnds)
+    return GridLayout(bounds, shownStarts, shownEnds, cellSpans, FONT_SCALES.last(), p.byUnit)
+}
+
+/**
+ * 固定字号 fs 下，让整周都至少能写成 level（默认 4 = 完整课名 + 教室，不截断课名）所需的最小网格高度。
+ * level 越小编号越靠前、内容越多、需要越高；0–4 都含“完整课名（最多 6 行）”，所以只要这一档排得下，课名就不截断。
+ * 返回 null 表示这档放不下（innerW 太窄，完整课名 6 行也放不完）。
+ */
+fun requiredGridHeight(
+    columns: List<List<Cell>>, innerW: Float, m: TextMeasure,
+    labelH: Float, endH: Float, fs: Float, level: Int = 4, nameLines: Int = 6,
+): Float? {
+    val p = prepare(columns, labelH, endH) ?: return null
+    val cons = p.spans.map { s ->
+        val h = need(s.cell, level, m, innerW, fs, s.onAxis, nameLines) ?: return null
+        Triple(s.a, s.b, h + CHIP_GAP)
+    }
+    return place(p.axis.ideal, p.axis.gap, cons, p.marks, 0f, 0f)[p.n - 1]
 }

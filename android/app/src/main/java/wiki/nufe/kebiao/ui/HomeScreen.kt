@@ -113,6 +113,7 @@ import wiki.nufe.kebiao.widget.TextMeasure
 import wiki.nufe.kebiao.widget.bestPieces
 import wiki.nufe.kebiao.widget.cellsOf
 import wiki.nufe.kebiao.widget.layoutGrid
+import wiki.nufe.kebiao.widget.requiredGridHeight
 import wiki.nufe.kebiao.widget.mix
 import wiki.nufe.kebiao.widget.parseColor
 import wiki.nufe.kebiao.widget.pieceBold
@@ -394,6 +395,12 @@ internal fun homeSyncText(snapshot: Snapshot): String {
 }
 
 private enum class CardMode { DAY, WEEK }
+
+/** 全学期周视图统一字号：0.8 档是 5 列周自然选中的大小，6 列周也用同一档，避免字号忽大忽小。 */
+private const val APP_WEEK_FONT_SCALE = 0.8f
+
+/** App 周视图允许课名换行到多少行（列窄时靠换行把课名写全，卡片高度会跟着长高）。 */
+private const val APP_WEEK_NAME_LINES = 12
 
 /** 二次函数缓动：切换周视图时先把高度变化做得更明显，再自然收住。 */
 private val QuadraticEaseInOut = Easing { fraction ->
@@ -1002,9 +1009,13 @@ private fun WeekGridView(
         val usableW = (totalW - axisW).coerceAtLeast(1f)
         val colW = if (columns.isEmpty()) 0f else usableW / columns.size - colGap
         val cellInnerW = (colW - CHIP_PAD_H - 3f).coerceAtLeast(20f)
-        val gridH = 380f
-        val layout = remember(cells, totalW) {
-            layoutGrid(cells, gridH, cellInnerW, measure, labelH, endH, maxFontScale = 1.0f)
+        // 全学期周视图统一用 0.8 档字号，避免不同周字号忽大忽小；高度按需要长高，保证课名换行后写得下不被截断
+        val gridH = remember(cells, totalW) {
+            val req = requiredGridHeight(cells, cellInnerW, measure, labelH, endH, APP_WEEK_FONT_SCALE, nameLines = APP_WEEK_NAME_LINES)
+            maxOf(380f, req ?: 380f).coerceAtMost(1200f)
+        }
+        val layout = remember(cells, totalW, gridH) {
+            layoutGrid(cells, gridH, cellInnerW, measure, labelH, endH, maxFontScale = APP_WEEK_FONT_SCALE, nameLines = APP_WEEK_NAME_LINES)
         }
         if (layout == null) {
             Text(if (isHoliday) "假期中" else "这周没有课", fontSize = 14.sp)
@@ -1164,7 +1175,7 @@ private fun WeekCellCard(
     }
     val barColor = if (dim) MaterialTheme.colorScheme.outline else baseColor
     // App 周视图不再在卡片里重复写起止时间，时间轴和详情弹窗已经足够。
-    val pieces = bestPieces(cell, height, measure, innerW, fs, onAxis)
+    val pieces = bestPieces(cell, height, measure, innerW, fs, onAxis, nameLines = APP_WEEK_NAME_LINES)
         .filter { it.kind != Kind.TIME }
 
     Row(
