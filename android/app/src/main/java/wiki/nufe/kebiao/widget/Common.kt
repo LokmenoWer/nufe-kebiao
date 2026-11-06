@@ -170,14 +170,17 @@ fun openApp(context: Context, view: String? = null): Action {
     return actionStartActivity(intent)
 }
 
-/** 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。 */
-fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day"): Action {
+/**
+ * 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。
+ * [appView] 是打开 App 时要切到的视图，默认与网站视图一致。
+ */
+fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day", appView: String = view): Action {
     val snap = data.snapshot
     val site = data.site
     return if (!data.opensApp && site != null && snap != null) {
         openUrl(siteLink(site, snap.payload, day, view))
     } else {
-        openApp(context, view)
+        openApp(context, appView)
     }
 }
 

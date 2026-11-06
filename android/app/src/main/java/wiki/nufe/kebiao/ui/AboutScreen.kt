@@ -146,10 +146,7 @@ internal fun AboutScreen(
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),
                 )
             }
-            AboutRow("数据同步说明", "学校教务系统") {
-                showPrivacy = true
-            }
-            AboutRow("隐私与数据说明", "查看说明") {
+            AboutRow("隐私与数据说明", "数据来自学校教务系统") {
                 showPrivacy = true
             }
             if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {

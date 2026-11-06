@@ -269,7 +269,7 @@ private fun DayCells(
     // 每格只占一个子元素，一天最多十节课也不会超出 RemoteViews 的子元素上限。
     val spans = layout.spans.filter { it.col == col }.take(10)
     Box(modifier = modifier.fillMaxHeight().padding(start = COL_GAP.dp)
-        .clickable(openDay(context, data, column.day))) {
+        .clickable(openDay(context, data, column.day, appView = "week"))) {
         for (span in spans) {
             val top = layout.bounds[span.a]
             val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)

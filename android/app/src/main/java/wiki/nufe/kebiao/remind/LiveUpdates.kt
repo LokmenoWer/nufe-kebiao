@@ -210,9 +210,10 @@ object LiveUpdates {
         val endMs = lessonMs(item.date, item.end)
         val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
         if (dismissMs <= now) return 0L
-        buildNotification(context, item)?.let {
-            context.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, it)
-        }
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return 0L
+        // 卡片已被用户划掉，或 cancel() 已撤销：不再重发，否则一分钟后又会冒出来。
+        if (manager.activeNotifications.none { it.id == NOTIFICATION_ID }) return 0L
+        buildNotification(context, item)?.let { manager.notify(NOTIFICATION_ID, it) }
         val target = if (now < startMs) startMs else endMs
         val left = target - now
         if (left <= 0) return 0L

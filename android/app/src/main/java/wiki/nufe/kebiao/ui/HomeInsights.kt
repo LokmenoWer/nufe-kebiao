@@ -111,10 +111,15 @@ internal fun TodayRhythmCard(plan: DayPlan?, now: Now) {
                                 )
                             }
                         } else {
-                            Text("今天没有课", fontSize = 13.sp)
+                            val headline = when {
+                                tomorrow -> "明天没有课"
+                                (plan?.total ?: 0) > 0 -> "今天的课上完了"
+                                else -> "今天没有课"
+                            }
+                            Text(headline, fontSize = 13.sp)
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                plan?.empty ?: "可以休息一下。",
+                                plan?.preview?.title ?: "可以休息一下。",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -135,6 +140,8 @@ private fun RhythmRing(
     modifier: Modifier,
 ) {
     val handColor = MaterialTheme.colorScheme.onSurface
+    // 底环跟随主题：写死黑色在暗色模式下几乎看不见。
+    val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
     val spin = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         spin.animateTo(1f, tween(durationMillis = 1100, easing = FastOutSlowInEasing))
@@ -145,7 +152,7 @@ private fun RhythmRing(
             val inset = stroke / 2
             val arcSize = Size(size.width - stroke, size.height - stroke)
             drawArc(
-                color = Color(0x1F000000),
+                color = trackColor,
                 startAngle = -90f,
                 sweepAngle = 360f,
                 useCenter = false,
@@ -278,7 +285,7 @@ internal fun SemesterProgressCard(week: Int?, modifier: Modifier = Modifier) {
                 }
             }
             Spacer(Modifier.height(6.dp))
-            Text("$week/$TOTAL_WEEKS", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$current/$TOTAL_WEEKS", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

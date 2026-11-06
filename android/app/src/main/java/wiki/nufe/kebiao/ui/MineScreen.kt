@@ -296,18 +296,21 @@ internal fun MineScreen(
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                 )
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
-            PermissionRow(
-                title = "准时提醒",
-                detail = "避免系统推迟上课提醒",
-                allowed = exactOk,
-            ) {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                        Uri.parse("package:${context.packageName}"),
-                    ),
-                )
+            // Android 12 以下不需要也没有“闹钟和提醒”授权页，启动该 intent 会抛 ActivityNotFoundException。
+            if (Build.VERSION.SDK_INT >= 31) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+                PermissionRow(
+                    title = "准时提醒",
+                    detail = "避免系统推迟上课提醒",
+                    allowed = exactOk,
+                ) {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                }
             }
             if (Build.VERSION.SDK_INT >= 36) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
@@ -496,7 +499,7 @@ private fun ConnectionRow(title: String, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable { launchSafely(title, onClick) }
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -520,7 +523,7 @@ private fun PermissionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable { launchSafely(title, onClick) }
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -542,4 +545,9 @@ private fun PermissionRow(
             modifier = Modifier.size(16.dp),
         )
     }
+}
+
+/** 系统设置页在部分 ROM 上可能不存在；跳转失败时只记日志，不让整行点击把 App 带崩。 */
+private fun launchSafely(title: String, open: () -> Unit) {
+    runCatching(open).onFailure { Diag.w("open settings failed ($title): ${it.javaClass.simpleName}") }
 }

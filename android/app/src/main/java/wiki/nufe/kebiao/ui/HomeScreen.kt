@@ -19,6 +19,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,6 +63,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
@@ -524,8 +526,33 @@ private fun TodayCardView(
             label = "card-mode",
         ) { targetMode ->
             if (targetMode == CardMode.WEEK) {
+                val canSwitchWeek = payload?.week != null && nextWeekBlock != null
+                val swipeThreshold = with(LocalDensity.current) { 56.dp.toPx() }
                 AnimatedContent(
                     targetState = showNext,
+                    modifier = Modifier.pointerInput(canSwitchWeek, showNext) {
+                        if (!canSwitchWeek) return@pointerInput
+                        var dragged = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragged = 0f },
+                            onHorizontalDrag = { change, amount ->
+                                dragged += amount
+                                change.consume()
+                            },
+                            onDragEnd = {
+                                // 左滑看下周、右滑回本周；已经在目标周时不重复切换。
+                                val target = when {
+                                    dragged <= -swipeThreshold -> true
+                                    dragged >= swipeThreshold -> false
+                                    else -> null
+                                }
+                                if (target != null && target != showNext) {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                                    preferNextWeek = target
+                                }
+                            },
+                        )
+                    },
                     transitionSpec = {
                         val direction = if (targetState) 1 else -1
                         (slideInHorizontally(
