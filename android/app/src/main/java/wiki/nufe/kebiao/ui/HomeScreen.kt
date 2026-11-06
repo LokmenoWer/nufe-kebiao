@@ -73,6 +73,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.coroutineScope
@@ -333,6 +334,36 @@ private val QuadraticEaseInOut = Easing { fraction ->
     }
 }
 
+/** 本周↔下周切换时，标题与切换按钮里的文字按同一节奏横向滑入，跟周课表的滑动保持一致，避免只换字不带动造成的歧义。 */
+@Composable
+private fun SlidingWeekLabel(
+    text: String,
+    slideDir: Int,
+    fontSize: TextUnit,
+    fontWeight: FontWeight,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedContent(
+        targetState = text,
+        modifier = modifier,
+        transitionSpec = {
+            (slideInHorizontally(
+                animationSpec = tween(360, easing = QuadraticEaseInOut),
+                initialOffsetX = { it * slideDir },
+            ) + fadeIn(tween(160))) togetherWith
+                (slideOutHorizontally(
+                    animationSpec = tween(300, easing = QuadraticEaseInOut),
+                    targetOffsetX = { -it * slideDir },
+                ) + fadeOut(tween(140)))
+        },
+        contentAlignment = Alignment.Center,
+        label = "week-label",
+    ) {
+        Text(it, fontSize = fontSize, fontWeight = fontWeight, color = color, maxLines = 1)
+    }
+}
+
 private data class SelectedCourse(
     val day: Day,
     val slots: List<Slot>,
@@ -401,11 +432,17 @@ private fun TodayCardView(
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (mode == CardMode.WEEK) weekTitle else (plan?.title ?: "今天"),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (mode == CardMode.WEEK) {
+                SlidingWeekLabel(
+                    text = weekTitle,
+                    slideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            } else {
+                Text(plan?.title ?: "今天", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            }
             val subtitle = if (mode == CardMode.WEEK) {
                 weekRange
             } else {
@@ -503,6 +540,7 @@ private fun TodayCardView(
                 mode = mode,
                 dayLabel = plan?.title ?: "今天",
                 weekLabel = weekTitle,
+                weekSlideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
                 onSelect = { mode = it },
             )
         }
@@ -719,12 +757,14 @@ private fun ModeToggle(
     mode: CardMode,
     dayLabel: String,
     weekLabel: String,
+    weekSlideDir: Int? = null,
     onSelect: (CardMode) -> Unit,
 ) {
     SlidingToggle(
         firstLabel = dayLabel,
         secondLabel = weekLabel,
         selectedIndex = if (mode == CardMode.DAY) 0 else 1,
+        secondSlideDir = weekSlideDir,
         onSelect = { index -> onSelect(if (index == 0) CardMode.DAY else CardMode.WEEK) },
     )
 }
@@ -735,6 +775,7 @@ internal fun SlidingToggle(
     firstLabel: String,
     secondLabel: String,
     selectedIndex: Int,
+    secondSlideDir: Int? = null,
     onSelect: (Int) -> Unit,
 ) {
     val density = LocalDensity.current
@@ -807,6 +848,7 @@ internal fun SlidingToggle(
                 ModePill(
                     text = secondLabel,
                     selected = selectedIndex == 1,
+                    slideDir = secondSlideDir,
                     onClick = { onSelect(1) },
                     onPosition = { x, y, width, height ->
                         secondX = x
@@ -824,6 +866,7 @@ internal fun SlidingToggle(
 internal fun ModePill(
     text: String,
     selected: Boolean,
+    slideDir: Int? = null,
     onPosition: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
     onClick: () -> Unit,
 ) {
@@ -856,12 +899,22 @@ internal fun ModePill(
             }
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        Text(
-            text = text,
-            fontSize = 11.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            color = content,
-        )
+        if (slideDir != null) {
+            SlidingWeekLabel(
+                text = text,
+                slideDir = slideDir,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = content,
+            )
+        } else {
+            Text(
+                text = text,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = content,
+            )
+        }
     }
 }
 
