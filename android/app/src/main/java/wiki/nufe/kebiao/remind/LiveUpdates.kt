@@ -21,8 +21,8 @@ import wiki.nufe.kebiao.ui.MainActivity
  * Android 16 Live Updates / ColorOS 流体云上课提醒。
  *
  * 复用 Reminders 的课前闹钟作为触发点：到点后发一条 promoted ongoing 通知，
- * 再在上课/下课时更新或撤销。数据来自 /widget/<token>.json 的本地缓存，
- * 该缓存由 Sync 在课前检查点刷新，不另抓网页。
+ * 再在上课/下课时更新或撤销。数据来自本机加密的整学期课表缓存（Repository.cached()），
+ * 该缓存由 Sync 让手机直接向学校刷新，不经过本站服务器。
  */
 object LiveUpdates {
     const val ACTION_START = "wiki.nufe.kebiao.LIVE_START"

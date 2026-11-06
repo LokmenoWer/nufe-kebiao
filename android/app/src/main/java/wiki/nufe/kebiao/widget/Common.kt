@@ -2,7 +2,6 @@ package wiki.nufe.kebiao.widget
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.SystemClock
 import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
@@ -51,34 +50,30 @@ import androidx.glance.unit.ColorProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import wiki.nufe.kebiao.R
-import wiki.nufe.kebiao.data.Day
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.data.Tone
-import wiki.nufe.kebiao.data.siteLink
-import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.ui.MainActivity
 
-/** 小组件画图需要的一切：缓存的课表、网站地址、链接是否失效、点击打开 App 还是网站。 */
+/** 只读本机课表与登录状态；会话过期不妨碍绘制缓存。 */
 data class WidgetData(
     val snapshot: Snapshot?,
-    val site: String?,
-    val hasLink: Boolean,
-    val linkInvalid: Boolean,
-    val opensApp: Boolean,
+    val hasTimetable: Boolean,
+    val needsLogin: Boolean,
 )
 
 fun loadData(context: Context): WidgetData {
     val repo = Repository(context)
-    return WidgetData(repo.cached(), repo.siteUrl(), repo.widgetUrl != null, LinkState.isInvalid(context), repo.widgetOpensApp)
+    val snapshot = repo.cached()
+    return WidgetData(snapshot, repo.hasTimetable, repo.needsLogin)
 }
 
 /**
  * Glance 会把小组件的会话留着一阵子，期间 updateAll 只让已有会话重组、不会重跑 provideGlance。
- * 所以数据不能在 provideGlance 里读一次就攥着（换了链接也还画旧课表）：[Sync.redraw] 先把版本号加一，
+ * 所以数据不能在 provideGlance 里读一次就攥着（重新导入后也还画旧课表）：[Sync.redraw] 先把版本号加一，
  * 会话里按版本号重读缓存。
  */
 object WidgetVersion {
@@ -160,31 +155,13 @@ fun chipText(hex: String): ColorProvider {
     return ColorProvider(day = mix(c, Color.Black, 0.4f), night = mix(c, Color.White, 0.55f))
 }
 
-fun solid(color: Color): ColorProvider = ColorProvider(day = color, night = color)
-
-fun openUrl(url: String): Action =
-    actionStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-
 fun openApp(context: Context, view: String? = null): Action {
     val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     view?.let { intent.putExtra(MainActivity.EXTRA_VIEW, it) }
     return actionStartActivity(intent)
 }
 
-/**
- * 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。
- * [appView] 是打开 App 时要切到的视图，默认与网站视图一致。
- */
-fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day", appView: String = view): Action {
-    val snap = data.snapshot
-    val site = data.site
-    return if (!data.opensApp && site != null && snap != null) {
-        openUrl(siteLink(site, snap.payload, day, view))
-    } else {
-        openApp(context, appView)
-    }
-}
-
+fun solid(color: Color): ColorProvider = ColorProvider(day = color, night = color)
 class RefreshAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
         Sync.now(context, refresh = true)
@@ -266,13 +243,9 @@ fun Countdown(context: Context, targetMs: Long, color: Color) {
     AndroidRemoteViews(views)
 }
 
-/** 没有链接 / 链接失效 / 还没拿到数据时显示的话；能正常画课表时为 null。 */
-fun placeholderMessage(data: WidgetData): String? = when {
-    !data.hasLink -> "点按设置小组件链接"
-    data.linkInvalid -> "链接已失效，点按重新粘贴"
-    data.snapshot == null -> "正在获取课表…"
-    else -> null
-}
+/** 只在没有本机课表时显示引导，离线或登录过期仍展示缓存。 */
+fun placeholderMessage(data: WidgetData): String? =
+    if (data.snapshot == null) "在App登录学校账号" else null
 
 @Composable
 fun Placeholder(context: Context, message: String) {
