@@ -1,5 +1,6 @@
 package wiki.nufe.kebiao.ui
 
+import android.content.Context
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -46,6 +47,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -54,6 +56,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -90,6 +93,7 @@ import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.AppUpdate
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
+import wiki.nufe.kebiao.data.TimetableChange
 import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.WEEKDAY
@@ -166,6 +170,58 @@ internal fun UpdateBanner(update: AppUpdate, flow: UpdateFlow, onDismiss: () -> 
     }
 }
 
+private fun changeKey(c: TimetableChange) = "${c.date}|${c.name}|${c.kind}|${c.detail}"
+
+/** 调课详情卡：左右切换多条明细，"前往查看"跳到当周课表并让该条消失；只剩一条时不显示左右箭头。 */
+@Composable
+private fun ChangeDetailBanner(
+    changes: List<TimetableChange>,
+    onJump: (Int?) -> Unit,
+    onDismiss: (String) -> Unit,
+) {
+    if (changes.isEmpty()) return
+    var index by remember { mutableIntStateOf(0) }
+    val safe = index.coerceIn(0, changes.lastIndex)
+    val cur = changes[safe]
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (changes.size > 1) {
+                IconButton(onClick = { if (safe > 0) index = safe - 1 }, enabled = safe > 0) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_chevron_right),
+                        contentDescription = "上一条",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp).rotate(180f),
+                    )
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    (cur.week?.let { "第 $it 周" } ?: "本学期") + " · " + cur.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(cur.detail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (changes.size > 1) {
+                IconButton(onClick = { if (safe < changes.lastIndex) index = safe + 1 }, enabled = safe < changes.lastIndex) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_chevron_right),
+                        contentDescription = "下一条",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onJump(cur.week); onDismiss(changeKey(cur)) }) { Text("前往查看", fontSize = 13.sp) }
+        }
+    }
+}
+
 /** 自动刷新停了：小字标题栏容易看漏，这里写清楚怎么恢复。 */
 @Composable
 internal fun LoginBanner(busy: Boolean, onLogin: () -> Unit) {
@@ -202,6 +258,14 @@ internal fun HomeScreen(
     rhythmClock12h: Boolean = true,
 ) {
     var now by remember { mutableStateOf(Now.current()) }
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("kebiao", Context.MODE_PRIVATE) }
+    var seenChanges by remember {
+        mutableStateOf(prefs.getStringSet("change_seen", emptySet())?.toSet().orEmpty())
+    }
+    var jumpWeek by remember { mutableStateOf<Int?>(null) }
+    var jumpPulse by remember { mutableIntStateOf(0) }
+    val pendingChanges = snapshot?.payload?.changes.orEmpty().filter { changeKey(it) !in seenChanges }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -237,6 +301,17 @@ internal fun HomeScreen(
             UpdateBanner(it, updateFlow, onDismissUpdate)
             Spacer(Modifier.height(14.dp))
         }
+        if (pendingChanges.isNotEmpty()) {
+            ChangeDetailBanner(
+                changes = pendingChanges,
+                onJump = { wk -> jumpWeek = wk; jumpPulse++ },
+                onDismiss = { key ->
+                    seenChanges = seenChanges + key
+                    prefs.edit().putStringSet("change_seen", seenChanges).apply()
+                },
+            )
+            Spacer(Modifier.height(14.dp))
+        }
         if (needsLogin) {
             LoginBanner(busy, onLogin)
             Spacer(Modifier.height(14.dp))
@@ -245,7 +320,7 @@ internal fun HomeScreen(
             Spacer(Modifier.height(14.dp))
         }
         EnterUp(delayMillis = 70) {
-            TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
+            TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed, jumpWeek, jumpPulse)
         }
         Spacer(Modifier.height(14.dp))
         val week = snapshot?.payload?.week?.week
@@ -390,6 +465,8 @@ private fun TodayCardView(
     initialWeek: Boolean,
     viewPulse: Int,
     onViewConsumed: () -> Unit,
+    jumpWeek: Int?,
+    jumpPulse: Int,
 ) {
     var mode by remember { mutableStateOf(CardMode.DAY) }
     val view = LocalView.current
@@ -438,6 +515,14 @@ private fun TodayCardView(
             weekBlock?.week?.let { Note("第 $it 周", Tone.FAINT) } else null
     } else {
         note
+    }
+
+    LaunchedEffect(jumpPulse) {
+        if (jumpPulse > 0 && jumpWeek != null) {
+            weekDir = if (jumpWeek >= (preferWeek ?: defaultWeekNo)) 1 else -1
+            mode = CardMode.WEEK
+            preferWeek = jumpWeek
+        }
     }
 
     SectionCard {
