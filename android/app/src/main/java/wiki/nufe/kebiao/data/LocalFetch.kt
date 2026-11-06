@@ -1,167 +1,141 @@
 package wiki.nufe.kebiao.data
 
+import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.net.HttpCookie
-import java.net.HttpURLConnection
-import java.net.URL
-import org.json.JSONArray
+import java.util.concurrent.TimeUnit
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 
-/**
- * 手机代抓：用这台手机的网络向教务要课表，交给服务器解析（移植自 Scriptable 脚本的 delegatedFetch）。
- * 服务器到期时给绑定过的设备发任务（只有教务域名的 cookie，统一身份认证的凭据不下发）。
- * 这样学校看到的是手机自己的 IP，本站服务器少访问学校；任何一步不顺就如实上报，由服务器兜底。
- * 任务含 cookie：不写缓存、不打日志。
- */
+object SchoolUrls {
+    const val AUTH_HOST = "authserver.nufe.edu.cn"
+    const val JW_HOST = "jwxt.nufe.edu.cn"
+    const val AUTH = "https://authserver.nufe.edu.cn/authserver/login"
+    const val SSO = "https://jwxt.nufe.edu.cn/student/sso/login"
+    const val COURSE = "https://jwxt.nufe.edu.cn/student/for-std/course-table"
+    val cookieOrigins = listOf(AUTH, COURSE)
+
+    fun allowed(url: String): Boolean = url.toHttpUrlOrNull()?.let {
+        it.isHttps && it.port == 443 && it.username.isEmpty() && it.password.isEmpty() &&
+            it.host in setOf(AUTH_HOST, JW_HOST)
+    } == true
+
+    fun loginPage(url: HttpUrl): Boolean = url.host == AUTH_HOST ||
+        (url.host == JW_HOST && url.encodedPath.trimEnd('/') == "/student/login")
+
+    fun printData(id: Int) = "https://$JW_HOST/student/for-std/course-table/semester/$id/print-data?semesterId=$id&hasExperiment=true"
+    fun semesterDetail(id: Int) = "https://$JW_HOST/student/ws/semester/get/$id"
+}
+
+class SchoolSessionExpired : IOException("学校登录已失效，请在 App 中重新登录")
+class SchoolPageException(message: String) : IOException(message)
+
 class LocalFetch(
-    private val userAgent: String,
-    private val allowed: (String) -> Boolean = ::isJwxtUrl,
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val jar: SchoolCookieJar,
+    userAgent: String,
+    private val allowed: (String) -> Boolean = SchoolUrls::allowed,
 ) {
-    private class Failed(val error: String) : Exception()
+    private val client = OkHttpClient.Builder()
+        .cookieJar(jar)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            val request = chain.request()
+            if (!allowed(request.url.toString())) throw IOException("已阻止非学校地址")
+            chain.proceed(request.newBuilder().header("User-Agent", userAgent).build())
+        }.build()
 
-    /** 返回要 POST 给 `/upload` 的内容；失败时只有 id 和 error。 */
-    fun run(task: JSONObject): JSONObject {
-        val id = task.optString("id")
-        return try {
-            collect(task).put("id", id)
-        } catch (e: Failed) {
-            JSONObject().put("id", id).put("error", e.error)
-        } catch (_: IOException) {
-            JSONObject().put("id", id).put("error", "network")
-        }
-    }
+    data class Page(val url: HttpUrl, val code: Int, val body: String, val location: String?)
 
-    private fun collect(task: JSONObject): JSONObject {
-        val started = clock()
-        val out = JSONObject()
-        val finalUrls = JSONArray()
-        val setCookies = JSONArray()
-        val fresh = linkedMapOf<String, String>() // 这次学校新发的 cookie，后面的请求接着带
-        val loginHosts = task.optJSONArray("login_hosts").strings()
-        val steps = task.optJSONArray("steps") ?: JSONArray()
-        for (i in 0 until steps.length()) {
-            val step = steps.getJSONObject(i)
-            var url = step.getString("url")
-            var hop = 0
-            // 跳转自己跟：每一跳先查目的地、再带上最新的 cookie
-            while (true) {
-                if (isLoginUrl(url, loginHosts)) throw Failed("expired")
-                if (!allowed(url)) throw Failed("blocked")
-                if (hop > MAX_HOPS) throw Failed("redirect")
-                val left = BUDGET_MS - (clock() - started)
-                if (left <= 0) throw Failed("timeout")
-                val conn = URL(url).openConnection() as HttpURLConnection
-                try {
-                    conn.instanceFollowRedirects = false
-                    conn.connectTimeout = minOf(left, STEP_TIMEOUT_MS).toInt()
-                    conn.readTimeout = minOf(left, STEP_TIMEOUT_MS).toInt()
-                    conn.setRequestProperty("User-Agent", userAgent)
-                    task.optJSONObject("headers")?.let { headers ->
-                        headers.keys().forEach { conn.setRequestProperty(it, headers.getString(it)) }
+    fun get(url: String, follow: Boolean = true, ajax: Boolean = false): Page {
+        var target = url.toHttpUrl()
+        val started = System.nanoTime()
+        repeat(9) {
+            if (!allowed(target.toString())) throw IOException("已阻止非学校跳转")
+            if (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started) >= 45) throw IOException("学校请求超时")
+            val request = Request.Builder().url(target).header("Accept", if (ajax) "application/json" else "text/html")
+            if (ajax) request.header("X-Requested-With", "XMLHttpRequest")
+            client.newCall(request.build()).execute().use { response ->
+                val location = response.header("Location")
+                if (follow && response.code in 300..399 && location != null) {
+                    target = target.resolve(location) ?: throw IOException("无效学校跳转")
+                } else {
+                    if (response.code >= 500) throw IOException("学校服务暂时不可用（${response.code}）")
+                    if (response.code in listOf(401, 403)) throw SchoolSessionExpired()
+                    if (response.code >= 400) throw IOException("学校请求失败（${response.code}）")
+                    val body = response.body ?: throw IOException("学校返回空响应")
+                    if (body.contentLength() > MAX_BODY_BYTES) throw SchoolPageException("课表数据过大")
+                    val output = ByteArrayOutputStream()
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val size = input.read(buffer)
+                            if (size < 0) break
+                            if (output.size() + size > MAX_BODY_BYTES) throw SchoolPageException("课表数据过大")
+                            output.write(buffer, 0, size)
+                        }
                     }
-                    val jar = cookieMap(step.optString("cookie")).apply { putAll(fresh) }
-                    conn.setRequestProperty("Cookie", jar.entries.joinToString("; ") { "${it.key}=${it.value}" })
-                    val code = conn.responseCode
-                    for (cookie in responseCookies(conn)) {
-                        val domain = cookie.domain.orEmpty().removePrefix(".").lowercase()
-                        if (domain.isNotEmpty() && domain != JWXT_HOST) continue
-                        fresh[cookie.name] = cookie.value.orEmpty()
-                        setCookies.put(JSONObject().put("name", cookie.name).put("value", cookie.value.orEmpty()))
-                    }
-                    if (code in 300..399) {
-                        val location = conn.getHeaderField("Location") ?: throw Failed("http_$code")
-                        url = resolveLocation(url, location)
-                        hop++
-                        continue
-                    }
-                    val kind = step.optString("kind")
-                    if (code >= 400) {
-                        if (kind == "detail") break // 学期详情只是校历兜底，拿不到不要紧
-                        throw Failed("http_$code")
-                    }
-                    val text = readCapped(conn, started)
-                    finalUrls.put(url)
-                    when (kind) {
-                        "course" -> out.put("course_html", text)
-                        "print" -> out.put("print_data", text)
-                        "detail" -> out.put("detail", text)
-                    }
-                    break
-                } finally {
-                    conn.disconnect()
+                    return Page(target, response.code, output.toString("UTF-8"), location)
                 }
             }
         }
-        return out.put("final_urls", finalUrls).put("set_cookies", setCookies)
+        throw IOException("学校跳转次数过多")
     }
 
-    /** 连接超时只管网络空闲，学校慢慢吐数据时能一直拖下去：按总预算和大小上限截断。 */
-    private fun readCapped(conn: HttpURLConnection, started: Long): String {
-        val buffer = ByteArray(16 * 1024)
-        val out = java.io.ByteArrayOutputStream()
-        conn.inputStream.use { input ->
-            while (true) {
-                val n = input.read(buffer)
-                if (n < 0) break
-                out.write(buffer, 0, n)
-                if (out.size() > MAX_BODY_BYTES) throw Failed("too_large")
-                if (clock() - started > BUDGET_MS) throw Failed("timeout")
-            }
+    fun coursePage(): String {
+        val first = get(SchoolUrls.COURSE)
+        if (!SchoolUrls.loginPage(first.url) && hasCourseData(first.body)) return first.body
+        if (!SchoolUrls.loginPage(first.url)) throw SchoolPageException("学校课表页面结构异常，请稍后重试")
+        return renewWithTgc()
+    }
+
+    fun renewWithTgc(): String {
+        if (!jar.hasTgc) throw SchoolSessionExpired()
+        val renewed = get(SchoolUrls.SSO)
+        if (SchoolUrls.loginPage(renewed.url)) throw SchoolSessionExpired()
+        val course = get(SchoolUrls.COURSE)
+        if (SchoolUrls.loginPage(course.url)) throw SchoolSessionExpired()
+        if (!hasCourseData(course.body)) throw SchoolPageException("学校课表页面结构异常，请稍后重试")
+        return course.body
+    }
+
+    fun collect(courseHtml: String? = null, previous: JSONObject? = null): JSONObject {
+        val html = courseHtml ?: coursePage()
+        val semester = TimetableParser.semesterId(html)
+        val print = get(SchoolUrls.printData(semester), ajax = true)
+        if (SchoolUrls.loginPage(print.url)) throw SchoolSessionExpired()
+        // 半失效时接口可能 200 返回登录中间页 HTML；当成登录失效走重登，别落到解析错误而漏置 needs_login。
+        if (!print.body.trimStart().startsWith("{")) throw SchoolSessionExpired()
+        val detail = try {
+            get(SchoolUrls.semesterDetail(semester), ajax = true).also {
+                if (SchoolUrls.loginPage(it.url)) throw SchoolSessionExpired()
+            }.body
+        } catch (expired: SchoolSessionExpired) {
+            throw expired
+        } catch (_: IOException) {
+            null
         }
-        return out.toString("UTF-8")
+        return TimetableParser.parse(html, print.body, detail, previous)
     }
 
-    private fun responseCookies(conn: HttpURLConnection): List<HttpCookie> =
-        conn.headerFields.orEmpty()
-            .filterKeys { it != null && it.equals("Set-Cookie", ignoreCase = true) }
-            .values.flatten()
-            .flatMap { runCatching { HttpCookie.parse(it) }.getOrDefault(emptyList()) }
+    fun touchSso(): Boolean {
+        if (!jar.hasTgc) return false
+        val target = SchoolUrls.AUTH.toHttpUrl().newBuilder().addQueryParameter("service", SchoolUrls.SSO).build()
+        val response = get(target.toString(), follow = false)
+        val redirect = response.location?.let(response.url::resolve) ?: return false
+        return response.code in 300..399 && redirect.host == SchoolUrls.JW_HOST &&
+            redirect.encodedPath == "/student/sso/login" && redirect.queryParameter("ticket") != null
+    }
 
     companion object {
-        const val BUDGET_MS = 20_000L
-        private const val STEP_TIMEOUT_MS = 8_000L
-        private const val MAX_HOPS = 5
-        private const val MAX_BODY_BYTES = 2 * 1024 * 1024
-        private const val JWXT_HOST = "jwxt.nufe.edu.cn"
-        private val JWXT_URL = Regex("""^https://jwxt\.nufe\.edu\.cn(?:[/?][^\s\\#]*)?$""", RegexOption.IGNORE_CASE)
-        private val URL_PARTS = Regex("""^https?://([^/:?#]+)(?::\d+)?([^?#]*)""", RegexOption.IGNORE_CASE)
-        private val SCHEME = Regex("""^[a-z][a-z0-9+.-]*:""", RegexOption.IGNORE_CASE)
-        private val ORIGIN = Regex("""^https?://[^/?#]+""", RegexOption.IGNORE_CASE)
-
-        /** 只往教务发：任务地址和每一跳都得是 https://jwxt.nufe.edu.cn，cookie 不会被带到别处。 */
-        fun isJwxtUrl(url: String) = JWXT_URL.matches(url)
-
-        /** 被踢回统一身份认证或教务自己的登录页：教务会话过期了，续期只能服务器做。 */
-        fun isLoginUrl(url: String, hosts: List<String>): Boolean {
-            val match = URL_PARTS.find(url) ?: return false
-            val host = match.groupValues[1].lowercase()
-            val path = match.groupValues[2].trimEnd('/')
-            return host in hosts || (host == JWXT_HOST && path == "/student/login")
-        }
-
-        /** 把 Location 解析成绝对地址（学校常回相对路径）。 */
-        fun resolveLocation(base: String, location: String): String {
-            val s = location.trim()
-            if (SCHEME.containsMatchIn(s)) return s
-            if (s.startsWith("//")) return "https:$s"
-            val origin = ORIGIN.find(base)?.value.orEmpty()
-            val path = base.substring(origin.length).split('?', '#')[0].ifEmpty { "/" }
-            if (s.startsWith("/")) return origin + s
-            if (s.startsWith("?")) return origin + path + s
-            return origin + path.substringBeforeLast('/', "") + "/" + s
-        }
-
-        private fun cookieMap(header: String): MutableMap<String, String> {
-            val jar = linkedMapOf<String, String>()
-            for (part in header.split(';')) {
-                val i = part.indexOf('=')
-                if (i > 0) jar[part.substring(0, i).trim()] = part.substring(i + 1).trim()
-            }
-            return jar
-        }
-
-        private fun JSONArray?.strings(): List<String> =
-            if (this == null) emptyList() else (0 until length()).map { optString(it).lowercase() }
+        const val MAX_BODY_BYTES = 2 * 1024 * 1024
+        fun hasCourseData(html: String) = Regex("""\bpersonId\s*=\s*\d+""").containsMatchIn(html) &&
+            Regex("""\bcurrentSemester\s*=\s*\{""").containsMatchIn(html)
     }
 }
