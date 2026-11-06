@@ -10,7 +10,6 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -262,7 +261,8 @@ class SchoolLoginActivity : ComponentActivity() {
         web.clearHistory()
         web.removeAllViews()
         web.destroy()
-        WebStorage.getInstance().deleteAllData()
+        // 不清 WebStorage：页面生成的设备指纹存在 localStorage 里，保留它学校才认这台设备、
+        // 信任后不再触发多因子；会话 cookie 已加密存入 school-session.enc，这里只清 WebView 里的 cookie。
         CookieManager.getInstance().removeAllCookies { CookieManager.getInstance().flush() }
         super.onDestroy()
     }
