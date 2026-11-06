@@ -160,13 +160,19 @@ fun buildTodayPlan(payload: Payload, now: Now): DayPlan {
     }
 }
 
-/** 周末本周剩下的日子都没课时改看下周。 */
+/** 本周剩下的课都上完（含今天已结束的课不算）、且下周有课时改看下周（不限周末）。 */
 fun weekToShow(payload: Payload, now: Now): Pair<String, WeekBlock?> {
     val current = payload.week
     val next = payload.nextWeek
-    val restHasClass = current?.days.orEmpty().any { it.date >= now.date && it.lessons.isNotEmpty() }
+    val restHasClass = current?.days.orEmpty().any { day ->
+        when {
+            day.date > now.date -> day.lessons.isNotEmpty()
+            day.date == now.date -> day.lessons.any { it.endMinutes > now.minutes }
+            else -> false
+        }
+    }
     val nextHasClass = next?.days.orEmpty().any { it.lessons.isNotEmpty() }
-    if (now.weekday >= 6 && !restHasClass && nextHasClass) return "下周" to next
+    if (!restHasClass && nextHasClass) return "下周" to next
     return "本周" to current
 }
 
