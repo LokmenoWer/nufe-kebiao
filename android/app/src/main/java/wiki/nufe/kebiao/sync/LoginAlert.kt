@@ -25,7 +25,6 @@ object LoginAlert {
     private const val NOTIFICATION_ID = 41_001
     private const val KEY_SENT = "login_alert_sent"
 
-    /** 只传连上服务器拿到的数据：离线时的缓存不代表现在的状态。 */
     fun update(context: Context, payload: Payload) {
         val prefs = context.getSharedPreferences("kebiao", Context.MODE_PRIVATE)
         val sent = prefs.getBoolean(KEY_SENT, false)
@@ -50,13 +49,12 @@ object LoginAlert {
                 },
             )
         }
-        val site = Repository(context).siteUrl()
-        val target = if (site != null) Intent(Intent.ACTION_VIEW, Uri.parse(site)) else Intent(context, MainActivity::class.java)
-        val open = PendingIntent.getActivity(context, NOTIFICATION_ID, target, PendingIntent.FLAG_IMMUTABLE)
+        val target = Intent(context, wiki.nufe.kebiao.ui.SchoolLoginActivity::class.java)
+        val open = PendingIntent.getActivity(context, NOTIFICATION_ID, target, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle(if (payload.status == "captcha") "课表需要重新验证" else "课表登录已失效")
-            .setContentText("课表已暂停更新，点这里到网站重新登录。")
+            .setContentText("点这里在本机重新登录学校；已缓存的课表仍可离线查看。")
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()

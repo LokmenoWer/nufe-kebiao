@@ -61,9 +61,9 @@ class SyncScheduleTest {
     }
 
     @Test
-    fun delegateWakesThirtySevenMinutesBeforeClass() {
+    fun legacyDelegateFlagDoesNotScheduleServerPolling() {
         val next = Sync.nextRedrawMs(payload(delegate = true), now("17:30"))
-        assertEquals(lessonMs(date, "17:53"), next)
+        assertEquals(lessonMs(date, "18:00"), next)
     }
 
     @Test
@@ -73,20 +73,20 @@ class SyncScheduleTest {
     }
 
     @Test
-    fun pollAfterOnlyAppliesToDelegatedDevices() {
+    fun oldServerPollHintsAreIgnored() {
         val delegated = Sync.nextRedrawMs(payload(delegate = true, pollAfter = 600), now("13:00"))
         val serverOnly = Sync.nextRedrawMs(payload(delegate = false, pollAfter = 600), now("13:00"))
-        assertEquals(lessonMs(date, "13:10"), delegated)
+        assertEquals(lessonMs(date, "13:30"), delegated)
         assertEquals(lessonMs(date, "13:30"), serverOnly)
     }
 
     @Test
-    fun pendingRefreshIsCheckedAgainInTwoMinutes() {
+    fun oldPendingServerRefreshDoesNotTriggerPolling() {
         val next = Sync.nextRedrawMs(
             payload(delegate = false, refresh = Refresh(pending = true, due = false)),
             now("13:00"),
         )
-        assertEquals(lessonMs(date, "13:02"), next)
+        assertEquals(lessonMs(date, "13:30"), next)
     }
 
     @Test

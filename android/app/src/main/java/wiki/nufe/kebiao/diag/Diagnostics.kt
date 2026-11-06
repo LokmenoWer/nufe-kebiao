@@ -78,7 +78,6 @@ object Diagnostics {
         val notifications = context.getSystemService(NotificationManager::class.java)
         val alarms = context.getSystemService(AlarmManager::class.java)
         val widgets = AppWidgetManager.getInstance(context)
-        val host = repo.widgetUrl?.let { runCatching { Uri.parse(it).host }.getOrNull() }
         val todayIds = widgets.getAppWidgetIds(ComponentName(context, TodayReceiver::class.java)).size
         val weekIds = widgets.getAppWidgetIds(ComponentName(context, WeekReceiver::class.java)).size
         val (alarmCount, nextAlarm) = Reminders.scheduledInfo(context)
@@ -91,11 +90,10 @@ object Diagnostics {
             appendLine("Android：${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
             appendLine("时区：${TimeZone.getDefault().id}，语言：${Locale.getDefault()}")
-            appendLine("链接：${if (host == null) "未连接" else "已连接，host=$host"}")
+            appendLine("本地课表：${repo.hasTimetable}，需要学校登录：${repo.needsLogin}")
             appendLine("缓存：${snapshot?.fetchedAtMs?.let(::time) ?: "无"}")
             appendLine("离线：${snapshot?.offline == true}")
             appendLine("服务状态：${payload?.status ?: "无"}")
-            appendLine("设备已绑定：${repo.deviceId != null}")
             appendLine("提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
             appendLine("提醒队列（上次排定，未到点）：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
