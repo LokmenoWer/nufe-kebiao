@@ -3,16 +3,28 @@
 #   FORCE_RESTART=1 deploy/deploy.sh   # 改了 main.lifespan 或后台循环体这类热重载更新不到的代码时用（见 app/reloader.py）
 #   cp deploy/deploy.env.example deploy/deploy.env   # 填好服务器信息（该文件不进 git）
 #   deploy/deploy.sh
+#   DEPLOY_ENV=deploy/deploy-beta.env deploy/deploy.sh   # 部署到同机的 beta（目录 / 服务 / 端口在该文件里，见 deploy.env.example）
 # 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
 # 部署的是当前提交（HEAD），没提交的改动不会上线。首次部署后服务器上的 .env / data/ 不会被覆盖。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # shellcheck disable=SC1091
-[ -f deploy/deploy.env ] && . deploy/deploy.env
+DEPLOY_ENV=${DEPLOY_ENV:-deploy/deploy.env}
+[ -f "$DEPLOY_ENV" ] && . "$DEPLOY_ENV"
 : "${HOST:?请设置 HOST，例如 HOST=root@your-server}"
 : "${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://kebiao.example.com}"
-APP_DIR=/opt/nufe-kebiao
+# 默认是正式服；同一台机器上的 beta 等实例在各自的 env 文件里覆盖这几项
+APP_DIR=${APP_DIR:-/opt/nufe-kebiao}
+SERVICE=${SERVICE:-kebiao}
+SVC_USER=${SVC_USER:-kebiao}
+PORT=${PORT:-8010}
+# 1：用仓库里的 deploy/kebiao.{service,socket} 安装 / 更新 systemd 单元（正式服）；0：单元由服务器自己维护（beta）
+MANAGE_UNITS=${MANAGE_UNITS:-1}
+# 要确保写进服务器 .env 的非敏感开关，空格分隔的 KEY=VALUE，例如 ENV_SET="ASSIST_ENABLED=1"
+ENV_SET=${ENV_SET:-}
+case "$APP_DIR" in /opt/nufe-kebiao|/opt/nufe-kebiao-*) ;; *) echo "APP_DIR 必须是 /opt/nufe-kebiao 或 /opt/nufe-kebiao-*" >&2; exit 1;; esac
+echo "部署 $(git rev-parse --short HEAD) → $HOST:$APP_DIR（服务 $SERVICE，端口 $PORT）"
 SSH_OPTS=(-o IdentitiesOnly=yes)
 [ -n "${SSH_KEY:-}" ] && SSH_OPTS+=(-i "$SSH_KEY")
 SSH=(ssh "${SSH_OPTS[@]}" "$HOST")
@@ -33,14 +45,13 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .ruff_cache --exclude .claude \
   "$SRC/" "$HOST:$APP_DIR/"
 
-"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' FORCE_RESTART='${FORCE_RESTART:-0}' bash -s" <<'REMOTE'
+"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' FORCE_RESTART='${FORCE_RESTART:-0}' APP_DIR='$APP_DIR' SERVICE='$SERVICE' SVC_USER='$SVC_USER' PORT='$PORT' MANAGE_UNITS='$MANAGE_UNITS' ENV_SET='$ENV_SET' bash -s" <<'REMOTE'
 set -euo pipefail
-APP_DIR=/opt/nufe-kebiao
-id kebiao >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin kebiao
+id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
 mkdir -p "$APP_DIR/data"
 # 代码归 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
 find "$APP_DIR" -path "$APP_DIR/data" -prune -o -exec chown root:root {} +
-chown -R kebiao:kebiao "$APP_DIR/data" && chmod 700 "$APP_DIR/data"
+chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && chmod 700 "$APP_DIR/data"
 
 if [ ! -f "$APP_DIR/.env" ]; then
   (umask 077; cat > "$APP_DIR/.env" <<ENV
@@ -60,7 +71,15 @@ if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
    printf "ADMIN_PASSWORD_HASH='%s'\n" "$ADMIN_PASSWORD_HASH" >> "$APP_DIR/.env.tmp"
    mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 fi
-chown root:kebiao "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
+for kv in $ENV_SET; do
+  key=${kv%%=*}
+  case "$key" in [A-Z_]*) ;; *) echo "ENV_SET 里的 $kv 不是 KEY=VALUE" >&2; exit 1;; esac
+  (umask 077
+   grep -v "^$key=" "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
+   printf '%s\n' "$kv" >> "$APP_DIR/.env.tmp"
+   mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
+done
+chown "root:$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 
 DEPS_CHANGED=0
 if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
@@ -86,36 +105,39 @@ PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "import app.main" \
 # 依赖、service 或 socket 配置变了、服务尚未运行、FORCE_RESTART=1，或热重载没成功（含 reloader.py 自身有改动）才走 restart。
 SOCKET_CHANGED=0
 SERVICE_CHANGED=0
-cmp -s "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket || SOCKET_CHANGED=1
-cmp -s "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service || SERVICE_CHANGED=1
-install -m 644 "$APP_DIR/deploy/kebiao.socket" /etc/systemd/system/kebiao.socket
-install -m 644 "$APP_DIR/deploy/kebiao.service" /etc/systemd/system/kebiao.service
-systemctl daemon-reload
+if [ "$MANAGE_UNITS" = 1 ]; then
+  cmp -s "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket" || SOCKET_CHANGED=1
+  cmp -s "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service" || SERVICE_CHANGED=1
+  install -m 644 "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket"
+  install -m 644 "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service"
+  systemctl daemon-reload
+fi
 # 服务也要开机自启：后台刷新得在没人访问时照样跑，不能等第一个连接才把它拉起来
-systemctl enable -q kebiao.socket kebiao
-if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q kebiao.socket; then
-  systemctl stop kebiao kebiao.socket
-  systemctl start kebiao.socket
+systemctl enable -q "$SERVICE.socket" "$SERVICE"
+if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q "$SERVICE.socket"; then
+  systemctl stop "$SERVICE" "$SERVICE.socket"
+  systemctl start "$SERVICE.socket"
 fi
 START=$(date +%s%N)
-if [ "$FORCE_RESTART" != 1 ] && [ "$SOCKET_CHANGED" = 0 ] && [ "$SERVICE_CHANGED" = 0 ] && [ "$DEPS_CHANGED" = 0 ] && systemctl is-active -q kebiao; then
+# ENV_SET 改了 .env：配置只在启动时读，必须重启
+if [ "$FORCE_RESTART" != 1 ] && [ -z "$ENV_SET" ] && [ "$SOCKET_CHANGED" = 0 ] && [ "$SERVICE_CHANGED" = 0 ] && [ "$DEPS_CHANGED" = 0 ] && systemctl is-active -q "$SERVICE"; then
   # 信号是异步的：删掉旧结果再发，等服务写出这一次的结果
   STATUS_FILE=$(PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "from app import reloader; print(reloader.status_file())")
   rm -f "$STATUS_FILE"
-  systemctl reload kebiao
+  systemctl reload "$SERVICE"
   if "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
     ACTION="reload"
   else
     echo "hot reload did not succeed; restarting" >&2
-    systemctl restart kebiao
+    systemctl restart "$SERVICE"
     ACTION="restart"
   fi
 else
-  systemctl restart kebiao
+  systemctl restart "$SERVICE"
   ACTION="restart"
 fi
-curl -s -o /dev/null --max-time 30 http://127.0.0.1:8010/healthz || true
+curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
 echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
-systemctl is-active kebiao
-curl -s -o /dev/null -w "local / -> %{http_code}\n" http://127.0.0.1:8010/
+systemctl is-active "$SERVICE"
+curl -s -o /dev/null -w "local / -> %{http_code}\n" "http://127.0.0.1:$PORT/"
 REMOTE
