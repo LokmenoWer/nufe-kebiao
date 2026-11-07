@@ -339,35 +339,39 @@ internal fun AppRoot(
                             onViewConsumed = { widgetPulse = 0 },
                             rhythmClock12h = rhythmClock12h,
                         )
-                        Tab.Mine -> MineScreen(
-                            repo = repo,
-                            snapshot = snapshot,
-                            profile = profile,
-                            needsLogin = needsLogin,
-                            busy = busy || loggingIn,
-                            notificationsOk = notificationsOk,
-                            exactOk = exactOk,
-                            promotedOk = promotedOk,
-                            batteryOk = batteryOk,
-                            onLogin = ::openSchoolLogin,
-                            onRemove = ::clearLocalData,
-                            rhythmClock12h = rhythmClock12h,
-                            onRhythmClockChange = { twelve ->
-                                rhythmClock12h = twelve
-                                repo.rhythmClock12h = twelve
-                            },
-                        )
-                        Tab.About -> AboutScreen(
-                            currentVersion = updater.currentVersion,
-                            update = update,
-                            updateFlow = updateFlow,
-                            onCheckUpdate = {
-                                val found = updater.check()
-                                update = found
-                                updateDismissed = found?.let(updater::isDismissed) == true
-                                found
-                            },
-                        )
+                        Tab.Mine -> EnterUp {
+                            MineScreen(
+                                repo = repo,
+                                snapshot = snapshot,
+                                profile = profile,
+                                needsLogin = needsLogin,
+                                busy = busy || loggingIn,
+                                notificationsOk = notificationsOk,
+                                exactOk = exactOk,
+                                promotedOk = promotedOk,
+                                batteryOk = batteryOk,
+                                onLogin = ::openSchoolLogin,
+                                onRemove = ::clearLocalData,
+                                rhythmClock12h = rhythmClock12h,
+                                onRhythmClockChange = { twelve ->
+                                    rhythmClock12h = twelve
+                                    repo.rhythmClock12h = twelve
+                                },
+                            )
+                        }
+                        Tab.About -> EnterUp {
+                            AboutScreen(
+                                currentVersion = updater.currentVersion,
+                                update = update,
+                                updateFlow = updateFlow,
+                                onCheckUpdate = {
+                                    val found = updater.check()
+                                    update = found
+                                    updateDismissed = found?.let(updater::isDismissed) == true
+                                    found
+                                },
+                            )
+                        }
                     }
                 }
                 GlassNav(
