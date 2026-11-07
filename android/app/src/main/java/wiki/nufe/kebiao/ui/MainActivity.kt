@@ -15,7 +15,6 @@ import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
@@ -24,21 +23,23 @@ import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 
 class MainActivity : ComponentActivity() {
-    private var incoming by mutableStateOf<String?>(null)
+    private var loginRequested by mutableStateOf(false)
     private var widgetView by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         Diag.i("app start")
-        incoming = linkFrom(intent)
+        loginRequested = intent?.getBooleanExtra(EXTRA_LOGIN, false) == true
+        intent?.removeExtra(EXTRA_LOGIN)
         widgetView = intent?.getStringExtra(EXTRA_VIEW)
+        intent?.removeExtra(EXTRA_VIEW)
         setContent {
             KebiaoTheme {
                 AppRoot(
-                    incoming = incoming,
+                    loginRequested = loginRequested,
                     widgetView = widgetView,
-                    consumeIncoming = { incoming = null },
+                    consumeLoginRequest = { loginRequested = false },
                     consumeWidgetView = { widgetView = null },
                 )
             }
@@ -78,18 +79,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        linkFrom(intent)?.let { incoming = it }
+        if (intent.getBooleanExtra(EXTRA_LOGIN, false)) loginRequested = true
+        intent.removeExtra(EXTRA_LOGIN)
         intent.getStringExtra(EXTRA_VIEW)?.let { widgetView = it }
+        intent.removeExtra(EXTRA_VIEW)
+        setIntent(intent)
     }
-
-    /** 网站设置页的“在安卓 App 中打开”（nufekebiao://setup?url=…&pair=…），或从别的 App 分享来的文字。 */
-    private fun linkFrom(intent: Intent?): String? = when (intent?.action) {
-        Intent.ACTION_VIEW -> intent.dataString
-        Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
-        else -> null
-    }?.takeIf { Repository.extractLink(it) != null }
 
     companion object {
         const val EXTRA_VIEW = "wiki.nufe.kebiao.extra.VIEW"
+        const val EXTRA_LOGIN = "login"
     }
 }

@@ -1,6 +1,7 @@
 package wiki.nufe.kebiao.ui
 
 import android.Manifest
+import android.app.Activity
 import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.Context
@@ -29,6 +30,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,24 +39,28 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import wiki.nufe.kebiao.data.LinkInvalidException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.AppUpdater
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
-import wiki.nufe.kebiao.sync.LinkState
 import wiki.nufe.kebiao.sync.LoginAlert
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.WidgetVersion
 
 @Composable
 internal fun AppRoot(
-    incoming: String?,
+    loginRequested: Boolean,
     widgetView: String?,
-    consumeIncoming: () -> Unit,
+    consumeLoginRequest: () -> Unit,
     consumeWidgetView: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -67,18 +73,22 @@ internal fun AppRoot(
         context.getSharedPreferences("permission_intro", Context.MODE_PRIVATE)
     }
 
-    var url by remember { mutableStateOf(repo.widgetUrl) }
     var snapshot by remember { mutableStateOf(repo.cached()) }
+    var hasTimetable by remember { mutableStateOf(repo.hasTimetable) }
+    var needsLogin by remember { mutableStateOf(repo.needsLogin) }
     var profile by remember { mutableStateOf<Profile?>(null) }
     val updater = remember { AppUpdater(context) }
     val updateFlow = remember { UpdateFlow(context, updater, scope) }
     var update by remember { mutableStateOf(updater.cached()) }
     var updateDismissed by remember { mutableStateOf(update?.let(updater::isDismissed) == true) }
-    var bound by remember { mutableStateOf(repo.deviceId != null) }
-    var invalid by remember { mutableStateOf(LinkState.isInvalid(context)) }
     var busy by remember { mutableStateOf(false) }
+    var loggingIn by remember { mutableStateOf(false) }
+    var fetchJob by remember { mutableStateOf<Job?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(Tab.Timetable) }
+    // 调课详情卡"✕"关闭持久化到 prefs：关掉后即使清后台重开也不再出现，直到出现新的变动。
+    val changeSeenPrefs = remember { context.getSharedPreferences("kebiao", Context.MODE_PRIVATE) }
+    var changeDismissed by remember { mutableStateOf(changeSeenPrefs.getStringSet("change_seen", emptySet())?.toSet().orEmpty()) }
     var pagePulse by remember { mutableIntStateOf(0) }
     var widgetWeek by remember { mutableStateOf(false) }
     var widgetPulse by remember { mutableIntStateOf(0) }
@@ -107,50 +117,114 @@ internal fun AppRoot(
         Reminders.rescheduleAsync(context)
     }
 
+    // cached() 要用 Keystore 解密整学期课表再投影，放到 IO 线程，避免每 30 秒/每次回前台卡主线程。
+    suspend fun reloadLocalNow() {
+        val loaded = withContext(Dispatchers.IO) {
+            Triple(repo.cached(), repo.hasTimetable, repo.needsLogin) to repo.lastError
+        }
+        val (state, lastError) = loaded
+        snapshot = state.first
+        hasTimetable = state.second
+        needsLogin = state.third
+        if (!needsLogin && snapshot?.offline == false && lastError == null) message = null
+    }
+
+    fun reloadLocal() {
+        scope.launch { reloadLocalNow() }
+    }
+
+    val schoolLogin = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        loggingIn = false
+        scope.launch {
+            reloadLocalNow()
+            profile = repo.cachedProfile()
+            if (result.resultCode == Activity.RESULT_OK) {
+                message = null
+                tab = Tab.Timetable
+                LoginAlert.clear(context)
+                Sync.schedule(context)
+                Sync.armBoundary(context)
+                Reminders.rescheduleAsync(context)
+                Sync.redraw(context)
+            }
+        }
+    }
+
+    fun openSchoolLogin() {
+        if (loggingIn || busy) return
+        loggingIn = true
+        message = null
+        schoolLogin.launch(Intent(context, SchoolLoginActivity::class.java))
+    }
+
     val widgetVersion by WidgetVersion.flow.collectAsState()
     LaunchedEffect(widgetVersion) {
-        if (widgetVersion > 0 && repo.widgetUrl != null) {
-            repo.cached()?.let { snapshot = it }
-            invalid = LinkState.isInvalid(context)
+        reloadLocalNow()
+        profile = repo.cachedProfile()
+    }
+
+    // 整学期缓存按当前日生成视图，跨零点也不需要网络才能切换。
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                reloadLocalNow()
+                delay(30_000)
+            }
         }
     }
 
-    fun syncSilentlyIfDue() {
-        if (busy || repo.widgetUrl == null || LinkState.isInvalid(context)) return
-        val current = snapshot
-        val age = System.currentTimeMillis() - (current?.fetchedAtMs ?: 0L)
-        if (current != null && !current.offline && age < 2 * 60_000L) return
-        scope.launch {
+    fun refresh(manual: Boolean) {
+        if (busy || loggingIn || !repo.hasTimetable) return
+        if (!manual) {
+            if (repo.needsLogin) return
+            val current = snapshot
+            val age = System.currentTimeMillis() - (current?.fetchedAtMs ?: 0L)
+            if (current != null && !current.offline && age < 2 * 60_000L) return
+        }
+        busy = true
+        if (manual) message = null
+        fetchJob = scope.launch {
             try {
-                val snap = repo.fetch(refresh = false)
-                if (snap != null) {
-                    snapshot = snap
-                    if (!snap.offline) {
-                        LoginAlert.update(context, snap.payload)
-                        Reminders.rescheduleAsync(context)
-                        Sync.redraw(context)
+                val snap = repo.fetch(refresh = manual)
+                reloadLocalNow()
+                if (snap != null) snapshot = snap
+                if (manual) {
+                    message = when {
+                        needsLogin -> "请在 App 内登录学校账号；已保存的课表仍可离线查看。"
+                        snap == null || snap.offline -> repo.lastError ?: "学校暂时不可达，继续展示本机课表。"
+                        else -> repo.lastError
                     }
                 }
-            } catch (_: LinkInvalidException) {
-                invalid = true
-                LinkState.markInvalid(context, true)
-            } catch (_: Exception) {
+                snapshot?.let { LoginAlert.update(context, it.payload) }
+                Reminders.rescheduleAsync(context)
+                Sync.armBoundary(context)
+                Sync.redraw(context)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Diag.w("school refresh failed: ${error.javaClass.simpleName}")
+                reloadLocalNow()
+                if (manual) message = repo.lastError ?: "学校暂时不可达，已保留本机课表，请稍后重试。"
+            } finally {
+                busy = false
             }
         }
     }
 
+    val onResume by rememberUpdatedState {
+        notificationsOk = Reminders.canNotify(context)
+        exactOk = Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true
+        promotedOk = Build.VERSION.SDK_INT < 36 || notificationManager?.canPostPromotedNotifications() == true
+        batteryOk = ignoringBatteryOptimizations(context)
+        updateFlow.onResume()
+        reloadLocal()
+        refresh(manual = false)
+    }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                notificationsOk = Reminders.canNotify(context)
-                exactOk = Build.VERSION.SDK_INT < 31 ||
-                    exactAlarms?.canScheduleExactAlarms() == true
-                promotedOk = Build.VERSION.SDK_INT < 36 ||
-                    notificationManager?.canPostPromotedNotifications() == true
-                batteryOk = ignoringBatteryOptimizations(context)
-                updateFlow.onResume()
-                syncSilentlyIfDue()
-            }
+            if (event == Lifecycle.Event.ON_RESUME) onResume()
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
@@ -167,113 +241,21 @@ internal fun AppRoot(
         }
     }
 
-    fun openSite() {
-        val site = repo.siteUrl() ?: SITE_URL
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(site)))
-    }
-
-    fun save(raw: String) {
-        val link = Repository.extractLink(raw)
-        if (link == null) {
-            Diag.w("link format invalid")
-            message = "链接格式有误，请粘贴以 /mobile/<token>.json 结尾的配对链接。"
-            return
-        }
-        busy = true
-        message = null
-        scope.launch {
-            val previous = repo.widgetUrl
-            repo.widgetUrl = link
-            try {
-                val snap = repo.fetch()
-                if (snap == null || snap.offline) {
-                    Diag.w("link validation offline")
-                    repo.widgetUrl = previous
-                    message = "无法连接服务器校验链接，请检查网络后重试。"
-                    return@launch
-                }
-                snapshot = snap
-                LoginAlert.update(context, snap.payload)
-                url = link
-                invalid = false
-                tab = Tab.Timetable
-                LinkState.markInvalid(context, false)
-                Reminders.rescheduleAsync(context)
-                Sync.schedule(context)
-                Sync.redraw(context)
-                Diag.i("link saved")
-                Repository.extractPair(raw)?.let { code ->
-                    val failure = repo.pair(code)
-                    Diag.i(if (failure == null) "device paired" else "device pair failed")
-                    message = failure ?: "已绑定这台设备。"
-                }
-                profile = repo.fetchProfile()
-                bound = repo.deviceId != null
-            } catch (_: LinkInvalidException) {
-                Diag.w("link invalid")
-                repo.widgetUrl = previous
-                invalid = true
-                message = "这条链接已失效，请在网站设置页重新生成。"
-            } catch (error: Exception) {
-                Diag.w("link validation failed: ${error.javaClass.simpleName}")
-                repo.widgetUrl = previous
-                message = "连接服务器失败，请稍后再试。"
-            } finally {
-                busy = false
-            }
-        }
-    }
-
-    fun refresh() {
-        if (busy) return
-        busy = true
-        message = null
-        scope.launch {
-            try {
-                val snap = repo.fetch(refresh = true)
-                if (snap != null) snapshot = snap
-                if (snap?.offline == true) {
-                    Diag.w("refresh offline")
-                    message = "当前无法连接服务器，已展示本机缓存课表。"
-                } else {
-                    Diag.i("refresh ok")
-                    snap?.let { LoginAlert.update(context, it.payload) }
-                }
-                Reminders.rescheduleAsync(context)
-                Sync.redraw(context)
-            } catch (_: LinkInvalidException) {
-                Diag.w("refresh invalid link")
-                invalid = true
-                LinkState.markInvalid(context, true)
-                message = "链接已失效，请重新生成。"
-            } catch (error: Exception) {
-                Diag.w("refresh failed: ${error.javaClass.simpleName}")
-                message = "刷新失败，请稍后再试。"
-            } finally {
-                busy = false
-            }
-        }
-    }
-
-    fun removeLink() {
-        Diag.i("link removed")
-        repo.widgetUrl = null
+    fun clearLocalData() {
+        fetchJob?.cancel()
+        fetchJob = null
+        repo.clearLocalData()
         LoginAlert.clear(context)
         Sync.cancelAll(context)
         LiveUpdates.cancel(context)
         Reminders.rescheduleAsync(context)
         scope.launch { Sync.redraw(context) }
-        url = null
-        snapshot = null
+        reloadLocal()
         profile = null
-        bound = false
-        invalid = false
+        busy = false
         message = null
-        LinkState.markInvalid(context, false)
-    }
-
-    LaunchedEffect(Unit) {
-        profile = repo.cachedProfile()
+        tab = Tab.Timetable
+        Diag.i("local timetable cleared")
     }
 
     // 打开 App 时一天最多查一次新版本；查不到不打扰，“关于”里可以手动查
@@ -290,18 +272,16 @@ internal fun AppRoot(
         }
     }
 
-    // 打开“我的”时取一次最新个人信息；设备被撤销时这里会清掉本机绑定
-    LaunchedEffect(tab, url) {
-        if (tab == Tab.Mine) {
-            profile = repo.fetchProfile() ?: if (repo.deviceId != null) profile else null
-            bound = repo.deviceId != null
-        }
+    // 个人资料只读取本机加密信息，不向任何服务器索取账号资料。
+    LaunchedEffect(tab) {
+        if (tab == Tab.Mine) profile = repo.cachedProfile()
     }
 
-    LaunchedEffect(incoming) {
-        val link = incoming ?: return@LaunchedEffect
-        consumeIncoming()
-        save(link)
+    LaunchedEffect(loginRequested, busy, loggingIn) {
+        if (loginRequested && !busy && !loggingIn) {
+            consumeLoginRequest()
+            openSchoolLogin()
+        }
     }
 
     LaunchedEffect(widgetView) {
@@ -314,13 +294,12 @@ internal fun AppRoot(
     }
 
     AppBackground {
-        if (url == null || invalid) {
+        // 登录过期和旧缓存迁移都不阻挡已导入的离线课表。
+        if (!hasTimetable) {
             SetupScreen(
-                busy = busy,
+                busy = busy || loggingIn,
                 message = message,
-                invalid = invalid,
-                onConfirm = ::save,
-                onOpenSite = ::openSite,
+                onLogin = ::openSchoolLogin,
             )
         } else {
             Box(Modifier.fillMaxSize()) {
@@ -339,15 +318,21 @@ internal fun AppRoot(
                     when (target) {
                         Tab.Timetable -> HomeScreen(
                             snapshot = snapshot,
-                            busy = busy,
+                            needsLogin = needsLogin,
+                            busy = busy || loggingIn,
                             message = message,
-                            onRefresh = ::refresh,
-                            onOpenSite = ::openSite,
+                            onRefresh = { refresh(manual = true) },
+                            onLogin = ::openSchoolLogin,
                             update = update.takeUnless { updateDismissed },
                             updateFlow = updateFlow,
                             onDismissUpdate = {
                                 update?.let(updater::dismiss)
                                 updateDismissed = true
+                            },
+                            dismissedChanges = changeDismissed,
+                            onDismissChange = {
+                                changeDismissed = changeDismissed + it
+                                changeSeenPrefs.edit().putStringSet("change_seen", changeDismissed).apply()
                             },
                             initialWeek = widgetWeek,
                             viewPulse = widgetPulse,
@@ -358,14 +343,14 @@ internal fun AppRoot(
                             repo = repo,
                             snapshot = snapshot,
                             profile = profile,
-                            bound = bound,
+                            needsLogin = needsLogin,
+                            busy = busy || loggingIn,
                             notificationsOk = notificationsOk,
                             exactOk = exactOk,
                             promotedOk = promotedOk,
                             batteryOk = batteryOk,
-                            onOpenSite = ::openSite,
-                            onPair = ::save,
-                            onRemove = ::removeLink,
+                            onLogin = ::openSchoolLogin,
+                            onRemove = ::clearLocalData,
                             rhythmClock12h = rhythmClock12h,
                             onRhythmClockChange = { twelve ->
                                 rhythmClock12h = twelve

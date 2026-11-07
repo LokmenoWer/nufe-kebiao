@@ -36,19 +36,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- 网站设置页的“在安卓 App 中打开”：nufekebiao://setup?url=<小组件链接> -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="nufekebiao" android:host="setup" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
         </activity>
+        <!-- 旋转/分屏/深色切换时不重建：重建会重新清空 WebView cookie 并回到登录首页，丢掉进行中的多因子验证 -->
+        <activity
+            android:name=".ui.SchoolLoginActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
+            android:exported="false" />
 
         <receiver android:name=".widget.TodayReceiver" android:exported="true" android:label="@string/widget_today">
             <intent-filter>

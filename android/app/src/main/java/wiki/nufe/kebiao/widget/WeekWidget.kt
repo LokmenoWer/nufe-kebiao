@@ -31,6 +31,8 @@ import androidx.glance.layout.width
 import androidx.glance.unit.ColorProvider
 import wiki.nufe.kebiao.data.DayColumn
 import wiki.nufe.kebiao.data.Now
+import wiki.nufe.kebiao.data.Note
+import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.data.WEEKDAY
 import wiki.nufe.kebiao.data.headerNote
@@ -173,10 +175,12 @@ private fun WeekContent(context: Context, data: WidgetData) {
     } else ""
     val changed = columns.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
     val firstDay = columns.firstOrNull()?.day
-    val note = headerNote(snapshot, firstDay, now, compact = size.width.value < 220, changed = changed)
-    WidgetRoot(onClick = openDay(context, data, firstDay, view = "week")) {
+    val note = if (data.needsLogin) {
+        Note(if (size.width.value < 220) "App 内登录" else "在 App 重新登录", Tone.WARN)
+    } else headerNote(snapshot, firstDay, now, compact = size.width.value < 220, changed = changed)
+    WidgetRoot(onClick = openApp(context, "week")) {
         Column(modifier = GlanceModifier.fillMaxSize()) {
-            Header(title, range, note, compact = size.width.value < 180)
+            Header(title, if (data.needsLogin) "" else range, note, compact = size.width.value < 180)
             Spacer(GlanceModifier.height(4.dp))
             val cells = columns.map(::cellsOf)
             val gridH = size.height.value - PADDING.value * 2 - HEADER_H - DAY_ROW_H
@@ -199,8 +203,8 @@ private fun WeekContent(context: Context, data: WidgetData) {
             }
             Row(modifier = GlanceModifier.fillMaxWidth().height(gridH.dp)) {
                 Axis(layout, axisW, gridH, labelH, endH, m, axisSp, unitSp, endSp)
-                columns.forEachIndexed { i, c ->
-                    DayCells(context, data, c, layout, i, colW, m, GlanceModifier.defaultWeight())
+                columns.indices.forEach { i ->
+                    DayCells(context, layout, i, colW, m, GlanceModifier.defaultWeight())
                 }
             }
         }
@@ -256,8 +260,6 @@ private fun Axis(
 @Composable
 private fun DayCells(
     context: Context,
-    data: WidgetData,
-    column: DayColumn,
     layout: GridLayout,
     col: Int,
     width: Float,
@@ -269,7 +271,7 @@ private fun DayCells(
     // 每格只占一个子元素，一天最多十节课也不会超出 RemoteViews 的子元素上限。
     val spans = layout.spans.filter { it.col == col }.take(10)
     Box(modifier = modifier.fillMaxHeight().padding(start = COL_GAP.dp)
-        .clickable(openDay(context, data, column.day, appView = "week"))) {
+        .clickable(openApp(context, "week"))) {
         for (span in spans) {
             val top = layout.bounds[span.a]
             val h = (layout.bounds[span.b] - top - CHIP_GAP).coerceAtLeast(2f)

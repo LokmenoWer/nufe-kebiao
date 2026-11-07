@@ -42,7 +42,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Repository
-import wiki.nufe.kebiao.data.State
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.widget.TodayReceiver
@@ -58,15 +57,6 @@ internal fun WidgetSection() {
     var lastPinAt by remember { mutableLongStateOf(0L) }
     var showGuide by remember { mutableStateOf(false) }
     val repo = remember { Repository(context) }
-    var opensApp by remember { mutableStateOf(repo.widgetOpensApp) }
-
-    fun setOpensApp(value: Boolean) {
-        if (value == opensApp) return
-        opensApp = value
-        repo.widgetOpensApp = value
-        scope.launch { Sync.redraw(context) }
-    }
-
     var punctual by remember { mutableStateOf(repo.widgetPunctual) }
 
     fun setPunctual(value: Boolean) {
@@ -117,15 +107,7 @@ internal fun WidgetSection() {
             modifier = Modifier.padding(vertical = 14.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("点按小组件时打开", fontSize = 14.sp, modifier = Modifier.weight(1f))
-            SlidingToggle(
-                firstLabel = "网页",
-                secondLabel = "App",
-                selectedIndex = if (opensApp) 1 else 0,
-                onSelect = { index -> setOpensApp(index == 1) },
-            )
-        }
+        Hint("点按小组件会打开 App 内的日课表或周课表，无网络也能查看已保存的课程。")
         // 只有普通精确闹钟可能被延后的 ROM 才需要选；其他手机不用为它多显示一个闹钟
         if (Reminders.needsAlarmClock()) {
             HorizontalDivider(

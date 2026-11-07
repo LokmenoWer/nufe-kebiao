@@ -4,8 +4,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * `/mobile/<token>.json` 的内容（服务端 app/widget.py 的 build()）。
- * 周次、缺失时间的兜底、课程颜色都由服务端算好，这里只解析，不重算。
+ * 本机整学期课表缓存投影出的展示数据（TimetableParser.payload()）。
+ * 周次、缺失时间的兜底、课程颜色都由本机解析器算好，这里只解析，不重算。
  */
 data class Payload(
     val now: String?,
@@ -17,6 +17,8 @@ data class Payload(
     val tomorrow: Day?,
     val week: WeekBlock?,
     val nextWeek: WeekBlock?,
+    val weeks: List<WeekBlock> = emptyList(),
+    val changes: List<TimetableChange> = emptyList(),
     val term: Term?,
     val upcoming: Day?,
     val changedAt: Long?,
@@ -37,6 +39,8 @@ data class Payload(
                 tomorrow = o.optJSONObject("tomorrow")?.let(Day::parse),
                 week = o.optJSONObject("week")?.let(WeekBlock::parse),
                 nextWeek = o.optJSONObject("next_week")?.let(WeekBlock::parse),
+                weeks = o.optJSONArray("weeks").objects().map(WeekBlock::parse),
+                changes = o.optJSONArray("changes").objects().map(TimetableChange::parse),
                 term = o.optJSONObject("term")?.let { Term(it.optString("first_day"), it.optString("last_day")) },
                 upcoming = o.optJSONObject("upcoming")?.let(Day::parse),
                 changedAt = o.long("changed_at"),
@@ -50,7 +54,7 @@ data class Payload(
     }
 }
 
-/** `/mobile/<token>/profile` 的内容：个人信息只给配对过的设备，不在课表 JSON 里。 */
+/** 本机加密课表缓存里的个人信息（姓名 / 学号）；不含邮箱，也不向任何服务器索取。 */
 data class Profile(val student: StudentInfo?, val mail: MailInfo?) {
     companion object {
         fun parse(text: String): Profile {
@@ -154,6 +158,19 @@ data class WeekBlock(val week: Int?, val monday: String, val days: List<Day>) {
 }
 
 data class Term(val firstDay: String, val lastDay: String)
+
+/** 一条调课明细：第几周、日期、课程名、变更说明（原时间/原地点/停课/新增）、类型。 */
+data class TimetableChange(val week: Int?, val date: String, val name: String, val detail: String, val kind: String) {
+    companion object {
+        fun parse(o: JSONObject) = TimetableChange(
+            week = if (o.isNull("week")) null else o.optInt("week"),
+            date = o.optString("date"),
+            name = o.optString("name"),
+            detail = o.optString("detail"),
+            kind = o.optString("kind"),
+        )
+    }
+}
 
 data class Refresh(val pending: Boolean, val due: Boolean)
 

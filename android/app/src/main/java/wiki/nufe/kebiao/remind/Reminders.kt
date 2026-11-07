@@ -126,7 +126,7 @@ object Reminders {
     fun reschedule(context: Context) {
         val repo = Repository(context)
         val snapshot = repo.cached()
-        val items = if (snapshot == null || repo.widgetUrl == null || !repo.alarmEnabled) emptyList()
+        val items = if (snapshot == null || !repo.hasTimetable || !repo.alarmEnabled) emptyList()
         else plan(snapshot.payload, Now.current(), repo.remindMinutes)
         val alarms = context.getSystemService(AlarmManager::class.java)
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

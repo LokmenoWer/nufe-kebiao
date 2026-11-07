@@ -1,6 +1,5 @@
 package wiki.nufe.kebiao.ui
 
-import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -8,10 +7,8 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,7 +44,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -56,7 +52,6 @@ import kotlinx.coroutines.withContext
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.Repository
-import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.diag.Diagnostics
@@ -68,13 +63,13 @@ internal fun MineScreen(
     repo: Repository,
     snapshot: Snapshot?,
     profile: Profile?,
-    bound: Boolean,
+    needsLogin: Boolean,
+    busy: Boolean,
     notificationsOk: Boolean,
     exactOk: Boolean,
     promotedOk: Boolean,
     batteryOk: Boolean,
-    onOpenSite: () -> Unit,
-    onPair: (String) -> Unit,
+    onLogin: () -> Unit,
     onRemove: () -> Unit,
     rhythmClock12h: Boolean = true,
     onRhythmClockChange: (Boolean) -> Unit = {},
@@ -88,7 +83,6 @@ internal fun MineScreen(
     var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
     var showWheel by remember { mutableStateOf(false) }
     val student = profile?.student
-    val mail = profile?.mail
     val scope = rememberCoroutineScope()
     var exporting by remember { mutableStateOf(false) }
 
@@ -129,7 +123,7 @@ internal fun MineScreen(
             color = MaterialTheme.colorScheme.onBackground,
         )
         Spacer(Modifier.height(4.dp))
-        Text("管理个人资料、账号连接与系统权限。", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("管理本机资料、学校登录与系统权限。", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
 
         SectionCard {
@@ -157,7 +151,7 @@ internal fun MineScreen(
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        student?.code?.let { "学号 $it" } ?: if (bound) "正在同步…" else "这台设备尚未绑定",
+                        student?.code?.let { "学号 $it" } ?: "本机暂无学号信息",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -166,71 +160,23 @@ internal fun MineScreen(
             Spacer(Modifier.height(14.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             Spacer(Modifier.height(4.dp))
-            if (!bound) {
-                Spacer(Modifier.height(6.dp))
-                Hint("姓名、学号等个人信息不包含在基础课表链接中，仅向已绑定设备提供。请前往网站“账号与设置 → 安卓 App”点击“绑定新设备”，再返回此处完成配对。")
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                        Text("打开网站", fontSize = 12.sp)
-                    }
-                    TextButton(
-                        onClick = {
-                            val text = context.getSystemService(ClipboardManager::class.java)
-                                ?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
-                                ?.coerceToText(context)?.toString()
-                            if (Repository.extractPair(text) != null && text != null) {
-                                onPair(text)
-                            } else {
-                                Toast.makeText(context, "剪贴板里没有配对链接", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                    ) { Text("粘贴配对链接", fontSize = 12.sp) }
-                }
-            }
-            if (profile != null) Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "提醒邮箱",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.width(72.dp),
-                )
-                Text(
-                    if (mail?.bound == true) mail.email ?: "已绑定" else "未绑定",
-                    fontSize = 13.sp,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (mail?.bound != true) {
-                    TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                        Text("去绑定", fontSize = 12.sp)
-                    }
-                }
-            }
-            if (profile != null) Hint(
-                if (mail?.bound == true) "此处仅展示脱敏邮箱，完整地址请前往网站设置页查看。"
-                else "绑定后，自动刷新暂停或连续失败时会发邮件提醒。",
-            )
+            Hint("所有个人信息仅保存在本地")
         }
 
         Spacer(Modifier.height(14.dp))
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("账号连接", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("本地学校登录", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                val needsLogin = snapshot?.payload?.needsLogin == true
                 Tag(
-                    if (needsLogin) "需重新登录" else if (snapshot?.offline == true) "离线" else "已连接",
+                    if (needsLogin) "需登录" else if (snapshot?.offline == true) "离线可用" else "已保存会话",
                     if (needsLogin || snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.primary,
                 )
             }
             Spacer(Modifier.height(6.dp))
-            ConnectionRow("打开网站", onOpenSite)
+            Hint(if (needsLogin) "请在本机重新登录学校账号以恢复刷新；离线课表与提醒仍可使用。"
+                else "登录会话只保存在本机，后台刷新由手机直接访问学校。")
+            ConnectionRow("重新前往教务系统导入课表", onLogin)
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             ConnectionRow(
                 "应用设置",
@@ -246,13 +192,14 @@ internal fun MineScreen(
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = { confirmRemove = true },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
                     contentColor = MaterialTheme.colorScheme.onError,
                 ),
-            ) { Text("断开连接", fontSize = 14.sp) }
+            ) { Text("清除本机数据", fontSize = 14.sp) }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -386,7 +333,7 @@ internal fun MineScreen(
         SectionCard {
             Text("数据", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            Hint("课表视图、桌面小组件与课前提醒均通过当前链接同步数据。若链接不慎外泄，请前往网站设置页重新生成，或在此处断开连接。")
+            Hint("日课表、周课表、小组件与提醒均读取本机缓存。学校不可达或登录过期时仍可使用，但可能不是最新安排。清除本机数据会删除课表、个人资料与登录会话，之后需重新登录导入。")
         }
         Spacer(Modifier.height(110.dp))
     }
@@ -394,18 +341,19 @@ internal fun MineScreen(
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false },
-            title = { Text("断开连接？") },
+            title = { Text("清除本机数据？") },
             text = {
                 Text(
-                    "断开后本机课表、课前提醒与桌面小组件将停止更新，需重新粘贴或配对链接才可恢复。" +
-                        "网站账号及已登记的设备记录不受影响；如需撤销设备授权，请前往网站“账号与设置 → 安卓 App”操作。",
+                    "将删除本机整学期课表及旧缓存、姓名学号和学校登录会话，并停止课程提醒与实时通知。" +
+                        "桌面小组件将不再显示课程，离线课表也无法恢复，需重新登录学校账号导入。" +
+                        "此操作不会删除学校的课表或账号，也不代表删除此前留在旧服务上的数据。",
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = !busy, onClick = {
                     confirmRemove = false
                     onRemove()
-                }) { Text("断开连接", color = MaterialTheme.colorScheme.error) }
+                }) { Text("确认清除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("取消") } },
         )
@@ -467,7 +415,7 @@ private fun FeedbackDialog(
                     lineHeight = 20.sp,
                 )
                 Spacer(Modifier.height(4.dp))
-                Hint("诊断日志会自动对课表链接、密码与邮箱地址进行脱敏处理。")
+                Hint("导出前请检查日志内容，不要公开学号、密码、登录凭据或个人课表。")
                 Spacer(Modifier.height(10.dp))
                 FeedbackOption("1. GitHub Issue", "功能建议、可以公开讨论的问题", onClick = onGitHub)
                 HorizontalDivider(

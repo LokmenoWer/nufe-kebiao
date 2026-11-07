@@ -1,7 +1,5 @@
 package wiki.nufe.kebiao.ui
 
-import android.content.ClipboardManager
-import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -13,16 +11,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,13 +25,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import wiki.nufe.kebiao.data.Repository
 
 @Composable
 internal fun PermissionSetupDialog(
@@ -139,115 +128,60 @@ internal fun PermissionDialogRow(
 internal fun SetupScreen(
     busy: Boolean,
     message: String?,
-    invalid: Boolean,
-    onConfirm: (String) -> Unit,
-    onOpenSite: () -> Unit,
+    onLogin: () -> Unit,
 ) {
-    val context = LocalContext.current
-    var text by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-
+    var agreed by remember { mutableStateOf(false) }
+    var showDisclaimer by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .safeDrawingPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 28.dp),
+            .padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        HeaderBlock()
-        Spacer(Modifier.height(36.dp))
-        SectionCard {
-            Text("连接课表", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
-            Hint("在网站“账号与设置 → 安卓 App”中点击“在安卓 App 中打开”，或复制配对链接粘贴至下方。")
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = {
-                        text = it
-                        error = null
-                    },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("https://…/mobile/….json", fontSize = 13.sp) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Uri,
-                        imeAction = ImeAction.Done,
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            if (!busy && text.isNotBlank()) {
-                                error = null
-                                onConfirm(text)
-                            }
-                        },
-                    ),
-                )
-                Spacer(Modifier.width(10.dp))
-                Button(
-                    onClick = {
-                        error = null
-                        onConfirm(text)
-                    },
-                    enabled = !busy && text.isNotBlank(),
-                    modifier = Modifier.height(56.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    contentPadding = PaddingValues(horizontal = 18.dp),
-                ) { Text(if (busy) "校验中" else "确认", fontSize = 14.sp) }
-            }
-            if (error != null || message != null) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    error ?: message.orEmpty(),
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                )
-            } else if (invalid) {
-                Spacer(Modifier.height(10.dp))
-                Text("链接已失效，请重新生成。", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onOpenSite, contentPadding = PaddingValues(0.dp)) {
-                    Text("打开网站生成链接", fontSize = 13.sp)
-                }
-                Spacer(Modifier.width(12.dp))
-                TextButton(
-                    onClick = {
-                        val clip = context.getSystemService(ClipboardManager::class.java)
-                            ?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
-                            ?.coerceToText(context)?.toString()?.trim()
-                        val extracted = Repository.extractLink(clip)
-                        if (clip != null && extracted != null) {
-                            text = extracted
-                            error = null
-                            if (!busy) onConfirm(clip)
-                        } else if (!clip.isNullOrBlank()) {
-                            text = clip
-                            error = "剪贴板里的内容不是有效的课表链接。"
-                        } else {
-                            error = "剪贴板为空，请先去网站复制链接。"
-                        }
-                    },
-                    enabled = !busy,
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Text("粘贴剪贴板", fontSize = 13.sp)
-                }
-                Spacer(Modifier.weight(1f))
-                Text("链接是只读凭证", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Spacer(Modifier.height(20.dp))
-        Hint("课前提醒、桌面小组件与实时通知均通过此链接同步课表。链接本身为访问凭证，请勿转发给他人。")
-        Spacer(Modifier.height(28.dp))
         Text(
-            "非官方工具，与南京财经大学无隶属关系。",
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            "nufe课表",
+            fontSize = 44.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = (-1).sp,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text("你的课程，一眼掌握", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(40.dp))
+        Button(
+            onClick = onLogin,
+            enabled = agreed && !busy,
+            modifier = Modifier.height(52.dp),
+            shape = RoundedCornerShape(16.dp),
+        ) { Text(if (busy) "正在登录…" else "前往学校官网导入课表", fontSize = 14.sp) }
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = agreed, onCheckedChange = { agreed = it })
+            Text("我已阅读并同意", fontSize = 13.sp)
+            TextButton(onClick = { showDisclaimer = true }) { Text("《免责声明》", fontSize = 13.sp) }
+        }
+        if (message != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, lineHeight = 18.sp)
+        }
+    }
+
+    if (showDisclaimer) {
+        AlertDialog(
+            onDismissRequest = { showDisclaimer = false },
+            title = { Text("免责声明") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("本应用（nufe课表）是个人开发的非官方工具，与南京财经大学不存在任何隶属、授权或合作关系。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("课表、姓名、学号仅从学校教务系统读取并只保存在本机，App 不向任何第三方上传或留存这些数据；登录凭据加密保存在本机，App 不保存你的密码。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("本应用按“现状”提供，不保证数据准确、完整或及时，课程安排以学校教务系统为准；因使用本应用造成的任何影响，开发者不承担责任。", fontSize = 13.sp, lineHeight = 20.sp)
+                    Text("请勿用于违反校规、法律或侵犯他人权益的用途。", fontSize = 13.sp, lineHeight = 20.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = { agreed = true; showDisclaimer = false }) { Text("同意并继续") } },
+            dismissButton = { TextButton(onClick = { showDisclaimer = false }) { Text("关闭") } },
         )
     }
 }

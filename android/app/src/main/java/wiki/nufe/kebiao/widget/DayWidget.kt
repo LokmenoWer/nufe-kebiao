@@ -26,6 +26,8 @@ import androidx.glance.layout.width
 import wiki.nufe.kebiao.data.Cancelled
 import wiki.nufe.kebiao.data.DayPlan
 import wiki.nufe.kebiao.data.Now
+import wiki.nufe.kebiao.data.Note
+import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.Payload
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.State
@@ -106,7 +108,9 @@ private fun DayContent(context: Context, data: WidgetData) {
     // 平板只把 1×1 当小号；1×2 / 2×2 用列表。手机沿用原来的宽度判断，避免改坏手机上正常的版面。
     val small = if (tablet) size.width < 220.dp && size.height < 220.dp else size.width < 200.dp
     val changed = plan.slots.any { it.lesson.changed } || plan.cancelled.isNotEmpty()
-    val note = headerNote(snapshot, plan.day, now, compact = small, changed = changed)
+    val note = if (data.needsLogin) {
+        Note(if (small) "App 内登录" else "在 App 重新登录", Tone.WARN)
+    } else headerNote(snapshot, plan.day, now, compact = small, changed = changed)
     val dateText = plan.day?.let { "周${WEEKDAY[it.weekday]} ${shortDate(it.date)}" }.orEmpty()
     val count = plan.slots.size
     val subtitle = when {
@@ -116,12 +120,12 @@ private fun DayContent(context: Context, data: WidgetData) {
         count > 0 -> "还有 $count 门"
         else -> dateText
     }
-    WidgetRoot(onClick = openDay(context, data, plan.day)) {
+    WidgetRoot(onClick = openApp(context, "day")) {
         Column(modifier = GlanceModifier.fillMaxSize()) {
-            Header(plan.title, subtitle, if (small) null else note, compact = small)
+            Header(plan.title, if (data.needsLogin) "" else subtitle, if (small && !data.needsLogin) null else note, compact = small)
             Spacer(GlanceModifier.height(4.dp))
             when {
-                plan.slots.isEmpty() -> EmptyState(context, data, plan, small)
+                plan.slots.isEmpty() -> EmptyState(context, plan, small)
                 small -> Focus(context, plan)
                 else -> LessonList(context, plan.slots, plan.cancelled, plan.day?.date, size.height.value - PADDING.value * 2 - HEADER_H)
             }
@@ -249,7 +253,7 @@ private fun LessonRow(context: Context, slot: Slot, date: String?, showTeacher: 
  * 最后用分隔线隔开——明天有课就直接列明天课表，没课就重点显示"下次上课"。
  */
 @Composable
-private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: DayPlan, small: Boolean) {
+private fun ColumnScope.EmptyState(context: Context, plan: DayPlan, small: Boolean) {
     val headlineRest = isRestMessage(plan.empty)
     Label("⭐️ ${plan.empty}", size = if (small) 13.sp else 14.sp, bold = true, lines = 2,
         color = if (headlineRest) solid(REST) else GlanceTheme.colors.onSurface)
@@ -288,7 +292,7 @@ private fun ColumnScope.EmptyState(context: Context, data: WidgetData, plan: Day
     val size = LocalSize.current
     val room = ((size.height.value - PADDING.value * 2 - HEADER_H - 50) / ROW_H).toInt()
     val count = maxOf(1, room)
-    Column(modifier = GlanceModifier.fillMaxWidth().clickable(openDay(context, data, preview.day))) {
+    Column(modifier = GlanceModifier.fillMaxWidth().clickable(openApp(context, "day"))) {
         for (slot in preview.slots.take(count)) {
             LessonRow(context, slot, null)
             Spacer(GlanceModifier.height(4.dp))
