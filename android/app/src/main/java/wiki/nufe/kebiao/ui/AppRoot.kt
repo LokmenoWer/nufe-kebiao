@@ -109,6 +109,7 @@ internal fun AppRoot(
                 (!notificationsOk || !exactOk || !promotedOk || !batteryOk),
         )
     }
+    var showFeatureIntro by remember { mutableStateOf(false) }
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -238,6 +239,15 @@ internal fun AppRoot(
     LaunchedEffect(notificationsOk, exactOk, promotedOk, batteryOk) {
         if (showPermissions && notificationsOk && exactOk && promotedOk && batteryOk) {
             markPermissionsSeen()
+        }
+    }
+
+    // 首次安装并注册（拿到课表）后，一次性介绍 App 特性；与权限弹窗不同时叠出。
+    LaunchedEffect(hasTimetable, showPermissions) {
+        if (hasTimetable && !showPermissions &&
+            !changeSeenPrefs.getBoolean("feature_intro_seen", false)
+        ) {
+            showFeatureIntro = true
         }
     }
 
@@ -412,8 +422,18 @@ internal fun AppRoot(
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                 )
             },
+            onOpenAutoStart = { openAutoStartSettings(context) },
             onOpenBattery = { openBatteryOptimizationSettings(context) },
             onDismiss = { markPermissionsSeen() },
+        )
+    }
+
+    if (showFeatureIntro) {
+        FeatureIntroDialog(
+            onDismiss = {
+                changeSeenPrefs.edit().putBoolean("feature_intro_seen", true).apply()
+                showFeatureIntro = false
+            },
         )
     }
 }

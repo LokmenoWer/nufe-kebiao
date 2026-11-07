@@ -119,6 +119,31 @@ internal fun ignoringBatteryOptimizations(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(context.packageName) == true
 
+/** 用意图直达 ColorOS 的“自启动”页；优先 action（组件可能未导出），失败再试组件，最后退回系统设置。 */
+internal fun openAutoStartSettings(context: Context) {
+    val actions = listOf(
+        "com.oplus.battery.permission.startup.StartupAppListActivity",
+        "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+        "com.oppo.safe.permission.startup.StartupAppListActivity",
+    )
+    for (action in actions) {
+        val intent = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(intent) }.isSuccess) return
+    }
+    val pages = listOf(
+        ComponentName("com.oplus.battery", "com.oplus.startupapp.view.StartupAppListActivity"),
+        ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+    )
+    for (page in pages) {
+        val intent = Intent().setComponent(page).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(intent) }.isSuccess) return
+    }
+    // 都失败时退回系统设置首页，而不是应用详情。
+    runCatching {
+        context.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
 /**
  * ColorOS 的电池白名单只解除 Android 的限制，系统自己的“耗电管理 / 自启动”还会冻结 App。
  * 优先打开厂商自己的后台页，入口不存在时再退回应用详情，最后才用标准电池弹窗。
