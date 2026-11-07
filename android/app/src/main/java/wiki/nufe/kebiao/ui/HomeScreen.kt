@@ -280,7 +280,7 @@ internal fun HomeScreen(
         HeaderBlock()
         Spacer(Modifier.height(12.dp))
         EnterUp { StatusPill(plan, now) }
-        if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(18.dp))
         if (message != null) {
             Text(
                 message,
@@ -351,19 +351,25 @@ internal fun HeaderBlock() {
 
 @Composable
 private fun StatusPill(plan: DayPlan?, now: Now) {
-    val slot = plan?.slots?.firstOrNull() ?: return
-    val date = plan.day?.date ?: return
-    val target = when (slot.state) {
-        State.LIVE -> lessonMs(date, slot.lesson.end)
-        State.NEXT -> lessonMs(date, slot.lesson.start)
-        else -> return
-    }
-    val remain = target - now.ms
-    if (remain <= 0) return
-    val text = when (slot.state) {
-        State.LIVE -> "正在上课 · 剩 ${remainText(remain)}"
-        State.NEXT -> "准备上课 · ${remainText(remain)}后"
-        else -> return
+    val slot = plan?.slots?.firstOrNull()
+    val date = plan?.day?.date
+    var text = "今日无事"
+    var active = false
+    if (slot != null && date != null) {
+        val target = when (slot.state) {
+            State.LIVE -> lessonMs(date, slot.lesson.end)
+            State.NEXT -> lessonMs(date, slot.lesson.start)
+            else -> null
+        }
+        val remain = target?.let { it - now.ms }
+        if (remain != null && remain > 0) {
+            active = true
+            text = if (slot.state == State.LIVE) {
+                "正在上课 · 剩 ${remainText(remain)}"
+            } else {
+                "准备上课 · ${remainText(remain)}后"
+            }
+        }
     }
     val dark = isSystemInDarkTheme()
     Surface(
@@ -375,7 +381,10 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF7BD88F)))
+            Box(
+                Modifier.size(6.dp).clip(CircleShape)
+                    .background(if (active) Color(0xFF7BD88F) else Color(0xFF9E9EA7)),
+            )
             Spacer(Modifier.width(8.dp))
             Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
