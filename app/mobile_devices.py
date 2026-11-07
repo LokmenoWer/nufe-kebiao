@@ -74,6 +74,24 @@ def bind(uid: int, code: str, public_key: str, name: str) -> str:
     return device_id
 
 
+def bind_verified(uid: int, public_key: str, name: str) -> str:
+    """App 2.x 托管时绑定设备：调用方刚用学校会话证实了是本人（见 service.enroll_from_app），不需要配对码。
+
+    同一把公钥再次托管只换 id；超过上限时挤掉最久没用的那台，免得重装几次 App 就再也托管不上。
+    """
+    der = _public_key_der(public_key)
+    device_id = secrets.token_urlsafe(16)
+    now = db.now()
+    with db.tx() as c:
+        c.execute("DELETE FROM mobile_devices WHERE user_id=? AND public_key=?", (uid, der))
+        c.execute("""DELETE FROM mobile_devices WHERE id IN (
+                         SELECT id FROM mobile_devices WHERE user_id=? ORDER BY last_seen_at DESC LIMIT -1 OFFSET ?)""",
+                  (uid, MAX_DEVICES - 1))
+        c.execute("INSERT INTO mobile_devices(id, user_id, public_key, name, created_at, last_seen_at) "
+                  "VALUES(?,?,?,?,?,?)", (device_id, uid, der, name.strip()[:NAME_MAX] or "安卓设备", now, now))
+    return device_id
+
+
 def signed_message(token: str, device_id: str, timestamp: str) -> bytes:
     return f"nufe-kebiao-device-v1\n{token}\n{device_id}\n{timestamp}".encode()
 

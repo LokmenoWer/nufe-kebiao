@@ -180,12 +180,12 @@ def _widget_post(request: Request) -> bool:
     path = request.url.path
     return (request.method == "POST" and not request.headers.get("origin")
             and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
-                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload", "/leave")))
                  or path in _APP_POSTS))
 
 
 # 安卓 App 的匿名心跳与协助刷新：不用 cookie，凭随机安装 id / 会话 token 认人，同样没有 CSRF 的问题
-_APP_POSTS = frozenset({"/api/app/heartbeat", "/api/assist/claim", "/api/assist/exchange"})
+_APP_POSTS = frozenset({"/api/app/heartbeat", "/api/app/enroll", "/api/assist/claim", "/api/assist/exchange"})
 
 
 @app.middleware("http")
@@ -1241,6 +1241,96 @@ async def assist_exchange(request: Request):
     if out is None:
         raise HTTPException(404, "会话不存在")
     return out
+
+
+app_enroll_by_ip = RateLimiter(10, 3600, prev=globals().get("app_enroll_by_ip"))
+
+
+class AppEnrollIn(BaseModel):
+    cookies: list[dict] = Field(max_length=service.APP_COOKIE_MAX)
+    public_key: str = Field(max_length=512)
+    name: str = Field("", max_length=128)
+
+
+def _ensure_widget_token(uid: int) -> str:
+    """托管需要一个只读链接作为设备的“门牌”。已有就沿用（重新生成会让用户别的小组件 / 设备失效）。"""
+    token = _widget_token(uid)
+    if token:
+        return token
+    token = secrets.token_urlsafe(24)
+    with db.tx() as c:
+        c.execute("UPDATE users SET widget_token_hash=?, enc_widget_token=? WHERE id=? AND enc_widget_token IS NULL",
+                  (crypto.token_hash(token), crypto.encrypt(token.encode(), "widget", uid), uid))
+    return _widget_token(uid) or token
+
+
+@app.post("/api/app/enroll")
+async def app_enroll(body: AppEnrollIn, request: Request):
+    """App 2.x 登录时勾了“托管到本站”：凭刚拿到的学校会话建号 / 换登录态，并直接绑定这台设备。
+
+    双层兜底：手机本机刷新失败时读本站这份；本站的登录态失效时，App 下次本机刷新成功会再交一次。
+    """
+    cookies = service.app_cookies(body.cookies)
+    if not any(c["domain"] == "jwxt.nufe.edu.cn" for c in cookies) and not any(c["name"] == "CASTGC" for c in cookies):
+        raise HTTPException(400, "没有可用的学校登录状态")
+    if not app_enroll_by_ip.hit(_client_ip(request)):
+        raise HTTPException(429, "尝试太频繁，请稍后再试")
+    try:
+        mobile_devices._public_key_der(body.public_key)
+    except mobile_devices.PairError as e:
+        raise HTTPException(400, str(e)) from e
+
+    def run():
+        try:
+            return service.enroll_from_app(cookies)
+        except service.LoginRejected as e:
+            raise HTTPException(400, str(e)) from None
+        except service.Busy:
+            raise HTTPException(409, "正在刷新，请稍后再试") from None
+
+    uid = await _upstream_call(run)
+    token = await asyncio.to_thread(_ensure_widget_token, uid)
+    device_id = await asyncio.to_thread(mobile_devices.bind_verified, uid, body.public_key, body.name)
+    await asyncio.to_thread(notify.device_bound, uid, body.name.strip()[:64] or "安卓设备")
+    row = db.connect().execute("SELECT student_id, name FROM users WHERE id=?", (uid,)).fetchone()
+    return JSONResponse({"token": token, "device_id": device_id,
+                         "student": {"code": row["student_id"], "name": row["name"]}},
+                        headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+def _signed_device(token: str, request: Request):
+    """/mobile/{token}/… 里要带设备签名的接口：返回 (user, None) 或 (None, 401 响应)。"""
+    user = _widget_user(token)
+    h = request.headers
+    try:
+        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+                                    h.get("x-device-signature", ""))
+    except mobile_devices.AuthError as e:
+        body = {"detail": "设备未绑定或签名无效"}
+        if e.skew:
+            body["server_time"] = int(db.now())
+        return None, JSONResponse(body, status_code=401, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+    return user, None
+
+
+@app.get("/mobile/{token}/timetable")
+def mobile_timetable(token: str, request: Request):
+    """托管的 App 读本站这份课表（原始排课，App 本机再投影）。也算“还在用”，到期会被排进后台刷新。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    presence.mark_user(user["id"], "mobile")
+    _record_use(user["id"])
+    return JSONResponse(service.app_timetable(user["id"]), headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+@app.post("/mobile/{token}/leave")
+def mobile_leave(token: str, request: Request):
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    service.leave_from_app(user["id"], request.headers.get("x-device-id", ""))
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 @app.get("/android/releases.json")

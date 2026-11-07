@@ -2841,3 +2841,100 @@ def test_pending_login_capacity_cap_evicts_oldest_and_wipes_password(up, monkeyp
     assert fids[0] not in service._pending
     assert flows[0].password == ""  # 被挤出的半途流程立即擦除内存中的明文密码
     assert fids[-1] in service._pending
+
+
+# ---------- 安卓 App 2.x 托管（双层兜底） ----------
+
+def _app_cookies(sid):
+    return [{"name": "CASTGC", "value": f"tgc-{sid}", "domain": "authserver.nufe.edu.cn", "path": "/authserver",
+             "expires": TGC_REMEMBER_UNTIL},
+            {"name": "SESSION", "value": "jw", "domain": "jwxt.nufe.edu.cn", "path": "/student"},
+            {"name": "evil", "value": "x", "domain": "example.com", "path": "/"},
+            {"name": "CASTGC", "value": "bad", "domain": "jwxt.nufe.edu.cn", "path": "/"}]
+
+
+class HostedApp:
+    def __init__(self):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.token = self.device_id = None
+
+    def public(self):
+        return base64.b64encode(self.key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+
+    def enroll(self, sid, **kw):
+        main.app_enroll_by_ip._hits.clear()
+        r = TestClient(app).post("/api/app/enroll", json={"cookies": kw.pop("cookies", _app_cookies(sid)),
+                                                          "public_key": self.public(), "name": "Pixel"}, **kw)
+        if r.status_code == 200:
+            self.token, self.device_id = r.json()["token"], r.json()["device_id"]
+        return r
+
+    def signed(self):
+        ts = str(int(time.time()))
+        sig = self.key.sign(mobile_devices.signed_message(self.token, self.device_id, ts), ec.ECDSA(hashes.SHA256()))
+        return {"X-Device-Id": self.device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+
+
+def test_app_enroll_creates_account_and_binds_device(up):
+    phone = HostedApp()
+    r = phone.enroll("2023001")
+    assert r.status_code == 200 and r.json()["student"]["code"] == "2023001"
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT status, cred_mode, enc_password FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["status"], row["cred_mode"], row["enc_password"]) == ("ok", "cookie", None)
+    # 只留下学校两个域名、格式正确的 cookie；教务域名下冒充的 CASTGC 被丢弃
+    from app import crypto
+    jar = crypto.decrypt_json(db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0],
+                              "cookies", uid)
+    assert sorted((c["name"], c["domain"]) for c in jar) == [("CASTGC", "authserver.nufe.edu.cn"),
+                                                             ("SESSION", "jwxt.nufe.edu.cn")]
+    t = TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).json()
+    assert t["status"] == "ok" and t["student"] == {"name": "学生1", "code": "2023001"}
+    assert t["activities"][0]["courseName"] == "高数" and t["semester_id"] == 161
+    assert mobile_devices.list_devices(uid)[0]["name"] == "Pixel"
+
+
+def test_app_enroll_rejects_dead_session(up):
+    up.expired.add("2023001")
+    r = HostedApp().enroll("2023001")
+    assert r.status_code == 400 and "重新登录" in r.json()["detail"]
+    assert db.connect().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+
+
+def test_app_enroll_needs_school_cookies(up):
+    r = HostedApp().enroll("2023001", cookies=[{"name": "a", "value": "b", "domain": "example.com", "path": "/"}])
+    assert r.status_code == 400
+
+
+def test_app_enroll_keeps_existing_website_account_and_link(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    old_token = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].split("/")[-1][:-5]
+    phone = HostedApp()
+    assert phone.enroll("2023001").status_code == 200
+    assert phone.token == old_token  # 不重新生成链接：用户的 iOS 小组件 / 旧设备不受影响
+    row = db.connect().execute("SELECT cred_mode FROM users WHERE student_id='2023001'").fetchone()
+    assert row["cred_mode"] == "password"  # 网站上存的密码不动
+    # 同一把设备公钥再托管：只换 id，不重复占名额
+    assert phone.enroll("2023001").status_code == 200
+    assert len(mobile_devices.list_devices(service_uid("2023001"))) == 1
+
+
+def test_app_timetable_requires_device_signature(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable").status_code == 401
+    other = HostedApp()
+    other.token, other.device_id = phone.token, phone.device_id
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=other.signed()).status_code == 401
+
+
+def test_app_leave_forgets_school_session(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).post(f"/mobile/{phone.token}/leave", headers=phone.signed()).json() == {"ok": True}
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT status, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+    assert row["enc_cookies"] is None and row["status"] == "needs_rebind"
+    assert mobile_devices.list_devices(uid) == []
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401

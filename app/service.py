@@ -478,6 +478,107 @@ def _complete_login(p: PendingLogin) -> int:
     return uid
 
 
+# ---------- 安卓 App 托管（双层兜底） ----------
+
+APP_COOKIE_HOSTS = frozenset({cas.AUTH_HOST, "jwxt.nufe.edu.cn"})
+APP_COOKIE_MAX = 40
+
+
+def app_cookies(raw) -> list[dict]:
+    """App 交来的学校 cookie：只收学校两个域名下的、格式干净的；其余一律丢弃。"""
+    out = []
+    for c in raw[:APP_COOKIE_MAX] if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        name, value = c.get("name"), c.get("value")
+        domain, path = str(c.get("domain") or "").lstrip("."), c.get("path") or "/"
+        if (not isinstance(name, str) or not isinstance(value, str) or not isinstance(path, str)
+                or domain not in APP_COOKIE_HOSTS or not name or len(name) > 128 or len(value) > 4096
+                or _BAD_COOKIE_CHARS.search(name + value) or not path.startswith("/")):
+            continue
+        if name == "CASTGC" and domain != cas.AUTH_HOST:
+            continue
+        expires = c.get("expires")
+        out.append({"name": name, "value": value, "domain": domain, "path": path[:256], "secure": True,
+                    "expires": int(expires) if isinstance(expires, int | float) and expires > 0 else None})
+    return out
+
+
+def enroll_from_app(cookies: list[dict]) -> int:
+    """App 用自己在 WebView 里登录得到的学校会话来本站托管：本站拿它读一次课表，读得到学号就算本人。
+
+    和网站登录同等强度：能拿出有效学校会话的人就是这个学号的主人。已有账号时只换登录态、不动已存的密码。
+    返回 uid；读不到课表抛 LoginRejected。
+    """
+    s = PoliteSession()
+    load_cookies(s, cookies)
+    try:
+        try:
+            data = jwxt.fetch_timetable(s)
+        except jwxt.SessionExpired:
+            if not cas.renew_with_tgc(s):
+                raise LoginRejected("学校登录状态已失效，请在 App 内重新登录后再托管") from None
+            data = jwxt.fetch_timetable(s)
+    except LoginRejected:
+        raise
+    except cas.CasError as e:
+        raise LoginRejected(str(e)) from None
+    except (ValueError, KeyError) as e:
+        log.warning("app enroll: timetable parse failed: %s", type(e).__name__)
+        raise LoginRejected("教务系统返回的课表无法解析，请稍后再试") from None
+    except UpstreamCooldown as e:
+        raise LoginRejected(f"学校服务器繁忙，请约 {e.retry_after} 秒后再试") from None
+    except Exception as e:
+        log.warning("app enroll: timetable fetch failed: %s", type(e).__name__)
+        raise LoginRejected("暂时无法通过学校验证，请稍后再试") from None
+    code = str(data["student"].get("code") or "")
+    if not code:
+        raise LoginRejected("未能从教务系统读取学号")
+    with db.tx() as c:
+        row = c.execute("SELECT id, enc_device_id, cred_mode FROM users WHERE student_id=?", (code,)).fetchone()
+        uid = row["id"] if row else c.execute(
+            "INSERT INTO users(student_id, created_at) VALUES(?,?)", (code, db.now())).lastrowid
+        if not row or not row["enc_device_id"]:
+            c.execute("UPDATE users SET enc_device_id=? WHERE id=?",
+                      (crypto.encrypt(cas.new_device_id().encode(), "device", uid), uid))
+    lock = _locks[uid]
+    if not lock.acquire(timeout=30):
+        raise Busy()
+    try:
+        with db.tx() as c:
+            _save_success(c, uid, dump_cookies(s), data, "login")
+    finally:
+        lock.release()
+    _after_change(uid, "login", None)
+    return uid
+
+
+def leave_from_app(uid: int, device_id: str) -> None:
+    """App 里取消托管：撤掉这台设备，删掉本站存的学校登录态（网站上另存的密码不动，需在网站设置里删）。"""
+    with db.tx() as c:
+        c.execute("DELETE FROM mobile_devices WHERE id=? AND user_id=?", (device_id, uid))
+        c.execute("""UPDATE users SET enc_cookies=NULL, status='needs_rebind',
+                     last_error='已在安卓 App 中取消托管，本站不再自动刷新' WHERE id=? AND cred_mode<>'password'""", (uid,))
+        c.execute("UPDATE users SET enc_cookies=NULL WHERE id=? AND cred_mode='password'", (uid,))
+
+
+def app_timetable(uid: int) -> dict:
+    """给托管的 App：本站这份课表的原始结构（和 App 本机解析器同一套字段）与刷新状态。"""
+    row = db.connect().execute("SELECT status, last_error, last_success_at FROM users WHERE id=?", (uid,)).fetchone()
+    view = timetable_view(uid, None) or {}
+    return {
+        "status": row["status"] if row else "deleted",
+        "last_error": row["last_error"] if row else None,
+        "last_success_at": row["last_success_at"] if row else None,
+        "semester_id": view.get("semester_id"),
+        "semester_name": view.get("semester_name"),
+        "week1_monday": view.get("week1_monday"),
+        "fetched_at": view.get("fetched_at"),
+        "student": {k: (view.get("student") or {}).get(k) for k in ("name", "code")},
+        "activities": view.get("activities") or [],
+    }
+
+
 def forget_password(uid: int) -> None:
     with db.tx() as c:
         # 先覆盖再置空，降低 SQLite 页里留下旧密文的可能
