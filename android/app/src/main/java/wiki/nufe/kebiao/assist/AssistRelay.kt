@@ -29,20 +29,22 @@ class AssistRelay(
 ) {
     private val sockets = ConcurrentHashMap<Int, Socket>()
     private val inbound = LinkedBlockingQueue<JSONObject>()
+    // 本轮装不下、留到下一次交换的事件（按顺序）
+    private val backlog = ArrayDeque<JSONObject>()
     private val counted = AtomicLong()
     val bytes: Long get() = counted.get()
 
     /** 跑到服务器说完成为止；返回服务器给的结果（"ok" 等），中途放弃返回 null。 */
     fun run(deadlineMs: Long, maxBytes: Long): String? {
         try {
-            var events = mutableListOf<JSONObject>()
             while (System.currentTimeMillis() < deadlineMs && bytes <= maxBytes) {
-                // 有连接开着时稍等学校的回包再交换，攒一攒少发几个请求；没连接就直接去问下一步
-                val first = if (sockets.isEmpty()) inbound.poll() else inbound.poll(WAIT_MS, TimeUnit.MILLISECONDS)
-                first?.let(events::add)
-                inbound.drainTo(events)
-                val reply = exchange(events) ?: return null
-                events = mutableListOf()
+                // 有连接开着时稍等学校的回包再交换，攒一攒少发几个请求；没连接或还有积压就直接去交换
+                if (backlog.isEmpty()) {
+                    val first = if (sockets.isEmpty()) inbound.poll() else inbound.poll(WAIT_MS, TimeUnit.MILLISECONDS)
+                    first?.let(backlog::addLast)
+                }
+                inbound.drainTo(backlog)
+                val reply = exchange(nextBatch()) ?: return null
                 val ops = reply.optJSONArray("events") ?: JSONArray()
                 for (i in 0 until ops.length()) handle(ops.optJSONObject(i) ?: continue)
                 if (reply.optBoolean("done")) return reply.optString("outcome").ifEmpty { null }
@@ -109,6 +111,22 @@ class AssistRelay(
         if (sockets.remove(conn) != null) inbound += JSONObject().put("conn", conn).put("closed", true)
     }
 
+    /**
+     * 从积压里按顺序取一批，编码后不超过 [MAX_BATCH_CHARS]：服务器的交换接口限 1 MiB，
+     * 学校一下子回很多数据时分几次交，不能整包超限被拒（413）后放弃这次中继。
+     */
+    internal fun nextBatch(): List<JSONObject> {
+        val batch = mutableListOf<JSONObject>()
+        var size = 0
+        while (backlog.isNotEmpty()) {
+            val cost = backlog.first().toString().length + 1
+            if (batch.isNotEmpty() && size + cost > MAX_BATCH_CHARS) break
+            batch += backlog.removeFirst()
+            size += cost
+        }
+        return batch
+    }
+
     private fun exchange(events: List<JSONObject>): JSONObject? {
         val body = JSONObject().put("session", session).put("token", token).put("events", JSONArray(events))
         val request = Request.Builder().url("$site/api/assist/exchange")
@@ -126,6 +144,8 @@ class AssistRelay(
     companion object {
         val ALLOWED_HOSTS = setOf("jwxt.nufe.edu.cn")
         private const val WAIT_MS = 150L
+        // 单个读块 32 KiB → base64 约 44 KB；一批最多约 512 KB，离服务器 1 MiB 的上限留足余量
+        internal const val MAX_BATCH_CHARS = 512 * 1024
 
         fun openSocket(host: String, port: Int): Socket = Socket().apply {
             tcpNoDelay = true

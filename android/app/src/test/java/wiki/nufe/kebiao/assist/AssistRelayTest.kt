@@ -87,4 +87,45 @@ class AssistRelayTest {
         // 没有字节也不会超额；服务器一直不说完成时，到期就放弃
         assertEquals(null, relay.run(System.currentTimeMillis() + 300, 0))
     }
+
+    @Test
+    fun splitsLargeResponsesAcrossExchangesUnderTheServerLimit() {
+        // 学校一口气回 2 MiB：要分多次交换，每次请求体都不能超过服务器 1 MiB 的上限，且字节不丢不乱
+        val payload = ByteArray(2 * 1024 * 1024) { (it % 251).toByte() }
+        val school = ServerSocket(0)
+        thread(isDaemon = true) {
+            school.accept().use { s ->
+                s.getInputStream().read(ByteArray(1))
+                s.getOutputStream().write(payload)
+            }
+        }
+        val sizes = CopyOnWriteArrayList<Int>()
+        val received = java.io.ByteArrayOutputStream()
+        var opened = false
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val body = Buffer().also { chain.request().body!!.writeTo(it) }.readUtf8()
+            sizes += body.length
+            val events = JSONObject(body).getJSONArray("events")
+            var closed = false
+            for (i in 0 until events.length()) {
+                val e = events.getJSONObject(i)
+                if (e.has("data")) synchronized(received) { received.write(Base64.getDecoder().decode(e.getString("data"))) }
+                if (e.optBoolean("closed")) closed = true
+            }
+            val reply = when {
+                !opened -> { opened = true; ops(JSONObject().put("op", "open").put("conn", 1).put("host", "jwxt.nufe.edu.cn").put("port", 443),
+                    JSONObject().put("op", "data").put("conn", 1).put("data", b64("x"))) }
+                closed -> done("ok")
+                else -> ops()
+            }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(reply.toString().toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val relay = AssistRelay(client, "https://site", "s", "t") { _, _ -> Socket("127.0.0.1", school.localPort) }
+        assertEquals("ok", relay.run(System.currentTimeMillis() + 20_000, 8L * 1024 * 1024))
+        assertTrue("every exchange stays under 1 MiB: $sizes", sizes.all { it < 1024 * 1024 })
+        assertTrue(sizes.size > 3)
+        assertTrue(payload.contentEquals(received.toByteArray()))
+        school.close()
+    }
 }
