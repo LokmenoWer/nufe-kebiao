@@ -35,7 +35,7 @@ from .config import (
     TIMEZONE,
     semester_overrides,
 )
-from .polite import PoliteSession, UpstreamCooldown, UpstreamYield, dump_cookies, load_cookies
+from .polite import PoliteSession, RelayFailed, UpstreamCooldown, UpstreamYield, dump_cookies, load_cookies
 
 log = logging.getLogger("kebiao.service")
 
@@ -516,7 +516,8 @@ def delete_user(uid: int) -> None:
 
 # ---------- 刷新 ----------
 
-def refresh_user(uid: int, trigger: str, semester_id: int | None = None) -> dict:
+def refresh_user(uid: int, trigger: str, semester_id: int | None = None,
+                 session: PoliteSession | None = None) -> dict:
     """同一用户同一时刻只允许一个刷新在跑。
 
     手动刷新另有两道闸，避免连点把全站的上游额度都占掉：
@@ -531,7 +532,7 @@ def refresh_user(uid: int, trigger: str, semester_id: int | None = None) -> dict
             cached = _manual_refresh_gate(uid, semester_id)
             if cached:
                 return cached
-        return _refresh_locked(uid, trigger, semester_id)
+        return _refresh_locked(uid, trigger, semester_id, session)
     finally:
         lock.release()
 
@@ -570,12 +571,14 @@ def _renew_with_tgc(s: PoliteSession, uid: int) -> bool:
     return renewed
 
 
-def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
+def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
+                    session: PoliteSession | None = None) -> dict:
+    """session：调用方可以传入换了传输层的会话（App 协助刷新的中继，见 assist.py）。"""
     user = db.connect().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     if not user:
         raise KeyError(uid)
 
-    s = PoliteSession()
+    s = session or PoliteSession()
     if user["enc_cookies"]:
         try:
             cookies = crypto.decrypt_json(user["enc_cookies"], "cookies", uid)
@@ -616,8 +619,8 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         return _save_failure(uid, trigger, "needs_rebind", "保存的凭据无法登录，请重新登录本站")
     except NeedsRebind as e:
         return _save_failure(uid, trigger, "needs_rebind", str(e))
-    except UpstreamYield:
-        raise
+    except (UpstreamYield, RelayFailed):
+        raise  # 让路 / 中继没走通：都不是这个用户的失败，不记账
     except UpstreamCooldown as e:
         # 全站在给学校“降温”，不是这个用户的问题：不记失败、不动退避
         return {"ok": False, "status": "cooldown", "retry_after": e.retry_after,
@@ -638,7 +641,7 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
 def _after_change(uid: int, trigger: str, changes: dict | None) -> None:
     if not changes:
         return
-    if trigger in ("scheduled", "widget"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
+    if trigger in ("scheduled", "widget", "assist"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
         _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
     try:
         n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
@@ -1442,7 +1445,7 @@ def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
         c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,0,?)",
                   (uid, now, trigger, message))
     # 只提醒后台刷新里的“状态变化”：暂停那一刻发一次；连续失败恰好达到阈值时发一次
-    if trigger == "scheduled" and ((status != "error" and prev_status != status)
+    if trigger in ("scheduled", "assist") and ((status != "error" and prev_status != status)
                                    or (status == "error" and fails == REFRESH_MAX_FAILS)):
         _notify_safely(notify.refresh_paused, uid, status, message)
     return {"ok": False, "status": status, "message": message}

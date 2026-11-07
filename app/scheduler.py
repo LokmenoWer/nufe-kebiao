@@ -137,6 +137,8 @@ def _loop() -> None:
                 return
         try:
             service.housekeeping()
+            from . import assist  # assist 依赖本模块（借用后台预算），只能在这里晚导入
+            assist.housekeeping()
         except Exception as e:
             log.error("housekeeping failed: %s", type(e).__name__)
         try:

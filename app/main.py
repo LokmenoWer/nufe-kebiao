@@ -25,6 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from . import (
     admin,
     android_releases,
+    assist,
     cas,
     crypto,
     db,
@@ -179,7 +180,12 @@ def _widget_post(request: Request) -> bool:
     path = request.url.path
     return (request.method == "POST" and not request.headers.get("origin")
             and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
-                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))
+                 or path in _APP_POSTS))
+
+
+# 安卓 App 的匿名心跳与协助刷新：不用 cookie，凭随机安装 id / 会话 token 认人，同样没有 CSRF 的问题
+_APP_POSTS = frozenset({"/api/app/heartbeat", "/api/assist/claim", "/api/assist/exchange"})
 
 
 @app.middleware("http")
@@ -196,7 +202,7 @@ async def security_mw(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
         return JSONResponse({"detail": "非法来源"}, 403)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
-                                   and not request.url.path.startswith("/api/admin/")):
+                                   and not request.url.path.startswith(("/api/admin/", "/api/app/", "/api/assist/"))):
         presence.mark_visitor(_client_ip(request))
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -1115,7 +1121,7 @@ def admin_schedule(_csrf=Depends(admin.current_admin)):
 
 
 @app.get("/api/admin/refreshes")
-def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|scheduled|manual|login)$"),
+def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|assist|scheduled|manual|login)$"),
                     failed: bool = False, limit: int = Query(100, ge=1, le=500),
                     _csrf=Depends(admin.current_admin)):
     return admin.recent_refreshes(limit, trigger, failed)
@@ -1163,6 +1169,78 @@ async def versioned_asset(version: str, path: str, request: Request):
         resp.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if version == _asset_version()
                                          else "no-cache")
     return resp
+
+
+# ---------- 本地优先安卓 App：匿名统计与协助刷新（见 assist.py） ----------
+
+app_heartbeat_by_ip = RateLimiter(60, 3600, prev=globals().get("app_heartbeat_by_ip"))
+app_new_install_by_ip = RateLimiter(10, 86400, prev=globals().get("app_new_install_by_ip"))
+assist_claim_by_install = RateLimiter(20, 3600, prev=globals().get("assist_claim_by_install"))
+assist_claim_by_ip = RateLimiter(60, 3600, prev=globals().get("assist_claim_by_ip"))
+ASSIST_EXCHANGE_MAX = 1024 * 1024
+
+
+class AppHeartbeatIn(BaseModel):
+    install_id: str = Field(min_length=16, max_length=64)
+    version: str | None = Field(None, max_length=40)
+    version_code: int | None = Field(None, ge=0, le=10_000_000)
+    sdk: int | None = Field(None, ge=1, le=1000)
+    has_timetable: bool = False
+    assist: bool = False
+
+
+@app.post("/api/app/heartbeat")
+def app_heartbeat(body: AppHeartbeatIn, request: Request):
+    """App 的匿名心跳：随机安装 id（只存哈希）+ 版本。不收学号、姓名、课表。"""
+    if not assist.valid_install_id(body.install_id):
+        raise HTTPException(400, "安装 id 格式不正确")
+    ip = _client_ip(request)
+    if not app_heartbeat_by_ip.hit(ip):
+        raise HTTPException(429, "请求过于频繁")
+    recorded = assist.heartbeat(body.install_id, body.version, body.version_code, body.sdk,
+                                body.has_timetable, body.assist, allow_new=False)
+    if not recorded and app_new_install_by_ip.hit(ip):
+        recorded = assist.heartbeat(body.install_id, body.version, body.version_code, body.sdk,
+                                    body.has_timetable, body.assist)
+    return {"ok": recorded, "assist_available": assist.ENABLED}
+
+
+class AssistClaimIn(BaseModel):
+    install_id: str = Field(min_length=16, max_length=64)
+
+
+@app.post("/api/assist/claim")
+def assist_claim(body: AssistClaimIn, request: Request):
+    if not assist.valid_install_id(body.install_id):
+        raise HTTPException(400, "安装 id 格式不正确")
+    if not assist_claim_by_ip.hit(_client_ip(request)) or not assist_claim_by_install.hit(body.install_id):
+        return {"task": None, "reason": "rate_limited"}
+    return assist.claim(body.install_id)
+
+
+@app.post("/api/assist/exchange")
+async def assist_exchange(request: Request):
+    """中继搬运：手机交上从学校收到的密文，取走要发给学校的密文。最多挂起 assist.LONG_POLL 秒。"""
+    size = request.headers.get("content-length") or "0"
+    if not size.isdigit() or int(size) > ASSIST_EXCHANGE_MAX:
+        raise HTTPException(413, "内容过大")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > ASSIST_EXCHANGE_MAX:
+            raise HTTPException(413, "内容过大")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "格式不正确") from None
+    if (not isinstance(body, dict) or not isinstance(body.get("session"), str)
+            or not isinstance(body.get("token"), str) or not isinstance(body.get("events", []), list)):
+        raise HTTPException(400, "格式不正确")
+    events = [e for e in body.get("events", [])[:64] if isinstance(e, dict)]
+    out = await asyncio.to_thread(assist.exchange, body["session"][:40], body["token"][:64], events)
+    if out is None:
+        raise HTTPException(404, "会话不存在")
+    return out
 
 
 @app.get("/android/releases.json")
