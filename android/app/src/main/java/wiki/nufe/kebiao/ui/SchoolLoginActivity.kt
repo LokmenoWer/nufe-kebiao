@@ -27,6 +27,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -142,19 +143,26 @@ class SchoolLoginActivity : ComponentActivity() {
                             Button(onClick = { captureWhenReady() }, enabled = !importing) { Text("导入课表") }
                         }
                         Text(status, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
-                        Row(
-                            Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        Surface(
+                            onClick = { if (!importing) hostWanted = !hostWanted },
+                            enabled = !importing,
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                         ) {
-                            Checkbox(checked = hostWanted, onCheckedChange = { hostWanted = it }, enabled = !importing)
-                            Column {
-                                Text("同时托管到 nufe课表 服务器（双重保障）", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    "把本次学校登录状态加密交给服务器：手机刷新失败时由服务器和同学们的手机继续帮你更新，" +
-                                        "可随时在「我的」中取消。不勾选则一切只留在本机。",
-                                    style = MaterialTheme.typography.bodySmall, fontSize = 11.sp, lineHeight = 15.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                            Row(
+                                Modifier.padding(start = 4.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(checked = hostWanted, onCheckedChange = { hostWanted = it }, enabled = !importing)
+                                Column {
+                                    Text("同时托管到 nufe课表 服务器", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "双重保障 · 可随时在「我的」取消；不勾选则只留在本机。",
+                                        style = MaterialTheme.typography.bodySmall, fontSize = 11.sp, lineHeight = 15.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                         if (importing || pageLoading) LinearProgressIndicator(Modifier.fillMaxWidth())

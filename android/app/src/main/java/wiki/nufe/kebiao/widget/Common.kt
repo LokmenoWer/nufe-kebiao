@@ -231,7 +231,7 @@ fun WidgetDivider(modifier: GlanceModifier = GlanceModifier.fillMaxWidth()) {
     Spacer(modifier.height(1.dp).background(GlanceTheme.colors.outline))
 }
 
-/** 系统自己走的倒计时（Chronometer），不需要每秒重画小组件。 */
+/** 系统自己走的倒计时（Chronometer），实时刷新，不需要每秒重画小组件。 */
 @Composable
 fun Countdown(context: Context, targetMs: Long, color: Color) {
     val views = RemoteViews(context.packageName, R.layout.countdown).apply {

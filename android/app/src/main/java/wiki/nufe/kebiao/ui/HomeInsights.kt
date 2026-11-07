@@ -119,6 +119,8 @@ private fun RhythmRing(
     val segments = remember(lessons, now.date, now.minutes, currentDay, clock12h) {
         ringSegments(lessons, now, currentDay, clock12h)
     }
+    val rest = lessons.isEmpty()
+    val finished = !rest && currentDay && lessons.all { it.endMinutes <= now.minutes }
     val spin = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         spin.animateTo(1f, tween(durationMillis = 1100, easing = FastOutSlowInEasing))
@@ -156,18 +158,31 @@ private fun RhythmRing(
                     cap = StrokeCap.Round,
                 )
             }
-            segments.forEach { segment ->
+            if (rest) {
+                // 全天没课：整圈铺成柔和的休息绿，读作“今天休息”，而不是空环。
                 drawArc(
-                    color = if (segment.past) segment.color.copy(alpha = 0.35f) else segment.color,
-                    startAngle = angleOf(segment.start),
-                    sweepAngle = (segment.end - segment.start) / period.toFloat() * 360f,
+                    color = SuccessGreen.copy(alpha = 0.45f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
                     useCenter = false,
                     topLeft = Offset(inset, inset),
                     size = arcSize,
                     style = Stroke(stroke, cap = StrokeCap.Round),
                 )
+            } else {
+                segments.forEach { segment ->
+                    drawArc(
+                        color = if (segment.past) segment.color.copy(alpha = 0.35f) else segment.color,
+                        startAngle = angleOf(segment.start),
+                        sweepAngle = (segment.end - segment.start) / period.toFloat() * 360f,
+                        useCenter = false,
+                        topLeft = Offset(inset, inset),
+                        size = arcSize,
+                        style = Stroke(stroke, cap = StrokeCap.Round),
+                    )
+                }
             }
-            if (currentDay) {
+            if (currentDay && !rest) {
                 val degrees = angleOf(now.minutes) + spin.value * 360f
                 drawLine(
                     color = handColor,
@@ -184,7 +199,16 @@ private fun RhythmRing(
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("${lessons.size} 节", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                when {
+                    rest -> "休息"
+                    finished -> "已下课"
+                    else -> "${lessons.size} 节"
+                },
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (rest) SuccessGreen else MaterialTheme.colorScheme.onSurface,
+            )
         }
     }
 }

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知/流体云用的小图标：与 App 日历字形一致，24dp 视口，避免自适应图标做小图标时显示异常 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <group
+        android:scaleX="0.5"
+        android:scaleY="0.5">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M39,8h-2V4h-4v4H15V4h-4v4H9c-2.2,0 -4,1.8 -4,4v28c0,2.2 1.8,4 4,4h30c2.2,0 4,-1.8 4,-4V12c0,-2.2 -1.8,-4 -4,-4zM39,40H9V18h30v22z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M12,22h10v7H12zM26,22h10v4H26zM12,32h10v5H12zM26,29h10v8H26z" />
+    </group>
+</vector>

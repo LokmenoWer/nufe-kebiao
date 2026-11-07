@@ -150,19 +150,20 @@ internal fun ReminderSection(
             modifier = Modifier.padding(vertical = 12.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
+        val fluidAvailable = isColorOsLike() && Build.VERSION.SDK_INT >= 36
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(
                 Modifier
                     .weight(1f)
-                    .alpha(if (alarmEnabled) 1f else 0.45f),
+                    .alpha(if (alarmEnabled && fluidAvailable) 1f else 0.45f),
             ) {
                 Text("灵动显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(2.dp))
                 Hint(
-                    if (Build.VERSION.SDK_INT >= 36) {
-                        "ColorOS 16+ 支持流体云实时状态，其他系统自动使用普通通知；开课 5 分钟后自动收起。"
-                    } else {
-                        "需要 Android 16 / ColorOS 16 或 HyperOS 3。"
+                    when {
+                        !isColorOsLike() -> "仅 ColorOS 16+ 的流体云可用；当前系统将使用普通通知。"
+                        Build.VERSION.SDK_INT < 36 -> "需要 Android 16（ColorOS 16）。"
+                        else -> "开课前后在状态栏显示流体云卡片，开课 5 分钟后自动收起。"
                     },
                 )
                 if (!alarmEnabled) {
@@ -176,7 +177,7 @@ internal fun ReminderSection(
                     view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                     onLiveUpdateChange(it)
                 },
-                enabled = alarmEnabled && Build.VERSION.SDK_INT >= 36,
+                enabled = alarmEnabled && fluidAvailable,
             )
         }
         if (Build.VERSION.SDK_INT >= 36 && liveUpdate && alarmEnabled &&

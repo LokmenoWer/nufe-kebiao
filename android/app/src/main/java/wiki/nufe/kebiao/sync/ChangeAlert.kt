@@ -28,7 +28,7 @@ object ChangeAlert {
         val text = if (weeks.isEmpty()) "本机发现课程调整，点击查看详细信息。"
         else "第${weeks.joinToString("、")}周调整了课程，点击查看详细信息。"
         val notification = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_notify)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle("课表有变化")
             .setContentText(text)
             .setContentIntent(open)

@@ -280,7 +280,7 @@ internal fun HomeScreen(
         HeaderBlock()
         Spacer(Modifier.height(12.dp))
         EnterUp { StatusPill(plan, now) }
-        if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(18.dp))
         if (message != null) {
             Text(
                 message,
@@ -351,19 +351,25 @@ internal fun HeaderBlock() {
 
 @Composable
 private fun StatusPill(plan: DayPlan?, now: Now) {
-    val slot = plan?.slots?.firstOrNull() ?: return
-    val date = plan.day?.date ?: return
-    val target = when (slot.state) {
-        State.LIVE -> lessonMs(date, slot.lesson.end)
-        State.NEXT -> lessonMs(date, slot.lesson.start)
-        else -> return
-    }
-    val remain = target - now.ms
-    if (remain <= 0) return
-    val text = when (slot.state) {
-        State.LIVE -> "正在上课 · 剩 ${remainText(remain)}"
-        State.NEXT -> "准备上课 · ${remainText(remain)}后"
-        else -> return
+    val slot = plan?.slots?.firstOrNull()
+    val date = plan?.day?.date
+    var text = "今日无事"
+    var active = false
+    if (slot != null && date != null) {
+        val target = when (slot.state) {
+            State.LIVE -> lessonMs(date, slot.lesson.end)
+            State.NEXT -> lessonMs(date, slot.lesson.start)
+            else -> null
+        }
+        val remain = target?.let { it - now.ms }
+        if (remain != null && remain > 0) {
+            active = true
+            text = if (slot.state == State.LIVE) {
+                "正在上课 · 剩 ${remainText(remain)}"
+            } else {
+                "准备上课 · ${remainText(remain)}后"
+            }
+        }
     }
     val dark = isSystemInDarkTheme()
     Surface(
@@ -375,7 +381,10 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF7BD88F)))
+            Box(
+                Modifier.size(6.dp).clip(CircleShape)
+                    .background(if (active) Color(0xFF7BD88F) else Color(0xFF9E9EA7)),
+            )
             Spacer(Modifier.width(8.dp))
             Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
@@ -600,16 +609,27 @@ private fun TodayCardView(
                 // 滑到本周、下周以外的周时，一键回到本周
                 if (currentWeekNo != null && currentWeekNo in 1..weeks.size && weekTitle != "本周" && weekTitle != "下周") {
                     Spacer(Modifier.width(8.dp))
-                    TextButton(
-                        onClick = {
-                            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                            weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
-                            preferWeek = currentWeekNo
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp),
+                    // 高度固定 28dp（与右侧开关同一行，不撑高标题行，避免滑周时下面课表跳动）；
+                    // 波纹裁成胶囊形，点击区就是整个胶囊。
+                    Box(
+                        modifier = Modifier
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                                weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
+                                preferWeek = currentWeekNo
+                            }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text("回到本周", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            "回到本周",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
             }

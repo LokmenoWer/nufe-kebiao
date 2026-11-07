@@ -52,7 +52,7 @@ object LoginAlert {
         val target = Intent(context, wiki.nufe.kebiao.ui.SchoolLoginActivity::class.java)
         val open = PendingIntent.getActivity(context, NOTIFICATION_ID, target, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val notification = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_notify)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle(if (payload.status == "captcha") "课表需要重新验证" else "课表登录已失效")
             .setContentText("点这里在本机重新登录学校；已缓存的课表仍可离线查看。")
             .setContentIntent(open)

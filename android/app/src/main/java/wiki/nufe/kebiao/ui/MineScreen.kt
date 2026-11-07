@@ -75,6 +75,8 @@ internal fun MineScreen(
     onRhythmClockChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
+    var hostingVersion by remember { mutableIntStateOf(0) }
+    val hostingState = remember(hostingVersion) { wiki.nufe.kebiao.data.Hosting.state(context) }
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
     var showFeedback by remember { mutableStateOf(false) }
@@ -160,7 +162,15 @@ internal fun MineScreen(
             Spacer(Modifier.height(14.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             Spacer(Modifier.height(4.dp))
-            Hint("所有个人信息仅保存在本地")
+            Hint(
+                when {
+                    hostingState.hosted ->
+                        "当前已连接 nufe课表 服务器：学校登录状态与课表会加密同步到服务器，可在「互助与同步」里取消。"
+                    hostingState.dataSource ->
+                        "当前已连接 nufe课表 服务器：课表会推送到服务器供 iOS 小组件与日历使用，服务器不保存学校登录状态，可在「互助与同步」里取消。"
+                    else -> "所有个人信息仅保存在本地"
+                },
+            )
         }
 
         Spacer(Modifier.height(14.dp))
@@ -226,9 +236,7 @@ internal fun MineScreen(
             }
         }
         Spacer(Modifier.height(14.dp))
-        AssistSection(onLogin = onLogin)
-        Spacer(Modifier.height(14.dp))
-        DataSourceSection(repo = repo, onLogin = onLogin)
+        AssistSection(repo = repo, onLogin = onLogin, onHostingChanged = { hostingVersion++ })
         Spacer(Modifier.height(14.dp))
         WidgetSection()
         Spacer(Modifier.height(14.dp))
@@ -242,8 +250,8 @@ internal fun MineScreen(
                 alarmEnabled = enabled
                 repo.alarmEnabled = enabled
                 if (enabled && minutes == 0) {
-                    minutes = 10
-                    repo.remindMinutes = 10
+                    minutes = Repository.DEFAULT_REMIND_MINUTES
+                    repo.remindMinutes = Repository.DEFAULT_REMIND_MINUTES
                 }
                 if (!enabled) LiveUpdates.cancel(context)
                 Reminders.rescheduleAsync(context)
@@ -301,10 +309,21 @@ internal fun MineScreen(
                     )
                 }
             }
+            if (isColorOsLike()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+                PermissionRow(
+                    title = "自启动",
+                    detail = "打开系统设置 → 应用 → 自启动，勾选本 app",
+                    allowed = false,
+                    statusOverride = "请确认",
+                ) {
+                    openAutoStartSettings(context)
+                }
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             PermissionRow(
                 title = "后台运行",
-                detail = "保持提醒和桌面组件在后台更新",
+                detail = "在耗电管理或后台行为中，设置为完全允许后台行为",
                 allowed = batteryOk,
             ) {
                 openBatteryOptimizationSettings(context)
@@ -495,6 +514,7 @@ private fun PermissionRow(
     title: String,
     detail: String,
     allowed: Boolean,
+    statusOverride: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
@@ -510,9 +530,13 @@ private fun PermissionRow(
             Text(detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(
-            if (allowed) "已允许" else "未允许",
+            statusOverride ?: if (allowed) "已允许" else "未允许",
             fontSize = 12.sp,
-            color = if (allowed) SuccessGreen else WarmOrange,
+            color = when {
+                statusOverride != null -> MaterialTheme.colorScheme.onSurfaceVariant
+                allowed -> SuccessGreen
+                else -> WarmOrange
+            },
         )
         Spacer(Modifier.width(4.dp))
         Icon(

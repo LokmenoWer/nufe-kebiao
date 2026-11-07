@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 系统自己每秒走的倒计时：Glance 没有计时器组件，嵌一个 RemoteViews 的 Chronometer -->
+<!-- 系统自己走的倒计时（Chronometer），实时刷新，不需要每秒重画小组件 -->
 <Chronometer xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/chrono"
     android:layout_width="wrap_content"

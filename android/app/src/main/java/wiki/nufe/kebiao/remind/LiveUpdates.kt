@@ -60,6 +60,12 @@ object LiveUpdates {
         return manager.canPostPromotedNotifications()
     }
 
+    /** 守护服务被系统重启时用：用户仍开着提醒和灵动显示、且系统仍允许流体云，才恢复卡片。 */
+    internal fun restorable(context: Context): Boolean {
+        val repo = Repository(context)
+        return repo.alarmEnabled && repo.liveUpdateEnabled && available(context)
+    }
+
     private fun isColorOs(): Boolean {
         val maker = Build.MANUFACTURER.lowercase()
         val brand = Build.BRAND.lowercase()
@@ -72,7 +78,7 @@ object LiveUpdates {
         if (!available(context)) return false
         val repo = Repository(context)
         val payload = repo.cached()?.payload ?: return false
-        val lead = if (repo.remindMinutes > 0) repo.remindMinutes else 10
+        val lead = if (repo.remindMinutes > 0) repo.remindMinutes else Repository.DEFAULT_REMIND_MINUTES
         val item = Reminders.plan(payload, Now.current(), lead).firstOrNull() ?: return false
         return post(context, item)
     }
@@ -151,22 +157,13 @@ object LiveUpdates {
         endMs: Long,
     ): Notification? {
         if (Build.VERSION.SDK_INT < 36) return null
-        val progressStyle = Notification.ProgressStyle()
-            .setProgress(0)
-            .setProgressSegments(
-                listOf(
-                    Notification.ProgressStyle.Segment(50).setColor(0xFF4B63E0.toInt()),
-                    Notification.ProgressStyle.Segment(50).setColor(0xFFB9C3FF.toInt()),
-                ),
-            )
-            .setProgressTrackerIcon(Icon.createWithResource(context, R.drawable.ic_notify))
-            .setStyledByProgress(true)
-
         val room = item.room.ifBlank { "地点待定" }
-        val changed = if (item.changed) " · 已调课${item.was?.let { "（$it）" } ?: ""}" else ""
-        val title = "${item.start}–${item.end} · $room"
-        val course = (item.name.ifBlank { "下一节课" }) + changed
-        val status = if (phase == Phase.BEFORE) "准备上课" else "正在上课"
+        val changedText = if (item.changed) "（已调课${item.was?.let { "：$it" } ?: ""}）" else ""
+        val course = (item.name.ifBlank { "下一节课" }) + changedText
+        val meta = "${item.start}–${item.end} · $room"
+        val remain = remainingMinutes(phase, startMs, endMs)
+        val status = if (phase == Phase.BEFORE) "准备上课 · 剩 $remain 分钟" else "正在上课 · 还有 $remain 分钟下课"
+        val short = if (phase == Phase.BEFORE) "剩 $remain 分钟" else "正在上课"
         val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
         val timeout = (dismissMs - System.currentTimeMillis()).coerceAtLeast(1L)
         val open = PendingIntent.getActivity(
@@ -176,21 +173,18 @@ object LiveUpdates {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val builder = Notification.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle(title)
-            .setContentText(status)
-            .setSubText(course)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
+            .setLargeIcon(Icon.createWithBitmap(Reminders.appIconBitmap(context)))
+            .setContentTitle(course)
+            .setContentText(meta)
+            .setSubText(status)
             .setContentIntent(open)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOnlyAlertOnce(true)
-            .setStyle(progressStyle)
-            .setWhen(if (phase == Phase.BEFORE) startMs else endMs)
-            .setShowWhen(true)
-            .setUsesChronometer(true)
-            .setChronometerCountDown(true)
+            .setShowWhen(false)   // 统一到分钟：不显示秒级倒计时
             .setTimeoutAfter(timeout)
-        applyPromotedFlags(builder, "剩${remainingMinutes(phase, startMs, endMs)}分钟")
+        applyPromotedFlags(builder, short)
         return builder.build()
     }
 
@@ -298,27 +292,35 @@ object LiveUpdates {
             .apply()
     }
 
-    /** 打开 App 时调用：正在展示流体云就补上前台守护，防止清理后台时进程被杀。 */
-    internal fun ensureGuard(context: Context) {
+    /** 读出“当前还在展示”的流体云卡片数据；已过收起时间或没数据时返回 null。供重启后恢复用。 */
+    internal fun savedItem(context: Context): Reminders.Item? {
         val prefs = context.getSharedPreferences(GUARD_PREFS, Context.MODE_PRIVATE)
-        val dismissMs = prefs.getLong("dismiss", 0L)
-        if (dismissMs <= System.currentTimeMillis()) {
-            prefs.edit().clear().apply()
-            return
-        }
-        val item = Reminders.Item(
+        if (prefs.getLong("dismiss", 0L) <= System.currentTimeMillis()) return null
+        val date = prefs.getString("date", "").orEmpty()
+        val start = prefs.getString("start", "").orEmpty()
+        val end = prefs.getString("end", "").orEmpty()
+        if (date.isBlank() || start.isBlank() || end.isBlank()) return null
+        return Reminders.Item(
             atMs = prefs.getLong("at", 0L),
             title = "",
             text = "",
-            date = prefs.getString("date", "").orEmpty(),
-            start = prefs.getString("start", "").orEmpty(),
-            end = prefs.getString("end", "").orEmpty(),
+            date = date,
+            start = start,
+            end = end,
             name = prefs.getString("name", "").orEmpty(),
             room = prefs.getString("room", "").orEmpty(),
             changed = prefs.getBoolean("changed", false),
             was = prefs.getString("was", null),
         )
-        if (item.date.isBlank() || item.start.isBlank() || item.end.isBlank()) return
+    }
+
+    /** 打开 App 时调用：正在展示流体云就补上前台守护，防止清理后台时进程被杀。 */
+    internal fun ensureGuard(context: Context) {
+        val item = savedItem(context)
+        if (item == null) {
+            context.getSharedPreferences(GUARD_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+            return
+        }
         startGuard(context, item)
     }
 
