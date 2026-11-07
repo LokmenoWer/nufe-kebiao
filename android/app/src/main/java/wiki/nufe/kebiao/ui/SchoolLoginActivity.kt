@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -32,12 +33,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import java.io.ByteArrayInputStream
+import android.widget.Toast
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,6 +51,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import org.json.JSONTokener
 import wiki.nufe.kebiao.data.CasSessionManager
+import wiki.nufe.kebiao.data.Hosting
 import wiki.nufe.kebiao.data.LocalFetch
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.SchoolUrls
@@ -59,6 +66,7 @@ class SchoolLoginActivity : ComponentActivity() {
     private var importing by mutableStateOf(false)
     private var pageLoading by mutableStateOf(true)
     private var captureJob: Job? = null
+    private var hostWanted by mutableStateOf(false)
     private var navigationCount = 0
     private var completed = false
 
@@ -66,6 +74,7 @@ class SchoolLoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        hostWanted = Hosting.wanted(this) || Hosting.active(this)
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -133,6 +142,21 @@ class SchoolLoginActivity : ComponentActivity() {
                             Button(onClick = { captureWhenReady() }, enabled = !importing) { Text("导入课表") }
                         }
                         Text(status, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = hostWanted, onCheckedChange = { hostWanted = it }, enabled = !importing)
+                            Column {
+                                Text("同时托管到 nufe课表 服务器（双重保障）", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "把本次学校登录状态加密交给服务器：手机刷新失败时由服务器和同学们的手机继续帮你更新，" +
+                                        "可随时在「我的」中取消。不勾选则一切只留在本机。",
+                                    style = MaterialTheme.typography.bodySmall, fontSize = 11.sp, lineHeight = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                         if (importing || pageLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
                         AndroidView(factory = { web }, modifier = Modifier.fillMaxWidth().weight(1f))
                     }
@@ -195,6 +219,7 @@ class SchoolLoginActivity : ComponentActivity() {
                     CasSessionManager.captureWebView(), web.settings.userAgentString)
             }
             completed = true
+            applyHosting()
             Reminders.rescheduleAsync(this)
             Sync.schedule(this)
             Sync.redraw(this)
@@ -209,6 +234,24 @@ class SchoolLoginActivity : ComponentActivity() {
         } finally {
             importing = false
         }
+    }
+
+    /** 勾了就托管（已托管的用这次的新会话更新）；没勾而之前托管过，就取消。失败不影响本机导入。 */
+    private suspend fun applyHosting() {
+        val app = applicationContext
+        if (!hostWanted) {
+            Hosting.setWanted(app, false)
+            if (Hosting.active(app)) withContext(Dispatchers.IO) { Hosting.leave(app) }
+            return
+        }
+        Hosting.setWanted(app, true)
+        status = "课表已保存，正在托管到 nufe课表 服务器…"
+        val result = withContext(Dispatchers.IO) {
+            runCatching { Hosting.enroll(app, CasSessionManager(app).load()) }
+        }
+        val message = result.fold({ "已托管到 nufe课表 服务器，双重保障已开启" },
+            { "课表已保存在本机；托管失败：${it.message ?: "网络错误"}" })
+        Toast.makeText(app, message, Toast.LENGTH_LONG).show()
     }
 
     private suspend fun readInPage(semester: Int): JSONObject {

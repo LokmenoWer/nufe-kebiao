@@ -77,7 +77,9 @@ class Repository(context: Context) {
     fun cached(): Snapshot? {
         val data = stored()
         if (data != null) return Snapshot(
-            TimetableParser.payload(data, nowMs = Now.current().ms, status = if (needsLogin) "needs_rebind" else "ok"),
+            // 本机会话过期但本站托管那份还好：不催重新登录（双层兜底的意义）
+            TimetableParser.payload(data, nowMs = Now.current().ms,
+                status = if (needsLogin && !Hosting.coversForLocal(app)) "needs_rebind" else "ok"),
             data.optLong("updated_at") * 1000,
             offline = prefs.getBoolean("local_offline", false),
         )
@@ -92,7 +94,10 @@ class Repository(context: Context) {
 
     suspend fun fetch(refresh: Boolean = false): Snapshot? = withContext(Dispatchers.IO) {
         syncMutex.withLock {
-            if (needsLogin) return@withLock cached().also { it?.let { LoginAlert.update(app, it.payload) } }
+            if (needsLogin) {
+                hostedFallback(generation.get())
+                return@withLock cached().also { it?.let { LoginAlert.update(app, it.payload) } }
+            }
             val current = cached()
             if (!refresh && current != null && !current.offline && System.currentTimeMillis() - current.fetchedAtMs < 2 * 60_000L) {
                 return@withLock current
@@ -123,6 +128,7 @@ class Repository(context: Context) {
                 val keepalive = runCatching { client.touchSso() }.getOrDefault(true)
                 if (!keepalive) Diag.w("sso keepalive refused; CASTGC likely expired")
                 prefs.edit().putBoolean("needs_login", !keepalive).putBoolean("local_offline", false).remove("local_error").apply()
+                syncHosting(jar)
                 cached().also { it?.let { snap ->
                     LoginAlert.update(app, snap.payload)
                     ChangeAlert.update(app, snap.payload)
@@ -132,6 +138,7 @@ class Repository(context: Context) {
             } catch (_: SchoolSessionExpired) {
                 prefs.edit().putBoolean("needs_login", true).putBoolean("local_offline", true)
                     .putString("local_error", "学校登录已失效，请重新登录；本地课表仍可离线查看").apply()
+                hostedFallback(epoch)
                 cached().also { it?.let { LoginAlert.update(app, it.payload) } }
             } catch (error: Exception) {
                 Diag.w("local refresh failed: ${error.javaClass.simpleName}")
@@ -141,9 +148,47 @@ class Repository(context: Context) {
                     else -> "课表解析失败，已保留本地课表；请尝试重新登录导入"
                 }
                 prefs.edit().putBoolean("local_offline", true).putString("local_error", message).apply()
-                cached()?.copy(offline = true)
+                if (hostedFallback(epoch)) cached() else cached()?.copy(offline = true)
             }
         }
+    }
+
+    /**
+     * 双层兜底之一：本机刷新失败时，若已托管且本站那份比本机新，就用本站的。返回是否换上了本站的课表。
+     * 只在 syncMutex 里调用。
+     */
+    private fun hostedFallback(epoch: Long): Boolean {
+        if (!Hosting.active(app)) return false
+        val server = try {
+            Hosting.pull(app)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return false
+        }
+        val previous = stored()
+        val fetchedAt = server.optDouble("fetched_at", 0.0).toLong()
+        if (fetchedAt <= 0 || (previous != null && fetchedAt <= previous.optLong("updated_at"))) return false
+        val timetable = runCatching { TimetableParser.fromServer(server, previous) }.getOrNull() ?: return false
+        if (TimetableParser.wouldWipeCurrentSemester(previous, timetable)) return false
+        if (!saveTimetable(timetable, epoch)) return false
+        Diag.i("timetable updated from hosted server copy")
+        prefs.edit().putBoolean("local_offline", false)
+            .putString("local_error", "本机未能直连学校，已用 nufe课表 服务器托管的课表更新").apply()
+        cached()?.let { ChangeAlert.update(app, it.payload) }
+        return true
+    }
+
+    /** 双层兜底之二：本机刚刷新成功、而本站那边的登录态坏了，就把本机的新会话再交一次。 */
+    private fun syncHosting(jar: SchoolCookieJar) {
+        if (!Hosting.active(app) || !Hosting.recheckDue(app)) return
+        runCatching {
+            val server = Hosting.pull(app)
+            if (server.optString("status") != "ok") {
+                Hosting.enroll(app, jar)
+                Diag.i("hosting re-enrolled with fresh local session")
+            }
+        }.onFailure { Diag.w("hosting sync failed: ${it.javaClass.simpleName}") }
     }
 
     suspend fun importFromWebView(html: String, jar: SchoolCookieJar, agent: String): Snapshot = withContext(Dispatchers.IO) {
@@ -204,6 +249,12 @@ class Repository(context: Context) {
         prefs.edit().remove("school_user_agent").remove("local_error").remove("local_offline")
             .remove("change_alert_at").remove("change_seen").putBoolean("needs_login", true).apply()
         DeviceKeys.reset()
+        if (Hosting.active(app)) {
+            // 先签最后一次“取消托管”，再删签名密钥；放到后台线程，不卡清除按钮
+            Thread({ Hosting.leave(app); DeviceKeys.resetSigning() }, "hosting-leave").start()
+        } else {
+            DeviceKeys.resetSigning()
+        }
         LoginAlert.clear(app)
         ChangeAlert.clear(app)
     }

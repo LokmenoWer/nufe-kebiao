@@ -56,6 +56,15 @@ class MainActivity : ComponentActivity() {
         if (debuggable && intent?.getBooleanExtra("assist_now", false) == true) {
             wiki.nufe.kebiao.assist.AssistWorker.runOnce(this)
         }
+        // 只在调试包里：--ez host_now true 用本机已存的学校会话立即托管一次，再刷新（验证双层兜底）
+        if (debuggable && intent?.getBooleanExtra("host_now", false) == true) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                val app = applicationContext
+                val r = runCatching { wiki.nufe.kebiao.data.Hosting.enroll(app, wiki.nufe.kebiao.data.CasSessionManager(app).load()) }
+                Diag.i("debug host_now: ${r.exceptionOrNull()?.message ?: "ok"}")
+                wiki.nufe.kebiao.sync.Sync.now(app, refresh = true)
+            }
+        }
         publishWidgetPreviews()
     }
 
