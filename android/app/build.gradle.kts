@@ -23,8 +23,8 @@ android {
         applicationId = "wiki.nufe.kebiao"
         minSdk = 26
         targetSdk = 37
-        versionCode = 24
-        versionName = "2.1.0"
+        versionCode = 25
+        versionName = "2.1.1"
         buildConfigField("String", "SITE", "\"$kebiaoSite\"")
     }
 
