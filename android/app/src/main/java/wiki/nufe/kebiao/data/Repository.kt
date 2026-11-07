@@ -158,7 +158,8 @@ class Repository(context: Context) {
      * 只在 syncMutex 里调用。
      */
     private fun hostedFallback(epoch: Long): Boolean {
-        if (!Hosting.active(app)) return false
+        // 只当数据源（本站不存登录态）时，本站那份就是手机自己推上去的，没必要拉回来
+        if (!Hosting.state(app).hosted) return false
         val server = try {
             Hosting.pull(app)
         } catch (cancelled: CancellationException) {
@@ -181,15 +182,28 @@ class Repository(context: Context) {
 
     /** 双层兜底之二：本机刚刷新成功、而本站那边的登录态坏了，就把本机的新会话再交一次。 */
     private fun syncHosting(jar: SchoolCookieJar) {
-        if (!Hosting.active(app) || !Hosting.recheckDue(app)) return
-        runCatching {
-            val server = Hosting.pull(app)
-            if (server.optString("status") != "ok") {
-                Hosting.enroll(app, jar)
-                Diag.i("hosting re-enrolled with fresh local session")
-            }
-        }.onFailure { Diag.w("hosting sync failed: ${it.javaClass.simpleName}") }
+        if (Hosting.active(app) && Hosting.recheckDue(app)) {
+            runCatching {
+                val server = Hosting.pull(app)
+                if (server.optString("status") != "ok") {
+                    Hosting.enroll(app, jar, keepSession = true)
+                    Diag.i("hosting re-enrolled with fresh local session")
+                }
+            }.onFailure { Diag.w("hosting sync failed: ${it.javaClass.simpleName}") }
+        }
+        pushIfSource()
     }
+
+    /** 设备数据源：本机课表比上次推送的新就推给本站（iOS 小组件、日历订阅读这份）。失败下次再推。 */
+    private fun pushIfSource() {
+        if (!Hosting.dataSource(app)) return
+        val data = stored() ?: return
+        runCatching { if (Hosting.push(app, data)) Diag.i("timetable pushed to server as data source") }
+            .onFailure { Diag.w("data source push failed: ${it.javaClass.simpleName}") }
+    }
+
+    /** 界面上刚打开数据源 / 刚导入时立刻推一次。 */
+    suspend fun pushToServer() = withContext(Dispatchers.IO) { syncMutex.withLock { pushIfSource() } }
 
     suspend fun importFromWebView(html: String, jar: SchoolCookieJar, agent: String): Snapshot = withContext(Dispatchers.IO) {
         syncMutex.withLock {

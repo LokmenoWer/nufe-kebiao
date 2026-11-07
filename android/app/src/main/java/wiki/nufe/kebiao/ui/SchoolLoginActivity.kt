@@ -236,19 +236,32 @@ class SchoolLoginActivity : ComponentActivity() {
         }
     }
 
-    /** 勾了就托管（已托管的用这次的新会话更新）；没勾而之前托管过，就取消。失败不影响本机导入。 */
+    /**
+     * 勾了就托管（已托管的用这次的新会话更新）；没勾而之前托管过：仍当数据源就只删本站的登录态，否则整个取消。
+     * 当数据源时顺手把刚导入的课表推上去。失败都不影响本机导入。
+     */
     private suspend fun applyHosting() {
         val app = applicationContext
+        val before = Hosting.state(app)
         if (!hostWanted) {
             Hosting.setWanted(app, false)
-            if (Hosting.active(app)) withContext(Dispatchers.IO) { Hosting.leave(app) }
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    when {
+                        before.dataSource && before.hosted -> Hosting.forgetSession(app)
+                        before.active && !before.dataSource -> Hosting.leave(app)
+                    }
+                }
+            }
+            if (before.dataSource) Repository(app).pushToServer()
             return
         }
         Hosting.setWanted(app, true)
         status = "课表已保存，正在托管到 nufe课表 服务器…"
         val result = withContext(Dispatchers.IO) {
-            runCatching { Hosting.enroll(app, CasSessionManager(app).load()) }
+            runCatching { Hosting.enroll(app, CasSessionManager(app).load(), keepSession = true) }
         }
+        if (before.dataSource) Repository(app).pushToServer()
         val message = result.fold({ "已托管到 nufe课表 服务器，双重保障已开启" },
             { "课表已保存在本机；托管失败：${it.message ?: "网络错误"}" })
         Toast.makeText(app, message, Toast.LENGTH_LONG).show()

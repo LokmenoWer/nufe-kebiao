@@ -63,24 +63,38 @@ internal fun AssistSection(onLogin: () -> Unit) {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     when {
-                        !hosting.active -> "未开启"
+                        leaving -> "处理中…"
+                        !hosting.hosted -> "未开启"
                         hosting.status == "ok" -> "已开启 · 服务器那份正常更新"
                         else -> "已开启 · 服务器那份暂时无法刷新，本机刷新成功后会自动补交"
                     },
                     fontSize = 11.sp,
-                    color = if (hosting.active && hosting.status == "ok") MaterialTheme.colorScheme.primary
+                    color = if (hosting.hosted && hosting.status == "ok") MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (hosting.active) {
-                TextButton(onClick = { confirmLeave = true }, enabled = !leaving) { Text(if (leaving) "取消中…" else "取消托管") }
+            if (hosting.hosted) {
+                TextButton(onClick = { confirmLeave = true }, enabled = !leaving) { Text("取消托管") }
             } else {
-                TextButton(onClick = onLogin) { Text("去开启") }
+                TextButton(enabled = !leaving, onClick = {
+                    // 本机学校会话还有效就直接用它托管；不行再去学校登录页（那里勾选托管）
+                    leaving = true
+                    scope.launch {
+                        val ok = withContext(Dispatchers.IO) {
+                            runCatching {
+                                Hosting.enroll(context, wiki.nufe.kebiao.data.CasSessionManager(context).load(), keepSession = true)
+                            }.isSuccess
+                        }
+                        leaving = false
+                        hostingVersion++
+                        if (!ok) onLogin()
+                    }
+                }) { Text("去开启") }
             }
         }
         Spacer(Modifier.height(4.dp))
         Hint(
-            if (hosting.active) "手机直连学校失败时，App 会改用服务器托管的课表；服务器的登录态失效时，本机下次刷新成功会自动再交一次。"
+            if (hosting.hosted) "手机直连学校失败时，App 会改用服务器托管的课表；服务器的登录态失效时，本机下次刷新成功会自动再交一次。"
             else hosting.error ?: "重新前往教务系统导入课表时，勾选“同时托管到 nufe课表 服务器”即可开启：本机刷新失败时由服务器和同学们的手机帮你继续更新。",
         )
 
@@ -132,7 +146,10 @@ internal fun AssistSection(onLogin: () -> Unit) {
                     confirmLeave = false
                     leaving = true
                     scope.launch {
-                        withContext(Dispatchers.IO) { Hosting.leave(context) }
+                        withContext(Dispatchers.IO) {
+                            // 还在给 iOS 小组件 / 日历供数：只删本站的登录态，设备与链接保留
+                            if (Hosting.dataSource(context)) runCatching { Hosting.forgetSession(context) } else Hosting.leave(context)
+                        }
                         leaving = false
                         hostingVersion++
                     }

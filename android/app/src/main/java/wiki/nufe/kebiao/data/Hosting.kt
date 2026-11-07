@@ -28,11 +28,19 @@ object Hosting {
     private const val KEY_CHECKED = "server_checked_at"
     private const val KEY_SERVER_OK = "server_ok_at"
     private const val KEY_ERROR = "server_error"
+    private const val KEY_KEEP = "keep_session"        // 本站是否存着学校登录态（服务器托管）
+    private const val KEY_SOURCE = "data_source"       // 这台手机是否给 iOS 小组件 / 日历供数
+    private const val KEY_PUSHED = "pushed_updated_at"
+    private const val KEY_PUSHED_AT = "pushed_at"
     const val RECHECK_MS = 6 * 3600_000L
 
     class HostingRejected(message: String) : IOException(message)
 
-    data class State(val active: Boolean, val status: String?, val serverOkAtMs: Long, val error: String?)
+    /** active：本机和本站已绑定；hosted：本站存着学校登录态；dataSource：手机推送课表。 */
+    data class State(
+        val active: Boolean, val status: String?, val serverOkAtMs: Long, val error: String?,
+        val hosted: Boolean, val dataSource: Boolean, val pushedAtMs: Long,
+    )
 
     private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -45,20 +53,28 @@ object Hosting {
 
     fun state(context: Context): State {
         val p = prefs(context)
-        return State(active(context), p.getString(KEY_STATUS, null), p.getLong(KEY_SERVER_OK, 0L), p.getString(KEY_ERROR, null))
+        val active = active(context)
+        return State(active, p.getString(KEY_STATUS, null), p.getLong(KEY_SERVER_OK, 0L), p.getString(KEY_ERROR, null),
+            active && p.getBoolean(KEY_KEEP, true), active && p.getBoolean(KEY_SOURCE, false), p.getLong(KEY_PUSHED_AT, 0L))
     }
 
     /** 本站那份最近 24 小时内还是好的：本机会话过期也不必催用户重新登录。 */
     fun coversForLocal(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean {
         val s = state(context)
-        return s.active && s.status == "ok" && nowMs - s.serverOkAtMs < 24 * 3600_000L
+        return s.hosted && s.status == "ok" && nowMs - s.serverOkAtMs < 24 * 3600_000L
     }
 
     fun recheckDue(context: Context, nowMs: Long = System.currentTimeMillis()) =
-        nowMs - prefs(context).getLong(KEY_CHECKED, 0L) > RECHECK_MS || prefs(context).getString(KEY_STATUS, null) != "ok"
+        state(context).hosted && (nowMs - prefs(context).getLong(KEY_CHECKED, 0L) > RECHECK_MS ||
+            prefs(context).getString(KEY_STATUS, null) != "ok")
 
-    /** 把本机的学校 cookie 交给本站托管，并绑定这台设备。阻塞调用。 */
-    fun enroll(context: Context, jar: SchoolCookieJar) {
+    fun dataSource(context: Context) = state(context).dataSource
+
+    /**
+     * 用本机的学校会话向本站证明身份并绑定这台设备。阻塞调用。
+     * keepSession=true 是服务器托管（本站存登录态、后台替你刷）；false 只验明身份，本站不留登录态，课表靠手机推送。
+     */
+    fun enroll(context: Context, jar: SchoolCookieJar, keepSession: Boolean = true, dataSource: Boolean? = null) {
         val app = context.applicationContext
         val cookies = JSONArray()
         val stored = jar.serialize()
@@ -69,7 +85,7 @@ object Hosting {
                 .put("expires", if (c.optBoolean("persistent")) c.getLong("expiresAt") / 1000 else JSONObject.NULL))
         }
         val body = JSONObject().put("cookies", cookies).put("public_key", DeviceKeys.publicKey())
-            .put("name", "${Build.MANUFACTURER} ${Build.MODEL}".trim().take(64))
+            .put("name", "${Build.MANUFACTURER} ${Build.MODEL}".trim().take(64)).put("keep_session", keepSession)
         val request = Request.Builder().url("${Community.site(app)}/api/app/enroll")
             .header("User-Agent", "nufe-kebiao-android/2")
             .post(body.toString().toRequestBody(Community.JSON)).build()
@@ -79,7 +95,8 @@ object Hosting {
             val now = System.currentTimeMillis()
             prefs(app).edit().putString(KEY_TOKEN, reply.getString("token")).putString(KEY_DEVICE, reply.getString("device_id"))
                 .putString(KEY_STATUS, "ok").putLong(KEY_CHECKED, now).putLong(KEY_SERVER_OK, now)
-                .remove(KEY_ERROR).putBoolean(KEY_WANTED, true).apply()
+                .remove(KEY_ERROR).putBoolean(KEY_WANTED, keepSession).putBoolean(KEY_KEEP, keepSession)
+                .apply { dataSource?.let { putBoolean(KEY_SOURCE, it) } }.remove(KEY_PUSHED).apply()
         }
     }
 
@@ -104,6 +121,59 @@ object Hosting {
         }
     }
 
+    /** 打开 / 关闭“给 iOS 小组件与日历供数”。已绑定时只改本机开关；未绑定时调用方先 enroll(keepSession=false)。 */
+    fun setDataSource(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_SOURCE, enabled).remove(KEY_PUSHED).apply()
+    }
+
+    /** 关掉服务器托管但保留数据源：本站删掉学校登录态，设备与链接不动。 */
+    fun forgetSession(context: Context) {
+        val app = context.applicationContext
+        val token = prefs(app).getString(KEY_TOKEN, null) ?: return
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/forget-session")
+            .post(ByteArray(0).toRequestBody(null)))
+        Community.http.newCall(request.build()).execute().use { if (!it.isSuccessful) throw IOException("HTTP ${it.code}") }
+        prefs(app).edit().putBoolean(KEY_KEEP, false).putBoolean(KEY_WANTED, false).remove(KEY_STATUS).apply()
+    }
+
+    /**
+     * 设备数据源：把本机课表推给本站，供 iOS 小组件与日历订阅读取。只在课表比上次推送的新时才发。
+     * 返回是否真的推了。阻塞调用。
+     */
+    fun push(context: Context, timetable: JSONObject): Boolean {
+        val app = context.applicationContext
+        if (!dataSource(app)) return false
+        val updated = timetable.optLong("updated_at")
+        if (updated <= 0 || updated <= prefs(app).getLong(KEY_PUSHED, 0L)) return false
+        val token = prefs(app).getString(KEY_TOKEN, null) ?: return false
+        val body = JSONObject()
+        for (key in listOf("semester_id", "semester_name", "week1_monday", "activities", "student", "updated_at")) {
+            body.put(key, timetable.opt(key))
+        }
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/push")
+            .post(body.toString().toRequestBody(Community.JSON)))
+        Community.http.newCall(request.build()).execute().use { response ->
+            if (response.code == 401 || response.code == 404) {
+                forget(app, "服务器上的绑定已失效，请在“我的”里重新开启")
+                return false
+            }
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+        }
+        prefs(app).edit().putLong(KEY_PUSHED, updated).putLong(KEY_PUSHED_AT, System.currentTimeMillis()).apply()
+        return true
+    }
+
+    /** iOS 小组件 / 日历订阅链接（本人设备签名才给）。 */
+    fun links(context: Context): JSONObject {
+        val app = context.applicationContext
+        val token = prefs(app).getString(KEY_TOKEN, null) ?: throw HostingRejected("未绑定")
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/links").get())
+        Community.http.newCall(request.build()).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            return JSONObject(response.body?.string().orEmpty())
+        }
+    }
+
     /** 取消托管：让服务器删掉登录态、撤销这台设备。网络失败也清本机记录，服务器那边的设备之后会因签名失效无人使用。 */
     fun leave(context: Context): Boolean {
         val app = context.applicationContext
@@ -114,12 +184,13 @@ object Hosting {
             Community.http.newCall(request.build()).execute().use { it.isSuccessful }
         }.getOrDefault(false)
         forget(app, null)
-        prefs(app).edit().putBoolean(KEY_WANTED, false).apply()
+        prefs(app).edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_SOURCE, false).apply()
         return ok
     }
 
     private fun forget(context: Context, error: String?) {
         prefs(context).edit().remove(KEY_TOKEN).remove(KEY_DEVICE).remove(KEY_STATUS).remove(KEY_CHECKED)
+            .remove(KEY_KEEP).remove(KEY_PUSHED)
             .remove(KEY_SERVER_OK).apply { if (error != null) putString(KEY_ERROR, error) else remove(KEY_ERROR) }.apply()
     }
 
