@@ -279,6 +279,6 @@ class Repository(context: Context) {
         private const val KEY_RHYTHM_12H = "rhythm_clock_12h"
         private val syncMutex = Mutex()
         private val generation = java.util.concurrent.atomic.AtomicLong()
-        const val DEFAULT_REMIND_MINUTES = 10
+        const val DEFAULT_REMIND_MINUTES = 20
     }
 }
