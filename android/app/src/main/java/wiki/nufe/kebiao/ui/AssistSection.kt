@@ -1,8 +1,11 @@
 package wiki.nufe.kebiao.ui
 
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -13,6 +16,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -21,99 +25,173 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import wiki.nufe.kebiao.assist.AssistWorker
 import wiki.nufe.kebiao.assist.Community
+import wiki.nufe.kebiao.data.CasSessionManager
 import wiki.nufe.kebiao.data.Hosting
+import wiki.nufe.kebiao.data.Repository
 
 /**
- * “人人为我，我为人人”：
- * - 人人为我 = 服务器托管：手机刷新失败时，服务器和同学们的手机帮你继续更新（登录时勾选）；
- * - 我为人人 = 协助刷新：这台手机在 Wi-Fi 下帮网页版同学转发加密的课表请求。
+ * 互助与同步：
+ * - 服务器托管（人人为我）：手机刷新失败时，服务器和同学们的手机帮你继续更新。
+ * - 协助刷新（我为人人）：这台手机在 Wi-Fi 下帮网页版同学转发加密的课表请求。
+ * - iOS 数据源：手机刷到课表就推给本站，转发给 Scriptable 小组件与日历订阅。
  */
 @Composable
-internal fun AssistSection(onLogin: () -> Unit) {
+internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
     val context = LocalContext.current
     val view = LocalView.current
+    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    var enabled by remember { mutableStateOf(Community.assistEnabled(context)) }
-    var hostingVersion by remember { mutableIntStateOf(0) }
-    val hosting = remember(hostingVersion) { Hosting.state(context) }
-    var confirmLeave by remember { mutableStateOf(false) }
-    var leaving by remember { mutableStateOf(false) }
+    var version by remember { mutableIntStateOf(0) }
+    val hosting = remember(version) { Hosting.state(context) }
+    var enabled by remember(version) { mutableStateOf(Community.assistEnabled(context)) }
     val available = remember(enabled) { Community.assistAvailable(context) }
     val helped = remember(enabled) { Community.helpedCount(context) }
+    var confirmLeave by remember { mutableStateOf(false) }
+    var leaving by remember { mutableStateOf(false) }
+    var links by remember { mutableStateOf<JSONObject?>(null) }
+    var dataMessage by remember { mutableStateOf<String?>(null) }
+    var hostMessage by remember { mutableStateOf<String?>(null) }
     val divider = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
 
-    SectionCard {
-        Text("人人为我，我为人人", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(10.dp))
+    LaunchedEffect(hosting.dataSource, version) {
+        links = if (hosting.dataSource) withContext(Dispatchers.IO) {
+            runCatching { Hosting.links(context) }.getOrNull()
+        } else null
+    }
 
-        // ---- 人人为我：服务器托管 ----
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("服务器托管（双重保障）", fontSize = 14.sp)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    when {
-                        leaving -> "处理中…"
-                        !hosting.hosted -> "未开启"
-                        hosting.status == "ok" -> "已开启 · 服务器那份正常更新"
-                        else -> "已开启 · 服务器那份暂时无法刷新，本机刷新成功后会自动补交"
-                    },
-                    fontSize = 11.sp,
-                    color = if (hosting.hosted && hosting.status == "ok") MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    fun enrollHosting() {
+        if (leaving) return
+        hostMessage = null
+        leaving = true
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    Hosting.enroll(context, CasSessionManager(context).load(), keepSession = true)
+                }
             }
-            if (hosting.hosted) {
-                TextButton(onClick = { confirmLeave = true }, enabled = !leaving) { Text("取消托管") }
-            } else {
-                TextButton(enabled = !leaving, onClick = {
-                    // 本机学校会话还有效就直接用它托管；不行再去学校登录页（那里勾选托管）
-                    leaving = true
-                    scope.launch {
-                        val ok = withContext(Dispatchers.IO) {
-                            runCatching {
-                                Hosting.enroll(context, wiki.nufe.kebiao.data.CasSessionManager(context).load(), keepSession = true)
-                            }.isSuccess
-                        }
-                        leaving = false
-                        hostingVersion++
-                        if (!ok) onLogin()
-                    }
-                }) { Text("去开启") }
+            leaving = false
+            version++
+            result.exceptionOrNull()?.let {
+                hostMessage = "开启失败：${it.message ?: "网络错误"}。如本机学校登录已失效，请先在「本地学校登录」重新导入。"
             }
         }
+    }
+
+    fun toggleDataSource(on: Boolean) {
+        if (leaving) return
+        leaving = true
+        dataMessage = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (on) {
+                        if (Hosting.active(context)) {
+                            Hosting.setDataSource(context, true)
+                        } else {
+                            Hosting.enroll(context, CasSessionManager(context).load(), keepSession = false, dataSource = true)
+                        }
+                    } else {
+                        Hosting.setDataSource(context, false)
+                        if (!Hosting.state(context).hosted) Hosting.leave(context)
+                    }
+                }
+            }
+            if (on && result.isSuccess) repo.pushToServer()
+            result.exceptionOrNull()?.let {
+                dataMessage = "开启失败：${it.message ?: "网络错误"}。若本机学校登录已过期，请先重新导入课表。"
+            }
+            leaving = false
+            version++
+        }
+    }
+
+    SectionCard {
+        Text("互助与同步", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Hint(
-            if (hosting.hosted) "手机直连学校失败时，App 会改用服务器托管的课表；服务器的登录态失效时，本机下次刷新成功会自动再交一次。"
-            else hosting.error ?: "重新前往教务系统导入课表时，勾选“同时托管到 nufe课表 服务器”即可开启：本机刷新失败时由服务器和同学们的手机帮你继续更新。",
-        )
+        Hint("人人为我，我为人人：全部可选，随时可关；开启后才会联网协作，不影响本机课表使用。")
+        Spacer(Modifier.height(12.dp))
+
+        // ---- 服务器托管（人人为我）----
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("服务器托管", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.width(6.dp))
+                    Tag(
+                        when {
+                            leaving -> "处理中"
+                            !hosting.hosted -> "未开启"
+                            hosting.status == "ok" -> "已同步"
+                            else -> "已开启"
+                        },
+                        when {
+                            leaving || !hosting.hosted -> MaterialTheme.colorScheme.onSurfaceVariant
+                            hosting.status == "ok" -> SuccessGreen
+                            else -> WarmOrange
+                        },
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                Hint(
+                    when {
+                        !hosting.hosted -> "本机刷新失败时，由服务器和同学们的手机帮你继续更新。"
+                        hosting.status == "ok" -> "服务器那份正常更新，手机直连失败时自动兜底。"
+                        else -> hosting.error ?: "服务器那份暂时无法刷新，本机刷新成功后会自动补交。"
+                    },
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Switch(
+                checked = hosting.hosted,
+                enabled = !leaving,
+                onCheckedChange = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    if (it) enrollHosting() else confirmLeave = true
+                },
+            )
+        }
+        hostMessage?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = divider)
 
-        // ---- 我为人人：协助刷新 ----
+        // ---- 协助刷新（我为人人）----
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("协助刷新", fontSize = 14.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("协助刷新", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.width(6.dp))
+                    Tag(
+                        if (enabled) "已开启" else "未开启",
+                        if (enabled) SuccessGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(2.dp))
-                Text(
+                Hint(
                     when {
-                        !enabled -> "未开启"
-                        available == false -> "已开启 · 服务器暂未开放，不产生流量"
-                        helped > 0 -> "已开启 · 已帮同学刷新 $helped 次，谢谢你！"
-                        else -> "已开启 · 等待服务器分配任务"
+                        !enabled -> "在 Wi-Fi 且电量充足时，帮网页版同学转发加密的课表请求。"
+                        available == false -> "服务器暂未开放，当前不产生任何流量。"
+                        helped > 0 -> "已帮同学刷新 $helped 次，谢谢你！只会连接 jwxt.nufe.edu.cn。"
+                        else -> "等待服务器分配任务；约每半小时 2 分钟，每天流量 < 30 MB。"
                     },
-                    fontSize = 11.sp,
-                    color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.width(8.dp))
@@ -126,12 +204,77 @@ internal fun AssistSection(onLogin: () -> Unit) {
                 },
             )
         }
-        Spacer(Modifier.height(4.dp))
-        Hint(
-            "开启后，手机在连接 Wi-Fi 且电量充足时，帮网页版同学把课表请求转发给教务系统。" +
-                "转发的是端到端加密的数据：本机看不到任何人的账号、登录凭据或课表，也只会连接 jwxt.nufe.edu.cn。" +
-                "每半小时最多约 2 分钟，每天流量不超过 30 MB。",
-        )
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = divider)
+
+        // ---- iOS 小组件与日历数据源 ----
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("iOS 小组件与日历", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.width(6.dp))
+                    Tag(
+                        when {
+                            leaving -> "处理中"
+                            !hosting.dataSource -> "未开启"
+                            hosting.pushedAtMs > 0 -> "已同步"
+                            else -> "等待推送"
+                        },
+                        when {
+                            !hosting.dataSource -> MaterialTheme.colorScheme.onSurfaceVariant
+                            hosting.pushedAtMs > 0 -> SuccessGreen
+                            else -> WarmOrange
+                        },
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                Hint(
+                    when {
+                        !hosting.dataSource -> "没有另一台 iOS 设备请忽略本条。有的话，可把课表推给 iPhone 的 Scriptable 小组件与日历订阅。"
+                        hosting.pushedAtMs > 0 -> "最近推送 ${clock(hosting.pushedAtMs)}；手机刷到新课表即转发。"
+                        else -> "已开启，等待第一次推送。"
+                    },
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Switch(
+                checked = hosting.dataSource,
+                enabled = !leaving,
+                onCheckedChange = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    toggleDataSource(it)
+                },
+            )
+        }
+        dataMessage?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onLogin) { Text("重新导入课表") }
+        }
+        val current = links
+        if (hosting.dataSource && current != null) {
+            Spacer(Modifier.height(6.dp))
+            fun copy(label: String, key: String) {
+                val url = current.optString(key).takeIf { it.isNotEmpty() } ?: return
+                clipboard.setText(AnnotatedString(url))
+                Toast.makeText(context, "已复制$label", Toast.LENGTH_SHORT).show()
+            }
+            LinkRow("小组件脚本链接", "复制") { copy("小组件脚本链接", "script_url") }
+            LinkRow("日历订阅链接", "复制") { copy("日历订阅链接", "webcal_url") }
+            LinkRow("分享到 iPhone", "分享") {
+                val text = "nufe课表 iOS 小组件脚本：${current.optString("script_url")}\n日历订阅：${current.optString("webcal_url")}"
+                runCatching {
+                    context.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text),
+                            "发送到 iPhone",
+                        ),
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Hint("链接相当于只读凭证，只发给自己的设备。")
+        }
     }
 
     if (confirmLeave) {
@@ -151,7 +294,7 @@ internal fun AssistSection(onLogin: () -> Unit) {
                             if (Hosting.dataSource(context)) runCatching { Hosting.forgetSession(context) } else Hosting.leave(context)
                         }
                         leaving = false
-                        hostingVersion++
+                        version++
                     }
                 }) { Text("取消托管") }
             },
@@ -159,6 +302,17 @@ internal fun AssistSection(onLogin: () -> Unit) {
         )
     }
 }
+
+/** 一行可复制的链接：左标题、右操作。 */
+@Composable
+private fun LinkRow(title: String, action: String, onClick: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        TextButton(onClick = onClick) { Text(action, fontSize = 13.sp) }
+    }
+}
+
+private fun clock(ms: Long): String = SimpleDateFormat("M/d HH:mm", Locale.CHINA).format(Date(ms))
 
 /** App 启动时调用：排好心跳与（若已开启）协助任务。 */
 internal fun scheduleCommunity(context: android.content.Context) {
