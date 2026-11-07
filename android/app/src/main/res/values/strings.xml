@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">nufe课表</string>
+    <string name="app_tagline">你的课程，一眼掌握</string>
     <string name="widget_today">今天的课</string>
     <string name="widget_week">本周课表</string>
     <string name="widget_today_desc">实时展示上课倒计时与下一节课程，今日课程结束后自动切换为明日课表</string>

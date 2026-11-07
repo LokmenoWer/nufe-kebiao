@@ -57,6 +57,11 @@ class Repository(context: Context) {
         get() = prefs.getBoolean(KEY_LIVE_UPDATE, false)
         set(value) = prefs.edit().putBoolean(KEY_LIVE_UPDATE, value).apply()
 
+    /** 首页“今日节奏”表盘用 12 小时制（与真实钟表一致）；false 为 24 小时制整天一圈。 */
+    var rhythmClock12h: Boolean
+        get() = prefs.getBoolean(KEY_RHYTHM_12H, true)
+        set(value) = prefs.edit().putBoolean(KEY_RHYTHM_12H, value).apply()
+
     /** 点小组件打开 App；默认 false 打开网站。 */
     var widgetOpensApp: Boolean
         get() = prefs.getBoolean(KEY_WIDGET_OPENS_APP, false)
@@ -299,6 +304,7 @@ class Repository(context: Context) {
         private const val KEY_ALARM = "alarm_enabled"
         private const val KEY_LIVE_UPDATE = "live_update_enabled"
         private const val KEY_WIDGET_OPENS_APP = "widget_opens_app"
+        private const val KEY_RHYTHM_12H = "rhythm_clock_12h"
         private const val KEY_WIDGET_PUNCTUAL = "widget_punctual"
         private const val KEY_DEVICE = "device_id"
         private const val KEY_CLOCK = "device_clock_offset"

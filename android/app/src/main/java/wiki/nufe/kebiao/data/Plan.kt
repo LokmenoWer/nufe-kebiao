@@ -93,10 +93,13 @@ fun emptyText(day: Day?, payload: Payload, now: Now, tomorrow: Boolean): String 
     TermPhase.During -> when {
         day == null -> "数据过旧，点按刷新"
         day.week == null -> "假期中"
-        tomorrow -> "明天没有课"
-        else -> "今天没有课"
+        tomorrow -> "明天没课，好好休息吧!"
+        else -> "今天没课，好好休息吧!"
     }
 }
+
+/** 是否是"没课/休息"类绿色文案（区别于"今天课程已上完!"）。 */
+fun isRestMessage(text: String): Boolean = text.contains("好好休息")
 
 /** 今天之后第一个有课的日子：明天有课就是明天，否则用服务端给的 upcoming（两周内）。 */
 fun nextClassDay(payload: Payload, now: Now, tomorrow: Day?): Day? {
@@ -113,7 +116,10 @@ fun dayLabel(day: Day, now: Now): String {
 
 data class Preview(val title: String, val day: Day, val slots: List<Slot>, val cancelled: List<Cancelled>)
 
-/** 今天 / 明天小组件要画的内容。当天课上完、周末、假期里会顺带预告下次上课，避免一块空白。 */
+/**
+ * 今天小组件要画的内容。标题恒为"今天"，课上完/没课时把"明天"降级成一行说明 + 课表预告，
+ * 不再把整块切成"明天"视图，避免"今天/明天"来回跳导致的歧义。
+ */
 data class DayPlan(
     val title: String,
     val day: Day?,
@@ -121,49 +127,52 @@ data class DayPlan(
     val total: Int,
     val cancelled: List<Cancelled>,
     val empty: String,
+    val tomorrowHint: String? = null,
     val preview: Preview? = null,
+    val showPreviewTitle: Boolean = true,
 )
 
 private fun previewOf(day: Day, now: Now) =
     Preview(dayLabel(day, now), day, annotate(day.lessons, -1, false), cancelledOn(day))
 
-fun buildPlan(payload: Payload, tomorrowMode: Boolean, now: Now): DayPlan {
+/** 今天还有课就画今天；今天的课都上完或本来就没课时，统一用"今天"标题 + 明天/下次上课预告。 */
+fun buildTodayPlan(payload: Payload, now: Now): DayPlan {
     val (today, tomorrow) = resolveDays(payload, now)
-    if (tomorrowMode) {
-        val slots = tomorrow?.let { annotate(it.lessons, -1, false) }.orEmpty()
-        val next = if (tomorrow != null && slots.isEmpty()) nextClassDay(payload, now, null) else null
-        return DayPlan(
-            title = "明天", day = tomorrow, slots = slots, total = slots.size, cancelled = cancelledOn(tomorrow),
-            empty = emptyText(tomorrow, payload, now, tomorrow = true), preview = next?.let { previewOf(it, now) },
-        )
-    }
     if (today == null) return DayPlan("今天", null, emptyList(), 0, emptyList(), "数据过旧，点按刷新")
     val all = annotate(today.lessons, now.minutes)
     val remaining = all.filter { it.state != State.PAST }
     val cancelled = cancelledOn(today, now.minutes)
     if (remaining.isNotEmpty()) return DayPlan("今天", today, remaining, all.size, cancelled, "")
-    val next = nextClassDay(payload, now, tomorrow)
-    return DayPlan(
-        title = "今天", day = today, slots = emptyList(), total = all.size, cancelled = cancelled,
-        empty = if (all.isNotEmpty()) "今天的课都上完了" else emptyText(today, payload, now, tomorrow = false),
-        preview = next?.let { previewOf(it, now) },
-    )
+    val headline = if (all.isNotEmpty()) "今天课程已上完!" else emptyText(today, payload, now, tomorrow = false)
+    val base = DayPlan("今天", today, emptyList(), all.size, cancelled, headline)
+    val normalDay = termState(payload, now) is TermPhase.During && today.week != null
+    return when {
+        // 上课日且明天有课：说明"明天还有 x 节课"，下面直接列明天课表（不再显示"明天"标题）。
+        normalDay && tomorrow != null && tomorrow.lessons.isNotEmpty() ->
+            base.copy(tomorrowHint = "明天还有 ${tomorrow.lessons.size} 节课",
+                preview = previewOf(tomorrow, now), showPreviewTitle = false)
+        // 上课日且明天没课：今天上完课才补一句"明天没课"；今天本就空堂时不再重复，只预告下次上课。
+        normalDay ->
+            base.copy(tomorrowHint = if (all.isEmpty()) null else "明天没课，好好休息吧!",
+                preview = nextClassDay(payload, now, null)?.let { previewOf(it, now) })
+        // 假期 / 开学前 / 结课：只给"下次上课"预告。
+        else -> base.copy(preview = nextClassDay(payload, now, tomorrow)?.let { previewOf(it, now) })
+    }
 }
 
-/** 今天还有课就画今天；今天的课都结束（或今天没课）后，直接画明天的完整课表。 */
-fun buildTodayPlan(payload: Payload, now: Now): DayPlan {
-    val today = buildPlan(payload, tomorrowMode = false, now = now)
-    if (today.slots.isNotEmpty() || today.cancelled.isNotEmpty()) return today
-    return buildPlan(payload, tomorrowMode = true, now = now)
-}
-
-/** 周末本周剩下的日子都没课时改看下周。 */
+/** 本周剩下的课都上完（含今天已结束的课不算）、且下周有课时改看下周（不限周末）。 */
 fun weekToShow(payload: Payload, now: Now): Pair<String, WeekBlock?> {
     val current = payload.week
     val next = payload.nextWeek
-    val restHasClass = current?.days.orEmpty().any { it.date >= now.date && it.lessons.isNotEmpty() }
+    val restHasClass = current?.days.orEmpty().any { day ->
+        when {
+            day.date > now.date -> day.lessons.isNotEmpty()
+            day.date == now.date -> day.lessons.any { it.endMinutes > now.minutes }
+            else -> false
+        }
+    }
     val nextHasClass = next?.days.orEmpty().any { it.lessons.isNotEmpty() }
-    if (now.weekday >= 6 && !restHasClass && nextHasClass) return "下周" to next
+    if (!restHasClass && nextHasClass) return "下周" to next
     return "本周" to current
 }
 

@@ -14,3 +14,4 @@ internal const val MANUAL_ADD =
 
 internal val LiveRed = Color(0xFFE03131)
 internal val WarmOrange = Color(0xFFE8590C)
+internal val SuccessGreen = Color(0xFF2F9E44)

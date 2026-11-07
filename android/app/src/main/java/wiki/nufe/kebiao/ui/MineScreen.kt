@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,7 +58,10 @@ import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Snapshot
+import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.diag.Diagnostics
+import wiki.nufe.kebiao.remind.LiveUpdates
+import wiki.nufe.kebiao.remind.Reminders
 
 @Composable
 internal fun MineScreen(
@@ -72,11 +76,17 @@ internal fun MineScreen(
     onOpenSite: () -> Unit,
     onPair: (String) -> Unit,
     onRemove: () -> Unit,
+    rhythmClock12h: Boolean = true,
+    onRhythmClockChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
     var showFeedback by remember { mutableStateOf(false) }
+    var liveUpdate by remember { mutableStateOf(repo.liveUpdateEnabled) }
+    var alarmEnabled by remember { mutableStateOf(repo.alarmEnabled) }
+    var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
+    var showWheel by remember { mutableStateOf(false) }
     val student = profile?.student
     val mail = profile?.mail
     val scope = rememberCoroutineScope()
@@ -219,23 +229,20 @@ internal fun MineScreen(
                     if (needsLogin || snapshot?.offline == true) WarmOrange else MaterialTheme.colorScheme.primary,
                 )
             }
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onOpenSite, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                    Text("打开网站", fontSize = 12.sp)
-                }
-                TextButton(
-                    onClick = {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.parse("package:${context.packageName}"),
-                            ),
-                        )
-                    },
-                    contentPadding = PaddingValues(horizontal = 4.dp),
-                ) { Text("应用设置", fontSize = 12.sp) }
-            }
+            Spacer(Modifier.height(6.dp))
+            ConnectionRow("打开网站", onOpenSite)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+            ConnectionRow(
+                "应用设置",
+                {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                },
+            )
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = { confirmRemove = true },
@@ -250,26 +257,92 @@ internal fun MineScreen(
 
         Spacer(Modifier.height(14.dp))
         SectionCard {
+            Text("首页显示", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("今日节奏表盘", fontSize = 14.sp)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        if (rhythmClock12h) "和钟表一样，显示接下来半天的课" else "一圈是一整天，0 点在正上方",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                SlidingToggle(
+                    firstLabel = "12 小时",
+                    secondLabel = "24 小时",
+                    selectedIndex = if (rhythmClock12h) 0 else 1,
+                    onSelect = { index -> onRhythmClockChange(index == 0) },
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        WidgetSection()
+        Spacer(Modifier.height(14.dp))
+        ReminderSection(
+            repo = repo,
+            minutes = minutes,
+            alarmEnabled = alarmEnabled,
+            onPickTime = { showWheel = true },
+            onAlarmToggle = { enabled ->
+                Diag.i("alarm enabled=$enabled")
+                alarmEnabled = enabled
+                repo.alarmEnabled = enabled
+                if (enabled && minutes == 0) {
+                    minutes = 10
+                    repo.remindMinutes = 10
+                }
+                if (!enabled) LiveUpdates.cancel(context)
+                Reminders.rescheduleAsync(context)
+            },
+            liveUpdate = liveUpdate,
+            onLiveUpdateChange = { checked ->
+                Diag.i("live update enabled=$checked")
+                liveUpdate = checked
+                repo.liveUpdateEnabled = checked
+                if (!checked) LiveUpdates.cancel(context)
+                Reminders.rescheduleAsync(context)
+            },
+        )
+
+        Spacer(Modifier.height(14.dp))
+        SectionCard {
             Text("权限", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            PermissionRow("通知", notificationsOk) {
+            PermissionRow(
+                title = "通知",
+                detail = "课前提醒和系统通知",
+                allowed = notificationsOk,
+            ) {
                 context.startActivity(
                     Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
                 )
             }
-            PermissionRow("准时提醒", exactOk) {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                        Uri.parse("package:${context.packageName}"),
-                    ),
-                )
+            // Android 12 以下不需要也没有“闹钟和提醒”授权页，启动该 intent 会抛 ActivityNotFoundException。
+            if (Build.VERSION.SDK_INT >= 31) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+                PermissionRow(
+                    title = "准时提醒",
+                    detail = "避免系统推迟上课提醒",
+                    allowed = exactOk,
+                ) {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                }
             }
             if (Build.VERSION.SDK_INT >= 36) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
                 PermissionRow(
-                    "系统实时提醒（$liveName）",
-                    promotedOk,
+                    title = "系统实时提醒（$liveName）",
+                    detail = "在锁屏或状态栏显示课程倒计时",
+                    allowed = promotedOk,
                 ) {
                     context.startActivity(
                         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
@@ -277,7 +350,12 @@ internal fun MineScreen(
                     )
                 }
             }
-            PermissionRow("后台运行", batteryOk) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+            PermissionRow(
+                title = "后台运行",
+                detail = "保持提醒和桌面组件在后台更新",
+                allowed = batteryOk,
+            ) {
                 openBatteryOptimizationSettings(context)
             }
         }
@@ -355,6 +433,19 @@ internal fun MineScreen(
             onDismiss = { showFeedback = false },
         )
     }
+
+    if (showWheel) {
+        TimeWheelDialog(
+            initial = minutes,
+            onDismiss = { showWheel = false },
+            onConfirm = { selected ->
+                showWheel = false
+                minutes = selected
+                repo.remindMinutes = selected
+                Reminders.rescheduleAsync(context)
+            },
+        )
+    }
 }
 
 @Composable
@@ -429,21 +520,59 @@ private fun FeedbackOption(
 }
 
 @Composable
-private fun PermissionRow(title: String, allowed: Boolean, action: () -> Unit) {
+private fun ConnectionRow(title: String, onClick: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { launchSafely(title, onClick) }
+            .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Icon(
+            painter = painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+@Composable
+private fun PermissionRow(
+    title: String,
+    detail: String,
+    allowed: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { launchSafely(title, onClick) }
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Text(
             if (allowed) "已允许" else "未允许",
             fontSize = 12.sp,
-            color = if (allowed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+            color = if (allowed) SuccessGreen else WarmOrange,
         )
-        if (!allowed) {
-            TextButton(onClick = action, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text("去设置", fontSize = 12.sp)
-            }
-        }
+        Spacer(Modifier.width(4.dp))
+        Icon(
+            painter = painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
     }
+}
+
+/** 系统设置页在部分 ROM 上可能不存在；跳转失败时只记日志，不让整行点击把 App 带崩。 */
+private fun launchSafely(title: String, open: () -> Unit) {
+    runCatching(open).onFailure { Diag.w("open settings failed ($title): ${it.javaClass.simpleName}") }
 }

@@ -24,6 +24,8 @@ import wiki.nufe.kebiao.diag.Diag
 class LiveUpdateGuardService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var stopRunnable: Runnable? = null
+    private var cardItem: Reminders.Item? = null
+    private var ticker: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -36,7 +38,8 @@ class LiveUpdateGuardService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        val (notification, dismissMs) = card
+        val (notification, dismissMs, item) = card
+        cardItem = item
         stopRunnable?.let(handler::removeCallbacks)
         stopRunnable = Runnable { stopSelf(startId) }.also {
             handler.postDelayed(it, (dismissMs - System.currentTimeMillis()).coerceAtLeast(1_000L))
@@ -54,18 +57,34 @@ class LiveUpdateGuardService : Service() {
             Diag.w("live update guard using fallback notification")
         }
         Diag.i("live update guard started")
+        startTicker()
         return START_NOT_STICKY
+    }
+
+    /** 胶囊/卡片上的“剩 N 分钟”每跨一分钟重发一次；系统倒计时只有秒级。 */
+    private fun startTicker() {
+        ticker?.let(handler::removeCallbacks)
+        ticker = object : Runnable {
+            override fun run() {
+                val item = cardItem ?: return
+                val delay = LiveUpdates.refresh(this@LiveUpdateGuardService, item)
+                if (delay > 0) handler.postDelayed(this, delay)
+            }
+        }.also { it.run() }
     }
 
     override fun onDestroy() {
         stopRunnable?.let(handler::removeCallbacks)
+        ticker?.let(handler::removeCallbacks)
+        ticker = null
+        cardItem = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         Diag.i("live update guard stopped")
         super.onDestroy()
     }
 
     /** 还需要展示的卡片和它的收起时间；已过期或数据无效时返回 null。 */
-    private fun liveCard(intent: Intent?): Pair<Notification, Long>? {
+    private fun liveCard(intent: Intent?): Triple<Notification, Long, Reminders.Item>? {
         if (intent == null) return null
         return runCatching {
             val item = LiveUpdates.itemFrom(intent)
@@ -73,7 +92,7 @@ class LiveUpdateGuardService : Service() {
             val endMs = lessonMs(item.date, item.end)
             val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
             if (dismissMs <= System.currentTimeMillis()) return null
-            LiveUpdates.buildNotification(this, item)?.let { it to dismissMs }
+            LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
         }.getOrNull()
     }
 

@@ -9,7 +9,11 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerSnapDistance
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -300,6 +304,14 @@ private fun MinuteWheel(initial: Int, onSelected: (Int) -> Unit) {
                 pageSize = PageSize.Fixed(44.dp),
                 contentPadding = PaddingValues(vertical = 88.dp),
                 pageSpacing = 0.dp,
+                flingBehavior = PagerDefaults.flingBehavior(
+                    state = pager,
+                    pagerSnapDistance = PagerSnapDistance.atMost(3),
+                    snapAnimationSpec = spring<Float>(
+                        dampingRatio = 0.82f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ),
             ) { page ->
                 val current = pager.currentPage + pager.currentPageOffsetFraction
                 val distance = abs(page - current)

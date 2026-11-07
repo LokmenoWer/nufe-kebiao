@@ -190,8 +190,35 @@ object LiveUpdates {
             .setUsesChronometer(true)
             .setChronometerCountDown(true)
             .setTimeoutAfter(timeout)
-        applyPromotedFlags(builder, status)
+        applyPromotedFlags(builder, "剩${remainingMinutes(phase, startMs, endMs)}分钟")
         return builder.build()
+    }
+
+    /** 剩余分钟数：课前倒数到开课，课上倒数到下课。 */
+    private fun remainingMinutes(phase: Phase, startMs: Long, endMs: Long): Long {
+        val target = if (phase == Phase.BEFORE) startMs else endMs
+        return ((target - System.currentTimeMillis() + 59_999L) / 60_000L).coerceAtLeast(1L)
+    }
+
+    /**
+     * 剩余分钟变化时重发同一张卡片（系统倒计时只有秒级，胶囊也只显示一段文字）。
+     * 返回距下一次分钟跳变的毫秒数；0 表示卡片已到收起时间。
+     */
+    internal fun refresh(context: Context, item: Reminders.Item): Long {
+        val now = System.currentTimeMillis()
+        val startMs = lessonMs(item.date, item.start)
+        val endMs = lessonMs(item.date, item.end)
+        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        if (dismissMs <= now) return 0L
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return 0L
+        // 卡片已被用户划掉，或 cancel() 已撤销：不再重发，否则一分钟后又会冒出来。
+        if (manager.activeNotifications.none { it.id == NOTIFICATION_ID }) return 0L
+        buildNotification(context, item)?.let { manager.notify(NOTIFICATION_ID, it) }
+        val target = if (now < startMs) startMs else endMs
+        val left = target - now
+        if (left <= 0) return 0L
+        val rem = left % 60_000L
+        return if (rem == 0L) 60_000L else rem.coerceAtLeast(1_000L)
     }
 
     /** HyperOS 的 API 36 框架可能没实现这两个方法，反射调用，缺失就跳过。 */

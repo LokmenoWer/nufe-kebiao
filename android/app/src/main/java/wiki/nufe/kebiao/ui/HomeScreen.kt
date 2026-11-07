@@ -2,19 +2,28 @@ package wiki.nufe.kebiao.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.text.format.DateFormat
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.expandVertically
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -34,6 +43,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -44,7 +54,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,13 +63,22 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Cancelled
 import wiki.nufe.kebiao.data.Day
@@ -70,7 +88,6 @@ import wiki.nufe.kebiao.data.Lesson
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.AppUpdate
-import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.needsLogin
 import wiki.nufe.kebiao.data.Slot
 import wiki.nufe.kebiao.data.Snapshot
@@ -79,14 +96,12 @@ import wiki.nufe.kebiao.data.Tone
 import wiki.nufe.kebiao.data.WEEKDAY
 import wiki.nufe.kebiao.data.annotate
 import wiki.nufe.kebiao.data.buildTodayPlan
+import wiki.nufe.kebiao.data.isRestMessage
 import wiki.nufe.kebiao.data.headerNote
 import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.data.shortDate
 import wiki.nufe.kebiao.data.weekColumns
 import wiki.nufe.kebiao.data.weekToShow
-import wiki.nufe.kebiao.diag.Diag
-import wiki.nufe.kebiao.remind.LiveUpdates
-import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.widget.CHIP_GAP
 import wiki.nufe.kebiao.widget.CHIP_PAD_H
 import wiki.nufe.kebiao.widget.CHIP_PAD_V
@@ -178,7 +193,6 @@ internal fun LoginBanner(captcha: Boolean, busy: Boolean, onRefresh: () -> Unit,
 
 @Composable
 internal fun HomeScreen(
-    repo: Repository,
     snapshot: Snapshot?,
     busy: Boolean,
     message: String?,
@@ -187,13 +201,12 @@ internal fun HomeScreen(
     update: AppUpdate?,
     updateFlow: UpdateFlow,
     onDismissUpdate: () -> Unit,
+    initialWeek: Boolean = false,
+    viewPulse: Int = 0,
+    onViewConsumed: () -> Unit = {},
+    rhythmClock12h: Boolean = true,
 ) {
-    val context = LocalContext.current
     var now by remember { mutableStateOf(Now.current()) }
-    var liveUpdate by remember { mutableStateOf(repo.liveUpdateEnabled) }
-    var alarmEnabled by remember { mutableStateOf(repo.alarmEnabled) }
-    var minutes by remember { mutableIntStateOf(repo.remindMinutes) }
-    var showWheel by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -214,8 +227,8 @@ internal fun HomeScreen(
             .padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
         HeaderBlock()
-        Spacer(Modifier.height(18.dp))
-        StatusPill(plan, now)
+        Spacer(Modifier.height(12.dp))
+        EnterUp { StatusPill(plan, now) }
         if (plan?.slots?.isNotEmpty() == true) Spacer(Modifier.height(18.dp))
         if (message != null) {
             val isSuccess = message == "已绑定这台设备。"
@@ -234,49 +247,27 @@ internal fun HomeScreen(
             LoginBanner(payload.status == "captcha", busy, onRefresh, onOpenSite)
             Spacer(Modifier.height(14.dp))
         }
-        TodayCardView(snapshot, plan, note, now, busy, onRefresh, onOpenSite)
+        EnterUp(delayMillis = 70) {
+            TodayCardView(snapshot, plan, note, now, busy, onRefresh, initialWeek, viewPulse, onViewConsumed)
+        }
         Spacer(Modifier.height(14.dp))
-        WidgetSection()
-        Spacer(Modifier.height(14.dp))
-        ReminderSection(
-            repo = repo,
-            minutes = minutes,
-            alarmEnabled = alarmEnabled,
-            onPickTime = { showWheel = true },
-            onAlarmToggle = { enabled ->
-                Diag.i("alarm enabled=$enabled")
-                alarmEnabled = enabled
-                repo.alarmEnabled = enabled
-                if (enabled && minutes == 0) {
-                    minutes = 10
-                    repo.remindMinutes = 10
-                }
-                if (!enabled) LiveUpdates.cancel(context)
-                Reminders.rescheduleAsync(context)
-            },
-            liveUpdate = liveUpdate,
-            onLiveUpdateChange = { checked ->
-                Diag.i("live update enabled=$checked")
-                liveUpdate = checked
-                repo.liveUpdateEnabled = checked
-                if (!checked) LiveUpdates.cancel(context)
-                Reminders.rescheduleAsync(context)
-            },
-        )
+        val week = snapshot?.payload?.week?.week
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(Modifier.weight(1f)) {
+                TodayRhythmCard(plan, now, clock12h = rhythmClock12h)
+            }
+            if (week != null && week > 0) {
+                SemesterProgressCard(
+                    week = week,
+                    modifier = Modifier.width(72.dp).fillMaxHeight(),
+                )
+            }
+        }
         Spacer(Modifier.height(110.dp))
-    }
-
-    if (showWheel) {
-        TimeWheelDialog(
-            initial = minutes,
-            onDismiss = { showWheel = false },
-            onConfirm = { selected ->
-                showWheel = false
-                minutes = selected
-                repo.remindMinutes = selected
-                Reminders.rescheduleAsync(context)
-            },
-        )
     }
 }
 
@@ -284,15 +275,15 @@ internal fun HomeScreen(
 internal fun HeaderBlock() {
     Text(
         "nufe课表",
-        fontSize = 34.sp,
+        fontSize = 28.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = (-0.5).sp,
         color = MaterialTheme.colorScheme.onBackground,
     )
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(2.dp))
     Text(
-        "把课程放在桌面。",
-        fontSize = 15.sp,
+        stringResource(R.string.app_tagline),
+        fontSize = 14.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
@@ -330,7 +321,48 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
     }
 }
 
+private fun syncTime(ms: Long): String = DateFormat.format("HH:mm", ms).toString()
+
 private enum class CardMode { DAY, WEEK }
+
+/** 二次函数缓动：切换周视图时先把高度变化做得更明显，再自然收住。 */
+private val QuadraticEaseInOut = Easing { fraction ->
+    if (fraction < 0.5f) {
+        2f * fraction * fraction
+    } else {
+        1f - (-2f * fraction + 2f).let { it * it } / 2f
+    }
+}
+
+/** 本周↔下周切换时，标题与切换按钮里的文字按同一节奏横向滑入，跟周课表的滑动保持一致，避免只换字不带动造成的歧义。 */
+@Composable
+private fun SlidingWeekLabel(
+    text: String,
+    slideDir: Int,
+    fontSize: TextUnit,
+    fontWeight: FontWeight,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedContent(
+        targetState = text,
+        modifier = modifier,
+        transitionSpec = {
+            (slideInHorizontally(
+                animationSpec = tween(360, easing = QuadraticEaseInOut),
+                initialOffsetX = { it * slideDir },
+            ) + fadeIn(tween(160))) togetherWith
+                (slideOutHorizontally(
+                    animationSpec = tween(300, easing = QuadraticEaseInOut),
+                    targetOffsetX = { -it * slideDir },
+                ) + fadeOut(tween(140)))
+        },
+        contentAlignment = Alignment.Center,
+        label = "week-label",
+    ) {
+        Text(it, fontSize = fontSize, fontWeight = fontWeight, color = color, maxLines = 1)
+    }
+}
 
 private data class SelectedCourse(
     val day: Day,
@@ -346,9 +378,18 @@ private fun TodayCardView(
     now: Now,
     busy: Boolean,
     onRefresh: () -> Unit,
-    onOpenSite: () -> Unit,
+    initialWeek: Boolean,
+    viewPulse: Int,
+    onViewConsumed: () -> Unit,
 ) {
     var mode by remember { mutableStateOf(CardMode.DAY) }
+    val view = LocalView.current
+    LaunchedEffect(viewPulse, initialWeek) {
+        if (viewPulse > 0) {
+            mode = if (initialWeek) CardMode.WEEK else CardMode.DAY
+            onViewConsumed()
+        }
+    }
     var preferNextWeek by remember { mutableStateOf<Boolean?>(null) }
     var selectedCourse by remember { mutableStateOf<SelectedCourse?>(null) }
     val tomorrow = plan?.title == "明天"
@@ -361,9 +402,13 @@ private fun TodayCardView(
     val payload = snapshot?.payload
     val defaultWeek = payload?.let { weekToShow(it, now) }
     val showNext = preferNextWeek ?: (defaultWeek?.first == "下周")
-    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else (defaultWeek?.first ?: "本周")
-    val weekBlock = if (showNext && payload?.nextWeek != null) payload.nextWeek else defaultWeek?.second
-    val weekCols = remember(weekBlock, now.date, now.minutes) { weekColumns(weekBlock, now) }
+    val weekTitle = if (showNext && payload?.nextWeek != null) "下周" else "本周"
+    val baseWeekBlock = payload?.week
+    val nextWeekBlock = payload?.nextWeek
+    val baseWeekCols = remember(baseWeekBlock, now.date, now.minutes) { weekColumns(baseWeekBlock, now) }
+    val nextWeekCols = remember(nextWeekBlock, now.date, now.minutes) { weekColumns(nextWeekBlock, now) }
+    val weekBlock = if (showNext && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
+    val weekCols = if (showNext && nextWeekBlock != null) nextWeekCols else baseWeekCols
     val weekRange = if (weekCols.isNotEmpty()) {
         val first = shortDate(weekCols.first().day.date)
         val last = shortDate(weekCols.last().day.date)
@@ -372,15 +417,32 @@ private fun TodayCardView(
     val weekFirstDay = weekCols.firstOrNull()?.day
     val weekChanged = weekCols.any { c -> c.cancelled.isNotEmpty() || c.slots.any { it.lesson.changed } }
     val weekNote = snapshot?.let { headerNote(it, weekFirstDay, now, compact = false, changed = weekChanged) }
-    val activeNote = if (mode == CardMode.WEEK) weekNote else note
+    val activeNote = if (mode == CardMode.WEEK) {
+        val warning = weekNote?.takeIf { !it.text.startsWith("第 ") }
+        val text = warning?.text ?: weekBlock?.week?.let { "第 $it 周" } ?: weekNote?.text ?: "本周"
+        val label = if (!showNext && warning == null && weekBlock?.week != null && weekCols.isNotEmpty()) {
+            "$text · ${weekCols.size} 天"
+        } else {
+            text
+        }
+        Note(label, warning?.tone ?: Tone.FAINT)
+    } else {
+        note
+    }
 
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (mode == CardMode.WEEK) weekTitle else (plan?.title ?: "今天"),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (mode == CardMode.WEEK) {
+                SlidingWeekLabel(
+                    text = weekTitle,
+                    slideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            } else {
+                Text(plan?.title ?: "今天", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            }
             val subtitle = if (mode == CardMode.WEEK) {
                 weekRange
             } else {
@@ -401,144 +463,286 @@ private fun TodayCardView(
                 Spacer(Modifier.width(6.dp))
             }
             TextButton(
-                onClick = onRefresh,
+                onClick = {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    onRefresh()
+                },
                 enabled = !busy,
                 contentPadding = PaddingValues(horizontal = 4.dp),
-            ) { Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp) }
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_refresh),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(3.dp))
+                    Text(if (busy) "刷新中" else "刷新", fontSize = 12.sp)
+                }
+            }
+        }
+        val syncText = snapshot?.let {
+            if (it.offline) "离线 · 缓存于 ${syncTime(it.fetchedAtMs)}"
+            else "已同步 ${syncTime(it.fetchedAtMs)}"
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            ModeToggle(
-                mode = mode,
-                dayLabel = plan?.title ?: "今天",
-                weekLabel = weekTitle,
-                onSelect = { mode = it },
-            )
-            if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
-                Spacer(Modifier.width(8.dp))
-                TextButton(
-                    onClick = { preferNextWeek = !showNext },
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                    modifier = Modifier.height(28.dp),
-                ) {
-                    Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
-                }
-            }
-            Spacer(Modifier.weight(1f))
             if (mode == CardMode.DAY && plan != null && plan.slots.isNotEmpty()) {
                 Text(
-                    if (tomorrow) "明天还有 ${plan.slots.size} 门课" else "还有 ${plan.slots.size} 门课要上",
+                    "还有 ${plan.slots.size} 门课",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else if (mode == CardMode.WEEK) {
+                Text(
+                    "共有 ${weekCols.sumOf { it.slots.size }} 门课",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
+            Spacer(Modifier.weight(1f))
+            if (mode == CardMode.WEEK && payload?.week != null && payload.nextWeek != null) {
+                TextButton(
+                    onClick = {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        preferNextWeek = !showNext
+                    },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (showNext) "看本周" else "看下周", fontSize = 11.sp)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            painter = painterResource(R.drawable.ic_chevron_right),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .rotate(if (showNext) 180f else 0f),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            ModeToggle(
+                mode = mode,
+                dayLabel = plan?.title ?: "今天",
+                weekLabel = weekTitle,
+                weekSlideDir = if (showNext && payload?.nextWeek != null) 1 else -1,
+                onSelect = { mode = it },
+            )
         }
         Spacer(Modifier.height(12.dp))
         if (snapshot == null || plan == null) {
             Text("正在获取课表…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@SectionCard
         }
-        if (mode == CardMode.WEEK) {
-            WeekGridView(
-                columns = weekCols,
-                isHoliday = weekBlock?.week == null,
-                onSelectCourse = { selectedCourse = it },
-            )
-        } else {
-            AnimatedContent(
-                targetState = showAll,
-                transitionSpec = {
-                    (expandVertically(
-                        expandFrom = Alignment.Bottom,
-                        animationSpec = tween(320, easing = FastOutSlowInEasing),
-                    ) + fadeIn(tween(200))) togetherWith
-                        (shrinkVertically(
-                            shrinkTowards = Alignment.Bottom,
-                            animationSpec = tween(240, easing = FastOutSlowInEasing),
-                        ) + fadeOut(tween(120)))
-                },
-                label = "today-expand",
-            ) { expanded ->
-                val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
-                if (shown.isEmpty()) {
-                    Column {
-                        Text(plan.empty, fontSize = 14.sp)
-                        val preview = plan.preview
-                        if (preview != null) {
-                            Spacer(Modifier.height(12.dp))
-                            Text(preview.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.height(8.dp))
-                            preview.slots.forEachIndexed { index, slot ->
-                                LessonRow(slot) {
-                                    selectedCourse = SelectedCourse(preview.day, listOf(slot))
+        AnimatedContent(
+            targetState = mode,
+            transitionSpec = {
+                val toWeek = targetState == CardMode.WEEK
+                (slideInVertically(
+                    animationSpec = tween(420, easing = QuadraticEaseInOut),
+                    initialOffsetY = { if (toWeek) -it / 4 else it / 4 },
+                ) + fadeIn(tween(180))) togetherWith
+                    (slideOutVertically(
+                        animationSpec = tween(320, easing = QuadraticEaseInOut),
+                        targetOffsetY = { if (toWeek) it / 4 else -it / 4 },
+                    ) + fadeOut(tween(160)))
+            },
+            contentAlignment = Alignment.TopCenter,
+            label = "card-mode",
+        ) { targetMode ->
+            if (targetMode == CardMode.WEEK) {
+                val canSwitchWeek = payload?.week != null && nextWeekBlock != null
+                val swipeThreshold = with(LocalDensity.current) { 56.dp.toPx() }
+                AnimatedContent(
+                    targetState = showNext,
+                    modifier = Modifier.pointerInput(canSwitchWeek, showNext) {
+                        if (!canSwitchWeek) return@pointerInput
+                        var dragged = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragged = 0f },
+                            onHorizontalDrag = { change, amount ->
+                                dragged += amount
+                                change.consume()
+                            },
+                            onDragEnd = {
+                                // 左滑看下周、右滑回本周；已经在目标周时不重复切换。
+                                val target = when {
+                                    dragged <= -swipeThreshold -> true
+                                    dragged >= swipeThreshold -> false
+                                    else -> null
                                 }
-                                if (index != preview.slots.lastIndex) Spacer(Modifier.height(12.dp))
-                            }
-                            if (preview.cancelled.isNotEmpty()) {
-                                Spacer(Modifier.height(8.dp))
+                                if (target != null && target != showNext) {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                                    preferNextWeek = target
+                                }
+                            },
+                        )
+                    },
+                    transitionSpec = {
+                        val direction = if (targetState) 1 else -1
+                        (slideInHorizontally(
+                            animationSpec = tween(360, easing = QuadraticEaseInOut),
+                            initialOffsetX = { it * direction },
+                        ) + fadeIn(tween(160))) togetherWith
+                            (slideOutHorizontally(
+                                animationSpec = tween(300, easing = QuadraticEaseInOut),
+                                targetOffsetX = { -it * direction },
+                            ) + fadeOut(tween(140)))
+                    },
+                    contentAlignment = Alignment.Center,
+                    label = "week-swipe",
+                ) { next ->
+                    val block = if (next && nextWeekBlock != null) nextWeekBlock else baseWeekBlock
+                    val columns = if (next && nextWeekBlock != null) nextWeekCols else baseWeekCols
+                    WeekGridView(
+                        columns = columns,
+                        isHoliday = block?.week == null,
+                        onSelectCourse = { selectedCourse = it },
+                    )
+                }
+            } else {
+                AnimatedContent(
+                    targetState = showAll,
+                    transitionSpec = {
+                        val collapsing = !targetState
+                        (slideInVertically(
+                            animationSpec = tween(320, easing = QuadraticEaseInOut),
+                            initialOffsetY = { if (collapsing) it / 3 else -it / 3 },
+                        ) + fadeIn(tween(180))) togetherWith
+                            (slideOutVertically(
+                                animationSpec = tween(240, easing = QuadraticEaseInOut),
+                                targetOffsetY = { if (collapsing) -it / 3 else it / 3 },
+                            ) + fadeOut(tween(120)))
+                    },
+                    label = "today-expand",
+                ) { expanded ->
+                    val shown = if (expanded && fullSlots.isNotEmpty()) fullSlots else plan.slots
+                    if (shown.isEmpty()) {
+                        Column {
+                            Text(
+                                "⭐️ ${plan.empty}",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isRestMessage(plan.empty)) SuccessGreen else MaterialTheme.colorScheme.onSurface,
+                            )
+                            plan.tomorrowHint?.let { hint ->
+                                Spacer(Modifier.height(4.dp))
                                 Text(
-                                    "停课：" + preview.cancelled.joinToString("、") { "${it.name} ${it.start}" },
-                                    fontSize = 11.sp,
-                                    color = WarmOrange,
+                                    hint,
+                                    fontSize = 13.sp,
+                                    color = if (isRestMessage(hint)) SuccessGreen else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                        }
-                    }
-                } else {
-                    Column {
-                        shown.forEachIndexed { index, slot ->
-                            LessonRow(slot) {
-                                plan.day?.let { d -> selectedCourse = SelectedCourse(d, listOf(slot)) }
+                            val preview = plan.preview
+                            if (preview != null) {
+                                Spacer(Modifier.height(12.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                                Spacer(Modifier.height(12.dp))
+                                if (plan.showPreviewTitle) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            preview.title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        preview.slots.firstOrNull()?.lesson?.let { first ->
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                first.start, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                                preview.slots.forEachIndexed { index, slot ->
+                                    LessonRow(slot) {
+                                        selectedCourse = SelectedCourse(preview.day, listOf(slot))
+                                    }
+                                    if (index != preview.slots.lastIndex) Spacer(Modifier.height(12.dp))
+                                }
+                                if (preview.cancelled.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        "停课：" + preview.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                                        fontSize = 11.sp,
+                                        color = WarmOrange,
+                                    )
+                                }
                             }
-                            if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
+                        }
+                    } else {
+                        Column {
+                            shown.forEachIndexed { index, slot ->
+                                LessonRow(slot) {
+                                    plan.day?.let { d -> selectedCourse = SelectedCourse(d, listOf(slot)) }
+                                }
+                                if (index != shown.lastIndex) Spacer(Modifier.height(12.dp))
+                            }
                         }
                     }
                 }
-            }
-            if (plan.cancelled.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
-                    fontSize = 11.sp,
-                    color = WarmOrange,
-                )
+                if (plan.cancelled.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "停课：" + plan.cancelled.joinToString("、") { "${it.name} ${it.start}" },
+                        fontSize = 11.sp,
+                        color = WarmOrange,
+                    )
+                }
             }
         }
-        HorizontalDivider(
-            modifier = Modifier.padding(top = 14.dp),
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (mode == CardMode.DAY && hiddenPast > 0) {
-                TextButton(
-                    onClick = { showAll = !showAll },
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
-                        Spacer(Modifier.width(2.dp))
-                        Icon(
-                            painter = painterResource(R.drawable.ic_chevron_down),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .size(14.dp)
-                                .rotate(if (showAll) 180f else 0f),
-                        )
+        if (syncText != null || (mode == CardMode.DAY && hiddenPast > 0)) {
+            HorizontalDivider(
+                modifier = Modifier.padding(top = 14.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (syncText != null) {
+                    Text(
+                        syncText,
+                        fontSize = 11.sp,
+                        color = if (snapshot?.offline == true) WarmOrange
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (mode == CardMode.DAY && hiddenPast > 0) {
+                    TextButton(
+                        onClick = {
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                            showAll = !showAll
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (showAll) "收起" else "查看全天", fontSize = 12.sp)
+                            Spacer(Modifier.width(2.dp))
+                            Icon(
+                                painter = painterResource(R.drawable.ic_chevron_down),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .rotate(if (showAll) 180f else 0f),
+                            )
+                        }
                     }
                 }
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onOpenSite, contentPadding = PaddingValues(0.dp)) {
-                Text("前往网站查看完整课表", fontSize = 12.sp)
-                Spacer(Modifier.width(2.dp))
-                Icon(
-                    painter = painterResource(R.drawable.ic_chevron_right),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(14.dp),
-                )
             }
         }
     }
@@ -553,35 +757,164 @@ private fun ModeToggle(
     mode: CardMode,
     dayLabel: String,
     weekLabel: String,
+    weekSlideDir: Int? = null,
     onSelect: (CardMode) -> Unit,
 ) {
+    SlidingToggle(
+        firstLabel = dayLabel,
+        secondLabel = weekLabel,
+        selectedIndex = if (mode == CardMode.DAY) 0 else 1,
+        secondSlideDir = weekSlideDir,
+        onSelect = { index -> onSelect(if (index == 0) CardMode.DAY else CardMode.WEEK) },
+    )
+}
+
+/** 两段式滑动开关：选中白色胶囊在两端之间滑动，今天/本周和网页/App 共用。 */
+@Composable
+internal fun SlidingToggle(
+    firstLabel: String,
+    secondLabel: String,
+    selectedIndex: Int,
+    secondSlideDir: Int? = null,
+    onSelect: (Int) -> Unit,
+) {
+    val density = LocalDensity.current
+    var firstX by remember { mutableStateOf(0f) }
+    var firstY by remember { mutableStateOf(0f) }
+    var firstWidth by remember { mutableStateOf(0f) }
+    var firstHeight by remember { mutableStateOf(0f) }
+    var secondX by remember { mutableStateOf(0f) }
+    var secondY by remember { mutableStateOf(0f) }
+    var secondWidth by remember { mutableStateOf(0f) }
+    var secondHeight by remember { mutableStateOf(0f) }
+    val targetX = if (selectedIndex == 0) firstX else secondX
+    val targetY = if (selectedIndex == 0) firstY else secondY
+    val targetWidth = if (selectedIndex == 0) firstWidth else secondWidth
+    val targetHeight = if (selectedIndex == 0) firstHeight else secondHeight
+    val indicatorX = remember { Animatable(0f) }
+    val indicatorY = remember { Animatable(0f) }
+    val indicatorWidth = remember { Animatable(0f) }
+    val indicatorHeight = remember { Animatable(0f) }
+    var initialized by remember { mutableStateOf(false) }
+    val springSpec = spring<Float>(dampingRatio = 0.72f, stiffness = 500f)
+    LaunchedEffect(selectedIndex, targetX, targetY, targetWidth, targetHeight) {
+        if (targetWidth <= 0f || targetHeight <= 0f) return@LaunchedEffect
+        if (!initialized) {
+            // 首次排版直接落到目标位置，避免切换页面时自己播放一次滑入动画。
+            indicatorX.snapTo(targetX)
+            indicatorY.snapTo(targetY)
+            indicatorWidth.snapTo(targetWidth)
+            indicatorHeight.snapTo(targetHeight)
+            initialized = true
+        } else {
+            coroutineScope {
+                launch { indicatorX.animateTo(targetX, springSpec) }
+                launch { indicatorY.animateTo(targetY, springSpec) }
+                launch { indicatorWidth.animateTo(targetWidth, springSpec) }
+                launch { indicatorHeight.animateTo(targetHeight, springSpec) }
+            }
+        }
+    }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(50),
     ) {
-        Row(modifier = Modifier.padding(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            ModePill(text = dayLabel, selected = mode == CardMode.DAY) { onSelect(CardMode.DAY) }
-            ModePill(text = weekLabel, selected = mode == CardMode.WEEK) { onSelect(CardMode.WEEK) }
+        Box(Modifier.padding(2.dp)) {
+            if (initialized) {
+                Box(
+                    Modifier
+                        .offset(
+                            x = with(density) { indicatorX.value.toDp() },
+                            y = with(density) { indicatorY.value.toDp() },
+                        )
+                        .width(with(density) { indicatorWidth.value.toDp() })
+                        .height(with(density) { indicatorHeight.value.toDp() })
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.surface),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ModePill(
+                    text = firstLabel,
+                    selected = selectedIndex == 0,
+                    onClick = { onSelect(0) },
+                    onPosition = { x, y, width, height ->
+                        firstX = x
+                        firstY = y
+                        firstWidth = width
+                        firstHeight = height
+                    },
+                )
+                ModePill(
+                    text = secondLabel,
+                    selected = selectedIndex == 1,
+                    slideDir = secondSlideDir,
+                    onClick = { onSelect(1) },
+                    onPosition = { x, y, width, height ->
+                        secondX = x
+                        secondY = y
+                        secondWidth = width
+                        secondHeight = height
+                    },
+                )
+            }
         }
     }
 }
 
 @Composable
-internal fun ModePill(text: String, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
-        contentColor = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-        shape = RoundedCornerShape(50),
+internal fun ModePill(
+    text: String,
+    selected: Boolean,
+    slideDir: Int? = null,
+    onPosition: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val view = LocalView.current
+    val content by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onSurface
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(120),
+        label = "mode-pill-fg",
+    )
+    Box(
         modifier = Modifier
+            .onGloballyPositioned { coordinates ->
+                val position = coordinates.positionInParent()
+                onPosition(
+                    position.x,
+                    position.y,
+                    coordinates.size.width.toFloat(),
+                    coordinates.size.height.toFloat(),
+                )
+            }
             .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+            ) {
+                view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                onClick()
+            }
+            .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        Text(
-            text = text,
-            fontSize = 11.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-        )
+        if (slideDir != null) {
+            SlidingWeekLabel(
+                text = text,
+                slideDir = slideDir,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = content,
+            )
+        } else {
+            Text(
+                text = text,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = content,
+            )
+        }
     }
 }
 
@@ -776,7 +1109,9 @@ private fun WeekCellCard(
         else -> mix(baseColor, Color.White, 0.84f)
     }
     val barColor = if (dim) MaterialTheme.colorScheme.outline else baseColor
+    // App 周视图不再在卡片里重复写起止时间，时间轴和详情弹窗已经足够。
     val pieces = bestPieces(cell, height, measure, innerW, fs, onAxis)
+        .filter { it.kind != Kind.TIME }
 
     Row(
         modifier = Modifier
@@ -936,6 +1271,7 @@ private fun LessonRow(slot: Slot, onClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(IntrinsicSize.Max)
             .clip(RoundedCornerShape(10.dp))
             .let { if (onClick != null) it.clickable(onClick = onClick) else it }
             .alpha(if (slot.state == State.PAST) 0.45f else 1f),
@@ -944,7 +1280,7 @@ private fun LessonRow(slot: Slot, onClick: (() -> Unit)? = null) {
         Box(
             Modifier
                 .width(3.dp)
-                .height(38.dp)
+                .fillMaxHeight()
                 .clip(RoundedCornerShape(2.dp))
                 .background(parseColor(lesson.color)),
         )
@@ -1006,14 +1342,3 @@ private fun noteColor(tone: Tone): Color = when (tone) {
     Tone.FAINT -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
-private fun remainText(ms: Long): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    val hours = total / 3600
-    val minutes = total % 3600 / 60
-    return when {
-        hours >= 1 && minutes >= 1 -> "$hours 小时 $minutes 分钟"
-        hours >= 1 -> "$hours 小时"
-        minutes >= 1 -> "$minutes 分钟"
-        else -> "$total 秒"
-    }
-}

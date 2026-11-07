@@ -98,6 +98,7 @@ val PADDING = 12.dp
 val LIVE = Color(0xFFE03131)
 val WARN = Color(0xFFE8590C)
 val ACCENT = Color(0xFF4B63E0)
+val REST = Color(0xFF2F9E44)   // 没课、可以休息时的绿色
 
 fun parseColor(hex: String): Color = try {
     Color(android.graphics.Color.parseColor(hex))
@@ -164,14 +165,24 @@ fun solid(color: Color): ColorProvider = ColorProvider(day = color, night = colo
 fun openUrl(url: String): Action =
     actionStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
-fun openApp(context: Context): Action =
-    actionStartActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+fun openApp(context: Context, view: String? = null): Action {
+    val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    view?.let { intent.putExtra(MainActivity.EXTRA_VIEW, it) }
+    return actionStartActivity(intent)
+}
 
-/** 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。 */
-fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day"): Action {
+/**
+ * 点小组件：打开网站上对应那天 / 那一周；用户选了打开 App，或没有网站地址时打开 App。
+ * [appView] 是打开 App 时要切到的视图，默认与网站视图一致。
+ */
+fun openDay(context: Context, data: WidgetData, day: Day?, view: String = "day", appView: String = view): Action {
     val snap = data.snapshot
     val site = data.site
-    return if (!data.opensApp && site != null && snap != null) openUrl(siteLink(site, snap.payload, day, view)) else openApp(context)
+    return if (!data.opensApp && site != null && snap != null) {
+        openUrl(siteLink(site, snap.payload, day, view))
+    } else {
+        openApp(context, appView)
+    }
 }
 
 class RefreshAction : ActionCallback {
@@ -213,14 +224,15 @@ fun noteColor(tone: Tone): ColorProvider = when (tone) {
     Tone.FAINT -> GlanceTheme.colors.onSurfaceVariant
 }
 
-/** 标题栏：粗体标题、灰色副标题，右边一句提示和刷新按钮。 */
+/** 标题栏：粗体标题、副标题（可自定义颜色/加粗），右边一句提示和刷新按钮。 */
 @Composable
-fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = false) {
+fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = false,
+           subtitleColor: ColorProvider = GlanceTheme.colors.onSurfaceVariant, subtitleBold: Boolean = false) {
     Row(modifier = GlanceModifier.fillMaxWidth().height(22.dp), verticalAlignment = Alignment.CenterVertically) {
         Label(title, size = if (compact) 13.sp else 14.sp, bold = true, color = GlanceTheme.colors.primary)
         if (subtitle.isNotEmpty()) {
             Spacer(GlanceModifier.width(6.dp))
-            Label(subtitle, size = 12.sp, color = GlanceTheme.colors.onSurfaceVariant)
+            Label(subtitle, size = 12.sp, bold = subtitleBold, color = subtitleColor, lines = 1)
         }
         Spacer(GlanceModifier.defaultWeight())
         if (note != null) Label(note.text, size = 11.sp, color = noteColor(note.tone))
@@ -234,6 +246,12 @@ fun Header(title: String, subtitle: String, note: Note?, compact: Boolean = fals
             )
         }
     }
+}
+
+/** 细分隔线：把"没课休息"和"下次上课"两块内容隔开，避免误读。 */
+@Composable
+fun WidgetDivider(modifier: GlanceModifier = GlanceModifier.fillMaxWidth()) {
+    Spacer(modifier.height(1.dp).background(GlanceTheme.colors.outline))
 }
 
 /** 系统自己走的倒计时（Chronometer），不需要每秒重画小组件。 */
