@@ -44,6 +44,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import wiki.nufe.kebiao.data.Profile
 import wiki.nufe.kebiao.data.AppUpdater
 import wiki.nufe.kebiao.data.Repository
@@ -115,19 +117,28 @@ internal fun AppRoot(
         Reminders.rescheduleAsync(context)
     }
 
+    // cached() 要用 Keystore 解密整学期课表再投影，放到 IO 线程，避免每 30 秒/每次回前台卡主线程。
+    suspend fun reloadLocalNow() {
+        val loaded = withContext(Dispatchers.IO) {
+            Triple(repo.cached(), repo.hasTimetable, repo.needsLogin) to repo.lastError
+        }
+        val (state, lastError) = loaded
+        snapshot = state.first
+        hasTimetable = state.second
+        needsLogin = state.third
+        if (!needsLogin && snapshot?.offline == false && lastError == null) message = null
+    }
+
     fun reloadLocal() {
-        snapshot = repo.cached()
-        hasTimetable = repo.hasTimetable
-        needsLogin = repo.needsLogin
-        if (!needsLogin && snapshot?.offline == false && repo.lastError == null) message = null
+        scope.launch { reloadLocalNow() }
     }
 
     val schoolLogin = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         loggingIn = false
-        reloadLocal()
         scope.launch {
+            reloadLocalNow()
             profile = repo.cachedProfile()
             if (result.resultCode == Activity.RESULT_OK) {
                 message = null
@@ -150,7 +161,7 @@ internal fun AppRoot(
 
     val widgetVersion by WidgetVersion.flow.collectAsState()
     LaunchedEffect(widgetVersion) {
-        reloadLocal()
+        reloadLocalNow()
         profile = repo.cachedProfile()
     }
 
@@ -158,7 +169,7 @@ internal fun AppRoot(
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
-                reloadLocal()
+                reloadLocalNow()
                 delay(30_000)
             }
         }
@@ -177,9 +188,8 @@ internal fun AppRoot(
         fetchJob = scope.launch {
             try {
                 val snap = repo.fetch(refresh = manual)
-                snapshot = snap ?: repo.cached()
-                hasTimetable = repo.hasTimetable
-                needsLogin = repo.needsLogin
+                reloadLocalNow()
+                if (snap != null) snapshot = snap
                 if (manual) {
                     message = when {
                         needsLogin -> "请在 App 内登录学校账号；已保存的课表仍可离线查看。"
@@ -195,7 +205,7 @@ internal fun AppRoot(
                 throw error
             } catch (error: Exception) {
                 Diag.w("school refresh failed: ${error.javaClass.simpleName}")
-                reloadLocal()
+                reloadLocalNow()
                 if (manual) message = repo.lastError ?: "学校暂时不可达，已保留本机课表，请稍后重试。"
             } finally {
                 busy = false
@@ -264,7 +274,7 @@ internal fun AppRoot(
 
     // 个人资料只读取本机加密信息，不向任何服务器索取账号资料。
     LaunchedEffect(tab) {
-        if (tab == Tab.Mine) profile = repo.fetchProfile()
+        if (tab == Tab.Mine) profile = repo.cachedProfile()
     }
 
     LaunchedEffect(loginRequested, busy, loggingIn) {

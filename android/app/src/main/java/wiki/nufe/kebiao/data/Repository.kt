@@ -52,11 +52,6 @@ class Repository(context: Context) {
         get() = prefs.getBoolean(KEY_RHYTHM_12H, true)
         set(value) = prefs.edit().putBoolean(KEY_RHYTHM_12H, value).apply()
 
-    /** 点小组件打开 App；默认 false 打开网站。 */
-    var widgetOpensApp: Boolean
-        get() = prefs.getBoolean(KEY_WIDGET_OPENS_APP, false)
-        set(value) = prefs.edit().putBoolean(KEY_WIDGET_OPENS_APP, value).apply()
-
     /**
      * 小组件上下课重画用闹钟时钟：部分 ROM 上更准时，但状态栏可能显示闹钟图标。
      * 第一次读取时按当时的上课通知定初值并存下来：开着通知的本来就有闹钟图标，自动打开；
@@ -122,7 +117,7 @@ class Repository(context: Context) {
                         .putString("local_error", "学校本次未返回课程，已保留原课表；如确已结课请重新登录导入。").apply()
                     return@withLock cached()?.copy(offline = true)
                 }
-                saveTimetable(timetable)
+                if (!saveTimetable(timetable, epoch)) return@withLock null
                 // 保活探针：认证中心干净地拒绝签票（非网络错）说明 CASTGC 已失效，
                 // 下次教务会话过期就无法静默续期，主动提示重登（网络/5xx 异常按未知处理，不误判）。
                 val keepalive = runCatching { client.touchSso() }.getOrDefault(true)
@@ -168,8 +163,7 @@ class Repository(context: Context) {
 
     private fun commitImport(timetable: JSONObject, jar: SchoolCookieJar, agent: String, epoch: Long): Snapshot {
         // 与 fetch 同理：解析/导入期间被清除就不写回，避免复活旧数据与登录态。
-        if (generation.get() != epoch) throw SchoolPageException("本机数据已清除，请重新登录后再导入")
-        saveTimetable(timetable)
+        if (!saveTimetable(timetable, epoch)) throw SchoolPageException("本机数据已清除，请重新登录后再导入")
         session.save(jar.serialize())
         // 只有真取到学校凭据才算登录成功；抓到空 jar 时保持需登录，别让 App 以为已连上。
         prefs.edit().putString("school_user_agent", agent).putBoolean("needs_login", !jar.hasSession)
@@ -178,7 +172,9 @@ class Repository(context: Context) {
         return requireNotNull(cached())
     }
 
-    private fun saveTimetable(timetable: JSONObject) = synchronized(cacheLock) {
+    /** 在缓存锁内复核代数后落盘：clearLocalData 也持这把锁，二者不会交错写回已清除的数据。 */
+    private fun saveTimetable(timetable: JSONObject, epoch: Long): Boolean = synchronized(cacheLock) {
+        if (generation.get() != epoch) return false
         val bytes = DeviceKeys.encrypt(timetable.toString().toByteArray(Charsets.UTF_8), PURPOSE)
         val output = timetableFile.startWrite()
         try {
@@ -189,6 +185,7 @@ class Repository(context: Context) {
             throw error
         }
         legacyCache.delete()
+        true
     }
 
     private val userAgent: String get() = prefs.getString("school_user_agent", null)
@@ -197,8 +194,6 @@ class Repository(context: Context) {
     suspend fun cachedProfile(): Profile? = withContext(Dispatchers.IO) {
         stored()?.optJSONObject("student")?.let { Profile(StudentInfo.parse(it).takeIf { student -> student.hasData }, null) }
     }
-
-    suspend fun fetchProfile(): Profile? = cachedProfile()
 
     fun clearLocalData() = synchronized(cacheLock) {
         generation.incrementAndGet()
@@ -216,15 +211,7 @@ class Repository(context: Context) {
     companion object {
         private const val PURPOSE = "local-timetable-v1"
         private val cacheLock = Any()
-        private const val KEY_URL = "widget_url"
-        private const val KEY_REMIND = "remind_minutes"
-        private const val KEY_ALARM = "alarm_enabled"
-        private const val KEY_LIVE_UPDATE = "live_update_enabled"
-        private const val KEY_WIDGET_OPENS_APP = "widget_opens_app"
         private const val KEY_RHYTHM_12H = "rhythm_clock_12h"
-        private const val KEY_WIDGET_PUNCTUAL = "widget_punctual"
-        private const val KEY_DEVICE = "device_id"
-        private const val KEY_CLOCK = "device_clock_offset"
         private val syncMutex = Mutex()
         private val generation = java.util.concurrent.atomic.AtomicLong()
         const val DEFAULT_REMIND_MINUTES = 10

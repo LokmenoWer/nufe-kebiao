@@ -95,8 +95,12 @@ class LocalFetch(
         return renewWithTgc()
     }
 
+    private var renewed = false
+
+    /** 用 CASTGC 换一次教务会话。同一次刷新最多换一次，避免反复打认证中心触发风控。 */
     fun renewWithTgc(): String {
-        if (!jar.hasTgc) throw SchoolSessionExpired()
+        if (renewed || !jar.hasTgc) throw SchoolSessionExpired()
+        renewed = true
         val renewed = get(SchoolUrls.SSO)
         if (SchoolUrls.loginPage(renewed.url)) throw SchoolSessionExpired()
         val course = get(SchoolUrls.COURSE)

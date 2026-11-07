@@ -1,5 +1,6 @@
 package wiki.nufe.kebiao.widget
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
 import android.os.Build
@@ -102,6 +103,8 @@ class TextMeasure(context: Context) {
     fun lines(text: String, sp: Float, bold: Boolean, widthDp: Float): Int =
         layout(text, sp, bold, widthDp, Int.MAX_VALUE).lineCount
 
+    // Layout.BREAK_STRATEGY_HIGH_QUALITY 与 API 29 的 LineBreaker 常量同值，minSdk 26 只能用前者。
+    @SuppressLint("WrongConstant")
     private fun layout(text: String, sp: Float, bold: Boolean, widthDp: Float, maxLines: Int): StaticLayout {
         val px = (widthDp * density).toInt().coerceAtLeast(1)
         val builder = StaticLayout.Builder.obtain(text, 0, text.length, paint(sp, bold), px)

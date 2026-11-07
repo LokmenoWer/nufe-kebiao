@@ -65,6 +65,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
@@ -884,10 +886,7 @@ internal fun SlidingToggle(
             if (initialized) {
                 Box(
                     Modifier
-                        .offset(
-                            x = with(density) { indicatorX.value.toDp() },
-                            y = with(density) { indicatorY.value.toDp() },
-                        )
+                        .offset { IntOffset(indicatorX.value.roundToInt(), indicatorY.value.roundToInt()) }
                         .width(with(density) { indicatorWidth.value.toDp() })
                         .height(with(density) { indicatorHeight.value.toDp() })
                         .clip(RoundedCornerShape(50))
