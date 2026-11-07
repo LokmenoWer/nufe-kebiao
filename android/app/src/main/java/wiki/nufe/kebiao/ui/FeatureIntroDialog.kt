@@ -1,5 +1,8 @@
 package wiki.nufe.kebiao.ui
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,9 +20,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,7 +37,15 @@ import wiki.nufe.kebiao.R
 /** 首次安装并完成注册（导入课表）后展示一次，介绍 App 特性。 */
 @Composable
 internal fun FeatureIntroDialog(onDismiss: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
+    val context = LocalContext.current
+    val appIcon = remember {
+        val d = context.packageManager.getApplicationIcon(context.packageName)
+        val px = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(64)
+        val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        d.setBounds(0, 0, px, px)
+        d.draw(Canvas(bmp))
+        bmp.asImageBitmap()
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -43,20 +57,11 @@ internal fun FeatureIntroDialog(onDismiss: () -> Unit) {
             tonalElevation = 2.dp,
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(primary.copy(alpha = 0.12f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_launcher_monochrome),
-                        contentDescription = null,
-                        tint = primary,
-                        modifier = Modifier.size(36.dp),
-                    )
-                }
+                Image(
+                    bitmap = appIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)),
+                )
                 Spacer(Modifier.height(16.dp))
                 Text(
                     "欢迎使用 nufe课表",
