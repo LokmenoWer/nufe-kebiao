@@ -475,3 +475,23 @@
   .week-title { font-size: 14px; }
   .theme-btn { display: none; }
 }
+
+/* ---------- 安卓手机访问时的 App 推荐 ---------- */
+.app-promo {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  width: min(452px, 100%);
+  padding: 14px 44px 14px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: var(--radius-lg, 16px);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.app-promo-icon { display: inline-flex; flex: none; color: var(--accent); padding-top: 2px; }
+.app-promo-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.app-promo-title { font-size: 14px; font-weight: 650; }
+.app-promo-text { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.app-promo .button-row { margin-top: 4px; }
+.app-promo .btn:not(.btn-primary) { background: var(--surface); }
+.app-promo-close { position: absolute; top: 8px; right: 8px; background: transparent; }
