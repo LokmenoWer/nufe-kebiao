@@ -600,16 +600,28 @@ private fun TodayCardView(
                 // 滑到本周、下周以外的周时，一键回到本周
                 if (currentWeekNo != null && currentWeekNo in 1..weeks.size && weekTitle != "本周" && weekTitle != "下周") {
                     Spacer(Modifier.width(8.dp))
-                    TextButton(
-                        onClick = {
-                            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                            weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
-                            preferWeek = currentWeekNo
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp),
+                    Box(
+                        modifier = Modifier
+                            .height(44.dp)
+                            .clickable {
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                                weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
+                                preferWeek = currentWeekNo
+                            },
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text("回到本周", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            contentColor = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(50),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("回到本周", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
                     }
                 }
             }
