@@ -7,8 +7,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.drawable.Icon
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -46,7 +44,6 @@ object LiveUpdates {
         end = intent.getStringExtra("end").orEmpty(),
         name = intent.getStringExtra("name").orEmpty(),
         room = intent.getStringExtra("room").orEmpty(),
-        teachers = intent.getStringExtra("teachers").orEmpty(),
         changed = intent.getBooleanExtra("changed", false),
         was = intent.getStringExtra("was"),
     )
@@ -63,6 +60,12 @@ object LiveUpdates {
         return manager.canPostPromotedNotifications()
     }
 
+    /** 守护服务被系统重启时用：用户仍开着提醒和灵动显示、且系统仍允许流体云，才恢复卡片。 */
+    internal fun restorable(context: Context): Boolean {
+        val repo = Repository(context)
+        return repo.alarmEnabled && repo.liveUpdateEnabled && available(context)
+    }
+
     private fun isColorOs(): Boolean {
         val maker = Build.MANUFACTURER.lowercase()
         val brand = Build.BRAND.lowercase()
@@ -75,7 +78,7 @@ object LiveUpdates {
         if (!available(context)) return false
         val repo = Repository(context)
         val payload = repo.cached()?.payload ?: return false
-        val lead = if (repo.remindMinutes > 0) repo.remindMinutes else 10
+        val lead = if (repo.remindMinutes > 0) repo.remindMinutes else Repository.DEFAULT_REMIND_MINUTES
         val item = Reminders.plan(payload, Now.current(), lead).firstOrNull() ?: return false
         return post(context, item)
     }
@@ -171,7 +174,7 @@ object LiveUpdates {
         )
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify_calendar)
-            .setLargeIcon(appIcon(context))
+            .setLargeIcon(Icon.createWithBitmap(Reminders.appIconBitmap(context)))
             .setContentTitle(course)
             .setContentText(meta)
             .setSubText(status)
@@ -183,16 +186,6 @@ object LiveUpdates {
             .setTimeoutAfter(timeout)
         applyPromotedFlags(builder, short)
         return builder.build()
-    }
-
-    /** 通知右侧的大图标用应用图标（彩色 NUFE 日历）；状态栏小图标仍用单色。 */
-    private fun appIcon(context: Context): Icon {
-        val drawable = context.packageManager.getApplicationIcon(context.packageName)
-        val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(64)
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        drawable.setBounds(0, 0, size, size)
-        drawable.draw(Canvas(bitmap))
-        return Icon.createWithBitmap(bitmap)
     }
 
     /** 剩余分钟数：课前倒数到开课，课上倒数到下课。 */
@@ -294,7 +287,6 @@ object LiveUpdates {
             .putString("end", item.end)
             .putString("name", item.name)
             .putString("room", item.room)
-            .putString("teachers", item.teachers)
             .putBoolean("changed", item.changed)
             .putString("was", item.was)
             .apply()
@@ -317,7 +309,6 @@ object LiveUpdates {
             end = end,
             name = prefs.getString("name", "").orEmpty(),
             room = prefs.getString("room", "").orEmpty(),
-            teachers = prefs.getString("teachers", "").orEmpty(),
             changed = prefs.getBoolean("changed", false),
             was = prefs.getString("was", null),
         )
@@ -353,7 +344,6 @@ object LiveUpdates {
             .putExtra("end", item.end)
             .putExtra("name", item.name)
             .putExtra("room", item.room)
-            .putExtra("teachers", item.teachers)
             .putExtra("changed", item.changed)
             .putExtra("was", item.was)
     }

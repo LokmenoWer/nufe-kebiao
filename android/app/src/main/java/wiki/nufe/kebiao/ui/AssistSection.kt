@@ -52,7 +52,7 @@ import wiki.nufe.kebiao.data.Repository
  * - iOS 数据源：手机刷到课表就推给本站，转发给 Scriptable 小组件与日历订阅。
  */
 @Composable
-internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
+internal fun AssistSection(repo: Repository, onLogin: () -> Unit, onHostingChanged: () -> Unit = {}) {
     val context = LocalContext.current
     val view = LocalView.current
     val clipboard = LocalClipboardManager.current
@@ -63,7 +63,9 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
     val available = remember(enabled) { Community.assistAvailable(context) }
     val helped = remember(enabled) { Community.helpedCount(context) }
     var confirmLeave by remember { mutableStateOf(false) }
-    var leaving by remember { mutableStateOf(false) }
+    // 三个开关的联网操作互斥；busyOn 记下正在处理哪一项，只在那一项显示“处理中”。
+    var busyOn by remember { mutableStateOf<String?>(null) }
+    val leaving = busyOn != null
     var links by remember { mutableStateOf<JSONObject?>(null) }
     var dataMessage by remember { mutableStateOf<String?>(null) }
     var hostMessage by remember { mutableStateOf<String?>(null) }
@@ -78,15 +80,16 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
     fun enrollHosting() {
         if (leaving) return
         hostMessage = null
-        leaving = true
+        busyOn = "host"
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     Hosting.enroll(context, CasSessionManager(context).load(), keepSession = true)
                 }
             }
-            leaving = false
+            busyOn = null
             version++
+            onHostingChanged()
             result.exceptionOrNull()?.let {
                 hostMessage = "开启失败：${it.message ?: "网络错误"}。如本机学校登录已失效，请先在「本地学校登录」重新导入。"
             }
@@ -95,7 +98,7 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
 
     fun toggleDataSource(on: Boolean) {
         if (leaving) return
-        leaving = true
+        busyOn = "data"
         dataMessage = null
         scope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -116,8 +119,9 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
             result.exceptionOrNull()?.let {
                 dataMessage = "开启失败：${it.message ?: "网络错误"}。若本机学校登录已过期，请先重新导入课表。"
             }
-            leaving = false
+            busyOn = null
             version++
+            onHostingChanged()
         }
     }
 
@@ -135,13 +139,13 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
                     Spacer(Modifier.width(6.dp))
                     Tag(
                         when {
-                            leaving -> "处理中"
+                            busyOn == "host" -> "处理中"
                             !hosting.hosted -> "未开启"
                             hosting.status == "ok" -> "已同步"
                             else -> "已开启"
                         },
                         when {
-                            leaving || !hosting.hosted -> MaterialTheme.colorScheme.onSurfaceVariant
+                            busyOn == "host" || !hosting.hosted -> MaterialTheme.colorScheme.onSurfaceVariant
                             hosting.status == "ok" -> SuccessGreen
                             else -> WarmOrange
                         },
@@ -215,7 +219,7 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
                     Spacer(Modifier.width(6.dp))
                     Tag(
                         when {
-                            leaving -> "处理中"
+                            busyOn == "data" -> "处理中"
                             !hosting.dataSource -> "未开启"
                             hosting.pushedAtMs > 0 -> "已同步"
                             else -> "等待推送"
@@ -287,14 +291,15 @@ internal fun AssistSection(repo: Repository, onLogin: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmLeave = false
-                    leaving = true
+                    busyOn = "host"
                     scope.launch {
                         withContext(Dispatchers.IO) {
                             // 还在给 iOS 小组件 / 日历供数：只删本站的登录态，设备与链接保留
                             if (Hosting.dataSource(context)) runCatching { Hosting.forgetSession(context) } else Hosting.leave(context)
                         }
-                        leaving = false
+                        busyOn = null
                         version++
+                        onHostingChanged()
                     }
                 }) { Text("取消托管") }
             },

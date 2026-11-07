@@ -119,17 +119,11 @@ internal fun ignoringBatteryOptimizations(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(context.packageName) == true
 
-/** 用意图直达 ColorOS 的“自启动”页；优先 action（组件可能未导出），失败再试组件，最后退回系统设置。 */
+/**
+ * 尝试打开 ColorOS 的“自启动”页。这些页面多数需要系统权限（oplus.permission.OPLUS_COMPONENT_SAFE），
+ * 第三方 App 通常拉不起来；失败时退回系统设置首页，由界面文案指引用户手动进入“应用 → 自启动”。
+ */
 internal fun openAutoStartSettings(context: Context) {
-    val actions = listOf(
-        "com.oplus.battery.permission.startup.StartupAppListActivity",
-        "com.coloros.safecenter.permission.startup.StartupAppListActivity",
-        "com.oppo.safe.permission.startup.StartupAppListActivity",
-    )
-    for (action in actions) {
-        val intent = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (runCatching { context.startActivity(intent) }.isSuccess) return
-    }
     val pages = listOf(
         ComponentName("com.oplus.battery", "com.oplus.startupapp.view.StartupAppListActivity"),
         ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),

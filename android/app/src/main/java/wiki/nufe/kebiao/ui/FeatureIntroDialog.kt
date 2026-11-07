@@ -1,7 +1,5 @@
 package wiki.nufe.kebiao.ui
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -33,19 +31,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import wiki.nufe.kebiao.R
+import wiki.nufe.kebiao.remind.Reminders
 
 /** 首次安装并完成注册（导入课表）后展示一次，介绍 App 特性。 */
 @Composable
 internal fun FeatureIntroDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val appIcon = remember {
-        val d = context.packageManager.getApplicationIcon(context.packageName)
-        val px = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(64)
-        val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
-        d.setBounds(0, 0, px, px)
-        d.draw(Canvas(bmp))
-        bmp.asImageBitmap()
-    }
+    val appIcon = remember { Reminders.appIconBitmap(context).asImageBitmap() }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),

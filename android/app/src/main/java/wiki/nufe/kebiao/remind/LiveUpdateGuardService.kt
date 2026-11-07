@@ -58,7 +58,8 @@ class LiveUpdateGuardService : Service() {
         }
         Diag.i("live update guard started")
         startTicker()
-        // STICKY：被系统回收后尽量拉起，按持久化的卡片数据恢复流体云（需系统允许自启动）。
+        // STICKY：被系统回收后尽量拉起，按持久化的卡片数据恢复流体云。Android 12+ 后台重启时
+        // 只有已解除电池优化（或允许自启动）才允许再进前台；不允许时上面的 runCatching 会退出，不会崩溃。
         return START_STICKY
     }
 
@@ -98,14 +99,16 @@ class LiveUpdateGuardService : Service() {
     }
 
     /** 进程被回收后系统以 null Intent 重启：按持久化的卡片数据恢复流体云。 */
-    private fun restoredCard(): Triple<Notification, Long, Reminders.Item>? {
+    private fun restoredCard(): Triple<Notification, Long, Reminders.Item>? = runCatching {
+        // 用户在此期间关掉了提醒 / 灵动显示，或在系统里收回了流体云权限：不再恢复。
+        if (!LiveUpdates.restorable(this)) return null
         val item = LiveUpdates.savedItem(this) ?: return null
         val startMs = lessonMs(item.date, item.start)
         val endMs = lessonMs(item.date, item.end)
         val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
         if (dismissMs <= System.currentTimeMillis()) return null
-        return LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
-    }
+        LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
+    }.getOrNull()
 
     private fun guardNotification(): Notification {
         LiveUpdates.ensureChannel(this)

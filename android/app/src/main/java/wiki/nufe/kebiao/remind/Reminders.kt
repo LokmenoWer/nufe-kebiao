@@ -64,7 +64,6 @@ object Reminders {
         val end: String = "",
         val name: String = "",
         val room: String = "",
-        val teachers: String = "",
         val changed: Boolean = false,
         val was: String? = null,
     )
@@ -105,7 +104,6 @@ object Reminders {
                     end = lesson.end,
                     name = lesson.name,
                     room = place,
-                    teachers = lesson.teachers,
                     changed = lesson.changed,
                     was = lesson.was,
                 )
@@ -200,13 +198,20 @@ object Reminders {
         return ALARM_CLOCK_OEMS.any { it in id }
     }
 
-    /** 通知右侧大图标用应用图标（彩色）；状态栏小图标仍用单色。 */
+    @Volatile private var appIconCache: Bitmap? = null
+
+    /**
+     * 彩色应用图标（64dp）：通知右侧大图标与首启弹窗共用；状态栏小图标仍用单色。
+     * 流体云每分钟重发一次，缓存起来避免每次都重新画一张位图。
+     */
     internal fun appIconBitmap(context: Context): Bitmap {
-        val drawable = context.packageManager.getApplicationIcon(context.packageName)
         val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(64)
+        appIconCache?.takeIf { it.width == size }?.let { return it }
+        val drawable = context.packageManager.getApplicationIcon(context.packageName)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         drawable.setBounds(0, 0, size, size)
         drawable.draw(Canvas(bitmap))
+        appIconCache = bitmap
         return bitmap
     }
 
@@ -222,7 +227,6 @@ object Reminders {
                 .putExtra("end", item.end)
                 .putExtra("name", item.name)
                 .putExtra("room", item.room)
-                .putExtra("teachers", item.teachers)
                 .putExtra("changed", item.changed)
                 .putExtra("was", item.was)
         }
@@ -278,12 +282,11 @@ class ReminderReceiver : BroadcastReceiver() {
             Diag.i("reminder skipped: disabled")
             return
         }
-        if (repo.liveUpdateEnabled) {
-            // 灵动显示是普通提醒之上的叠加，不是二选一：额外发一张流体云卡片，普通提醒照常发。
-            if (runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)) {
-                Diag.i("live update posted")
-            }
-        }
+        // 灵动显示是普通提醒之上的叠加，不是二选一：额外发一张流体云卡片，普通提醒照常发；
+        // 流体云已发出时普通提醒改为静默，避免同一节课响两次。
+        val liveShown = repo.liveUpdateEnabled &&
+            runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
+        if (liveShown) Diag.i("live update posted")
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) {
             Diag.i("reminder skipped: stale")
@@ -309,6 +312,7 @@ class ReminderReceiver : BroadcastReceiver() {
             .setContentIntent(open)
             .setAutoCancel(true)
             .setTimeoutAfter(timeout)
+            .setSilent(liveShown)
             .build()
         try {
             NotificationManagerCompat.from(context).notify((at / 60_000L).toInt(), notification)

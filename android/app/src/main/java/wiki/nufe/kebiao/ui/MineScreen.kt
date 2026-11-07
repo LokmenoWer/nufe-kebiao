@@ -75,6 +75,8 @@ internal fun MineScreen(
     onRhythmClockChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
+    var hostingVersion by remember { mutableIntStateOf(0) }
+    val hostingState = remember(hostingVersion) { wiki.nufe.kebiao.data.Hosting.state(context) }
     val liveName = liveUpdateName()
     var confirmRemove by remember { mutableStateOf(false) }
     var showFeedback by remember { mutableStateOf(false) }
@@ -161,10 +163,12 @@ internal fun MineScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             Spacer(Modifier.height(4.dp))
             Hint(
-                if (wiki.nufe.kebiao.data.Hosting.state(context).active) {
-                    "当前已连接 nufe课表 服务器：学校登录状态与课表会加密同步到服务器，可在「互助与同步」里取消。"
-                } else {
-                    "所有个人信息仅保存在本地"
+                when {
+                    hostingState.hosted ->
+                        "当前已连接 nufe课表 服务器：学校登录状态与课表会加密同步到服务器，可在「互助与同步」里取消。"
+                    hostingState.dataSource ->
+                        "当前已连接 nufe课表 服务器：课表会推送到服务器供 iOS 小组件与日历使用，服务器不保存学校登录状态，可在「互助与同步」里取消。"
+                    else -> "所有个人信息仅保存在本地"
                 },
             )
         }
@@ -232,7 +236,7 @@ internal fun MineScreen(
             }
         }
         Spacer(Modifier.height(14.dp))
-        AssistSection(repo = repo, onLogin = onLogin)
+        AssistSection(repo = repo, onLogin = onLogin, onHostingChanged = { hostingVersion++ })
         Spacer(Modifier.height(14.dp))
         WidgetSection()
         Spacer(Modifier.height(14.dp))

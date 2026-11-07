@@ -609,28 +609,27 @@ private fun TodayCardView(
                 // 滑到本周、下周以外的周时，一键回到本周
                 if (currentWeekNo != null && currentWeekNo in 1..weeks.size && weekTitle != "本周" && weekTitle != "下周") {
                     Spacer(Modifier.width(8.dp))
+                    // 高度固定 28dp（与右侧开关同一行，不撑高标题行，避免滑周时下面课表跳动）；
+                    // 波纹裁成胶囊形，点击区就是整个胶囊。
                     Box(
                         modifier = Modifier
-                            .height(44.dp)
-                            .clickable {
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                 view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                                 weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
                                 preferWeek = currentWeekNo
-                            },
+                            }
+                            .padding(horizontal = 12.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                            contentColor = MaterialTheme.colorScheme.primary,
-                            shape = RoundedCornerShape(50),
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text("回到本周", fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                            }
-                        }
+                        Text(
+                            "回到本周",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
             }

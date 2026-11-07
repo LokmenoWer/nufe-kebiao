@@ -242,9 +242,18 @@ internal fun AppRoot(
         }
     }
 
+    // 升级上来的老用户（启动时已有课表）不再弹“欢迎使用”，直接记为已看过。
+    val upgradedUser = remember {
+        hasTimetable.also { had ->
+            if (had && !changeSeenPrefs.getBoolean("feature_intro_seen", false)) {
+                changeSeenPrefs.edit().putBoolean("feature_intro_seen", true).apply()
+            }
+        }
+    }
+
     // 首次安装并注册（拿到课表）后，一次性介绍 App 特性；与权限弹窗不同时叠出。
     LaunchedEffect(hasTimetable, showPermissions) {
-        if (hasTimetable && !showPermissions &&
+        if (!upgradedUser && hasTimetable && !showPermissions &&
             !changeSeenPrefs.getBoolean("feature_intro_seen", false)
         ) {
             showFeatureIntro = true
