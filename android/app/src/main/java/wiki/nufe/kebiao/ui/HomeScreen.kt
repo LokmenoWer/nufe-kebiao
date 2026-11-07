@@ -597,6 +597,21 @@ private fun TodayCardView(
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                // 滑到本周、下周以外的周时，一键回到本周
+                if (currentWeekNo != null && currentWeekNo in 1..weeks.size && weekTitle != "本周" && weekTitle != "下周") {
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        onClick = {
+                            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                            weekDir = if (currentWeekNo > viewWeekNo) 1 else -1
+                            preferWeek = currentWeekNo
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp),
+                    ) {
+                        Text("回到本周", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
             }
             Spacer(Modifier.weight(1f))
             ModeToggle(

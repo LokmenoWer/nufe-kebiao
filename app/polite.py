@@ -73,6 +73,14 @@ class UpstreamYield(Exception):
     """后台请求发现有交互请求在等上游（或全站在暂停访问），本轮让出。"""
 
 
+class RelayFailed(Exception):
+    """经 App 中继的请求没走通（手机断开、超时、要去教务以外的主机）。
+
+    故意不继承 requests 的异常：这是中继手机的问题，不是学校的，不能记进上游健康度，
+    也不能算作这个用户的刷新失败——调用方放弃这次中继，留给服务器直连刷新。
+    """
+
+
 class UpstreamCooldown(requests.exceptions.ConnectionError):
     """学校要求暂停访问，而交互请求不值得为此等太久。"""
 

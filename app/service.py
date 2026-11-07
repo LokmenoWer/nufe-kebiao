@@ -35,7 +35,7 @@ from .config import (
     TIMEZONE,
     semester_overrides,
 )
-from .polite import PoliteSession, UpstreamCooldown, UpstreamYield, dump_cookies, load_cookies
+from .polite import PoliteSession, RelayFailed, UpstreamCooldown, UpstreamYield, dump_cookies, load_cookies
 
 log = logging.getLogger("kebiao.service")
 
@@ -478,6 +478,195 @@ def _complete_login(p: PendingLogin) -> int:
     return uid
 
 
+# ---------- 安卓 App 托管（双层兜底） ----------
+
+APP_COOKIE_HOSTS = frozenset({cas.AUTH_HOST, "jwxt.nufe.edu.cn"})
+APP_COOKIE_MAX = 40
+
+
+def app_cookies(raw) -> list[dict]:
+    """App 交来的学校 cookie：只收学校两个域名下的、格式干净的；其余一律丢弃。"""
+    out = []
+    for c in raw[:APP_COOKIE_MAX] if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        name, value = c.get("name"), c.get("value")
+        domain, path = str(c.get("domain") or "").lstrip("."), c.get("path") or "/"
+        if (not isinstance(name, str) or not isinstance(value, str) or not isinstance(path, str)
+                or domain not in APP_COOKIE_HOSTS or not name or len(name) > 128 or len(value) > 4096
+                or _BAD_COOKIE_CHARS.search(name + value) or not path.startswith("/")):
+            continue
+        if name == "CASTGC" and domain != cas.AUTH_HOST:
+            continue
+        expires = c.get("expires")
+        out.append({"name": name, "value": value, "domain": domain, "path": path[:256], "secure": True,
+                    "expires": int(expires) if isinstance(expires, int | float) and expires > 0 else None})
+    return out
+
+
+def enroll_from_app(cookies: list[dict], keep_session: bool = True) -> int:
+    """App 用自己在 WebView 里登录得到的学校会话来本站托管：本站拿它读一次课表，读得到学号就算本人。
+
+    和网站登录同等强度：能拿出有效学校会话的人就是这个学号的主人。已有账号时只换登录态、不动已存的密码。
+    keep_session=False（只把手机当 iOS 小组件 / 日历的数据源）：验明身份后不留学校会话，课表只靠手机推送；
+    账号原本就有网站存的登录态 / 密码时保持不变，服务器照常刷新，两边谁新用谁。
+    返回 uid；读不到课表抛 LoginRejected。
+    """
+    s = PoliteSession()
+    load_cookies(s, cookies)
+    try:
+        try:
+            data = jwxt.fetch_timetable(s)
+        except jwxt.SessionExpired:
+            if not cas.renew_with_tgc(s):
+                raise LoginRejected("学校登录状态已失效，请在 App 内重新登录后再托管") from None
+            data = jwxt.fetch_timetable(s)
+    except LoginRejected:
+        raise
+    except cas.CasError as e:
+        raise LoginRejected(str(e)) from None
+    except (ValueError, KeyError) as e:
+        log.warning("app enroll: timetable parse failed: %s", type(e).__name__)
+        raise LoginRejected("教务系统返回的课表无法解析，请稍后再试") from None
+    except UpstreamCooldown as e:
+        raise LoginRejected(f"学校服务器繁忙，请约 {e.retry_after} 秒后再试") from None
+    except Exception as e:
+        log.warning("app enroll: timetable fetch failed: %s", type(e).__name__)
+        raise LoginRejected("暂时无法通过学校验证，请稍后再试") from None
+    code = str(data["student"].get("code") or "")
+    if not code:
+        raise LoginRejected("未能从教务系统读取学号")
+    with db.tx() as c:
+        row = c.execute("SELECT id, enc_device_id, cred_mode FROM users WHERE student_id=?", (code,)).fetchone()
+        uid = row["id"] if row else c.execute(
+            "INSERT INTO users(student_id, created_at) VALUES(?,?)", (code, db.now())).lastrowid
+        if not row or not row["enc_device_id"]:
+            c.execute("UPDATE users SET enc_device_id=? WHERE id=?",
+                      (crypto.encrypt(cas.new_device_id().encode(), "device", uid), uid))
+    lock = _locks[uid]
+    if not lock.acquire(timeout=30):
+        raise Busy()
+    try:
+        existing = _stored_cookies(uid)
+        with db.tx() as c:
+            _save_success(c, uid, dump_cookies(s) if keep_session else existing, data, "login")
+            if not keep_session and not existing:
+                # 本站手里没有任何学校凭据：标成“设备数据源”，调度器不再替他刷（刷也刷不了）
+                c.execute("""UPDATE users SET enc_cookies=NULL, cred_mode='device', enc_password=NULL
+                             WHERE id=? AND cred_mode<>'password'""", (uid,))
+    finally:
+        lock.release()
+    return uid
+
+
+def _stored_cookies(uid: int) -> list[dict]:
+    row = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["enc_cookies"]:
+        return []
+    try:
+        cookies = crypto.decrypt_json(row["enc_cookies"], "cookies", uid)
+    except crypto.CryptoError:
+        return []
+    return cookies if isinstance(cookies, list) else []
+
+
+class DevicePushRejected(Exception):
+    """手机推来的课表不能用：给 App 看的原因。"""
+
+
+DEVICE_PUSH_MAX_ACTIVITIES = 600
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def accept_device_push(uid: int, body: dict, now: float | None = None) -> dict:
+    """绑定过的手机把本机刷到的课表推上来，本站据此给 iOS 小组件和日历订阅供数（“设备数据源”）。
+
+    设备签名已经证明是本人的手机；内容仍按教务原始结构过一遍 jwxt.normalize，带了学号就必须是本人。
+    本站自己刷到的那份更新时不覆盖（两边谁新用谁）。
+    """
+    now = db.now() if now is None else now
+    sid = body.get("semester_id")
+    name = body.get("semester_name")
+    acts = body.get("activities")
+    student = body.get("student") if isinstance(body.get("student"), dict) else {}
+    updated = body.get("updated_at")
+    if (not isinstance(sid, int) or isinstance(sid, bool) or not 1 <= sid <= 2_000_000
+            or not isinstance(name, str) or not 0 < len(name) <= 64
+            or not isinstance(acts, list) or len(acts) > DEVICE_PUSH_MAX_ACTIVITIES
+            or not isinstance(updated, int | float) or updated <= 0):
+        raise DevicePushRejected("课表格式不正确")
+    updated = min(float(updated), now)
+    user = db.connect().execute("SELECT student_id, last_success_at, semesters_json, current_semester_id FROM users WHERE id=?",
+                                (uid,)).fetchone()
+    if not user:
+        raise UserGone(uid)
+    # 设备签名已证明是这个账号的手机；本机数据可能读不到学号（部分教务返回不带），读得到就必须是本人
+    code = str(student.get("code") or "")
+    if code and code != user["student_id"]:
+        raise DevicePushRejected("课表不是本人的")
+    if user["current_semester_id"] == sid and (user["last_success_at"] or 0) >= updated:
+        return {"ok": True, "stored": False, "message": "本站已有更新的课表"}
+    normalized = jwxt.normalize({"studentTableVms": [{"name": student.get("name"), "code": user["student_id"],
+                                                      "activities": [a for a in acts if isinstance(a, dict)]}]})
+    semesters = [x for x in _json_list(user["semesters_json"]) if isinstance(x, dict)]
+    if not any(x.get("id") == sid for x in semesters):
+        semesters.append({"id": sid, "name": name})
+    data = {"semester_id": sid, "semester_name": name, "current_semester_id": sid, "semesters": semesters,
+            "semester_detail": None, **normalized}
+    week1 = body.get("week1_monday")
+    lock = _locks[uid]
+    if not lock.acquire(timeout=10):
+        return {"ok": False, "stored": False, "message": "服务器正在刷新，稍后再推"}
+    try:
+        cookies = _stored_cookies(uid)
+        with db.tx() as c:
+            changes = _save_success(c, uid, cookies, data, "device")
+            if not cookies:
+                c.execute("UPDATE users SET enc_cookies=NULL WHERE id=?", (uid,))
+            if isinstance(week1, str) and _DATE_RE.match(week1):
+                c.execute("UPDATE semesters SET week1_monday=COALESCE(week1_monday, ?) WHERE semester_id=?",
+                          (week1, sid))
+            # 手机的抓取时刻才是数据的真实新鲜度
+            c.execute("UPDATE users SET last_success_at=? WHERE id=?", (updated, uid))
+    finally:
+        lock.release()
+    _after_change(uid, "device", changes)
+    return {"ok": True, "stored": True}
+
+
+def forget_session_from_app(uid: int) -> None:
+    """App 里关掉“服务器托管”但仍当数据源：删掉本站存的学校登录态，设备保留。网站上存的密码不动。"""
+    with db.tx() as c:
+        c.execute("UPDATE users SET enc_cookies=NULL, cred_mode='device' WHERE id=? AND cred_mode<>'password'", (uid,))
+        c.execute("UPDATE users SET enc_cookies=NULL WHERE id=? AND cred_mode='password'", (uid,))
+
+
+def leave_from_app(uid: int, device_id: str) -> None:
+    """App 里取消托管：撤掉这台设备，删掉本站存的学校登录态（网站上另存的密码不动，需在网站设置里删）。"""
+    with db.tx() as c:
+        c.execute("DELETE FROM mobile_devices WHERE id=? AND user_id=?", (device_id, uid))
+        c.execute("""UPDATE users SET enc_cookies=NULL, status='needs_rebind',
+                     last_error='已在安卓 App 中取消托管，本站不再自动刷新' WHERE id=? AND cred_mode<>'password'""", (uid,))
+        c.execute("UPDATE users SET enc_cookies=NULL WHERE id=? AND cred_mode='password'", (uid,))
+
+
+def app_timetable(uid: int) -> dict:
+    """给托管的 App：本站这份课表的原始结构（和 App 本机解析器同一套字段）与刷新状态。"""
+    row = db.connect().execute("SELECT status, last_error, last_success_at FROM users WHERE id=?", (uid,)).fetchone()
+    view = timetable_view(uid, None) or {}
+    return {
+        "status": row["status"] if row else "deleted",
+        "last_error": row["last_error"] if row else None,
+        "last_success_at": row["last_success_at"] if row else None,
+        "semester_id": view.get("semester_id"),
+        "semester_name": view.get("semester_name"),
+        "week1_monday": view.get("week1_monday"),
+        "fetched_at": view.get("fetched_at"),
+        "student": {k: (view.get("student") or {}).get(k) for k in ("name", "code")},
+        "activities": view.get("activities") or [],
+    }
+
+
 def forget_password(uid: int) -> None:
     with db.tx() as c:
         # 先覆盖再置空，降低 SQLite 页里留下旧密文的可能
@@ -516,7 +705,8 @@ def delete_user(uid: int) -> None:
 
 # ---------- 刷新 ----------
 
-def refresh_user(uid: int, trigger: str, semester_id: int | None = None) -> dict:
+def refresh_user(uid: int, trigger: str, semester_id: int | None = None,
+                 session: PoliteSession | None = None) -> dict:
     """同一用户同一时刻只允许一个刷新在跑。
 
     手动刷新另有两道闸，避免连点把全站的上游额度都占掉：
@@ -531,7 +721,7 @@ def refresh_user(uid: int, trigger: str, semester_id: int | None = None) -> dict
             cached = _manual_refresh_gate(uid, semester_id)
             if cached:
                 return cached
-        return _refresh_locked(uid, trigger, semester_id)
+        return _refresh_locked(uid, trigger, semester_id, session)
     finally:
         lock.release()
 
@@ -570,12 +760,17 @@ def _renew_with_tgc(s: PoliteSession, uid: int) -> bool:
     return renewed
 
 
-def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
+def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
+                    session: PoliteSession | None = None) -> dict:
+    """session：调用方可以传入换了传输层的会话（App 协助刷新的中继，见 assist.py）。"""
     user = db.connect().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     if not user:
         raise KeyError(uid)
 
-    s = PoliteSession()
+    if user["cred_mode"] == "device" and not user["enc_cookies"]:
+        # 课表由用户自己的安卓手机推送（设备数据源），本站没有学校凭据：不刷、也不记失败
+        return {"ok": False, "status": "device", "message": "课表由你的安卓手机提供，请在 App 内刷新"}
+    s = session or PoliteSession()
     if user["enc_cookies"]:
         try:
             cookies = crypto.decrypt_json(user["enc_cookies"], "cookies", uid)
@@ -616,8 +811,8 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
         return _save_failure(uid, trigger, "needs_rebind", "保存的凭据无法登录，请重新登录本站")
     except NeedsRebind as e:
         return _save_failure(uid, trigger, "needs_rebind", str(e))
-    except UpstreamYield:
-        raise
+    except (UpstreamYield, RelayFailed):
+        raise  # 让路 / 中继没走通：都不是这个用户的失败，不记账
     except UpstreamCooldown as e:
         # 全站在给学校“降温”，不是这个用户的问题：不记失败、不动退避
         return {"ok": False, "status": "cooldown", "retry_after": e.retry_after,
@@ -638,7 +833,7 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None) -> dict:
 def _after_change(uid: int, trigger: str, changes: dict | None) -> None:
     if not changes:
         return
-    if trigger in ("scheduled", "widget"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
+    if trigger in ("scheduled", "widget", "assist", "device"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
         _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
     try:
         n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
@@ -1089,7 +1284,8 @@ def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, i
             f"{_WIDGET_COLS}, {_SIGNAL_COLS}")
     rows = conn.execute(
         f"""SELECT {cols} FROM users
-            WHERE status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?)""",
+            WHERE cred_mode<>'device'
+              AND (status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?))""",
         (now,)).fetchall()
     stale_next = [r["id"] for r in rows
                   if (r["next_class_at"] and r["next_class_at"] <= now)
@@ -1442,7 +1638,7 @@ def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
         c.execute("INSERT INTO refresh_log(user_id, at, trigger, ok, message) VALUES(?,?,?,0,?)",
                   (uid, now, trigger, message))
     # 只提醒后台刷新里的“状态变化”：暂停那一刻发一次；连续失败恰好达到阈值时发一次
-    if trigger == "scheduled" and ((status != "error" and prev_status != status)
+    if trigger in ("scheduled", "assist") and ((status != "error" and prev_status != status)
                                    or (status == "error" and fails == REFRESH_MAX_FAILS)):
         _notify_safely(notify.refresh_paused, uid, status, message)
     return {"ok": False, "status": status, "message": message}

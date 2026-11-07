@@ -68,7 +68,7 @@ const fmtInterval = (min) => (min < 60 ? `${min} 分钟` : min < 1440 ? `${+(min
 const fmtSize = (bytes) => (bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : "—");
 
 const VIA = { web: "网页", widget: "iOS 小组件", mobile: "安卓 App", ics: "日历" };
-const TRIGGER = { widget: "手机代抓", scheduled: "后台", manual: "手动", login: "登录" };
+const TRIGGER = { widget: "手机代抓", assist: "App 协助", device: "App 推送", scheduled: "后台", manual: "手动", login: "登录" };
 const RELOAD_TRIGGER = { sighup: "SIGHUP 信号", admin: "后台手动", watch: "文件监听", manual: "手动" };
 const STATUS_PILL = {
   ok: ["正常", "pill-ok"],
@@ -173,7 +173,7 @@ function attentionBox(o) {
 }
 
 function refreshBars(r) {
-  const rows = ["widget", "scheduled", "manual", "login"].map((t) => ({
+  const rows = ["widget", "assist", "device", "scheduled", "manual", "login"].map((t) => ({
     key: t, ok: r[`${t}_ok`] || 0, fail: r[`${t}_fail`] || 0,
   }));
   const max = Math.max(1, ...rows.map((x) => x.ok + x.fail));
@@ -188,9 +188,9 @@ function refreshBars(r) {
   }));
 }
 
-/** 手机代抓占后台两种刷新的比例：越高，服务器 IP 打学校越少。 */
+/** 手机（代抓 + App 协助）占后台刷新的比例：越高，服务器 IP 打学校越少。 */
 function phoneShare(r) {
-  const phone = r.widget_ok || 0;
+  const phone = (r.widget_ok || 0) + (r.assist_ok || 0) + (r.device_ok || 0);
   const server = (r.scheduled_ok || 0) + (r.scheduled_fail || 0);
   return phone + server ? `${Math.round((phone / (phone + server)) * 100)}%` : "—";
 }
@@ -230,12 +230,13 @@ function renderOverview(o) {
       tile("存了密码", o.password_users, `扫码短效 ${o.sso_short_users}`),
       tile("小组件 / App 链接", o.widget_users, `允许代抓 ${o.phone.enabled}`),
       tile("绑定的安卓设备", o.device_stats.devices, `${o.device_stats.users} 人 · 7 天内活跃 ${o.device_stats.active_7d} 台`),
+      tile("安卓 App 2.0 装机", o.app.total, `7 天内活跃 ${o.app.active_7d} · 开协助 ${o.app.assist_7d}`),
       tile("日历订阅", o.ics_subscribers),
       tile("邮件通知", o.email_users)),
     section("24 小时刷新"),
     tiles(
       tile("刷新次数", count("_ok") + count("_fail"), `成功 ${count("_ok")} · 失败 ${count("_fail")}`),
-      tile("手机代抓占比", phoneShare(r), "手机代抓 ÷（手机代抓 + 后台）")),
+      tile("手机分担占比", phoneShare(r), "（手机代抓 + App 协助 + App 推送）÷（它们 + 后台）")),
     refreshBars(r),
     section("服务器"),
     kv(
@@ -357,12 +358,46 @@ function buildSchedule() {
 
 // ---------- 手机与安卓 ----------
 
+function assistText(s) {
+  if (!s.enabled) return "未开启（服务端 .env 设 ASSIST_ENABLED=1 后才会向 App 派发任务）";
+  return `已开启 · 正在协助 ${s.active}/${s.max_sessions} 台 · 暂由服务器直连的用户 ${s.skipped_users} 名`;
+}
+
+function installState(x) {
+  if (x.assist_block_until && x.assist_block_until * 1000 > Date.now()) {
+    return pill("协助冷却中", "pill-warn", "连续中继失败，暂停派活");
+  }
+  if (x.assist) return pill("开协助", "pill-ok");
+  return x.has_timetable ? pill("已导入课表") : pill("未导入课表");
+}
+
 function renderAndroid(a) {
   const p = a.phone;
   const d = a.device_stats;
   const rel = a.releases;
+  const app = a.app;
   return [
-    section("手机代抓"),
+    section("安卓 App 2.0（本地优先，匿名统计）"),
+    tiles(
+      tile("装机", app.total, `近 7 天新增 ${app.new_7d}`),
+      tile("活跃", app.active_1d, `24 小时 · 7 天 ${app.active_7d} · 30 天 ${app.active_30d}`),
+      tile("已导入课表", app.with_timetable_7d, "7 天内活跃的安装"),
+      tile("开协助刷新", app.assist_7d, `累计成功 ${app.assist_ok} · 中继失败 ${app.assist_fail}`)),
+    kv(
+      ["协助刷新", assistText(a.assist)],
+      ["30 天内版本", app.versions_30d.length ? app.versions_30d.map((v) => `${v.version} × ${v.n}`).join(" · ") : "—"]),
+    h("div", { class: "adm-gap" }),
+    table(["安装", "版本", "系统", "首次", "最近", "状态", "协助"], a.installs.map((x) => h("tr",
+      td("安装", "mono", x.id),
+      td("版本", "mono", x.version || "—"),
+      td("系统", "num", x.sdk ? `API ${x.sdk}` : "—"),
+      td("首次", "num", fmtTime(x.first_seen_at)),
+      td("最近", "num", fmtRel(x.last_seen_at)),
+      td("状态", null, installState(x)),
+      td("协助", "num", x.assist_ok || x.assist_fail ? `成功 ${x.assist_ok} · 失败 ${x.assist_fail}` : "—"))),
+    "还没有 App 上报过心跳"),
+    h("p", { class: "hint adm-gap" }, "App 只上报随机安装 id（本站仅存其哈希，这里显示前 8 位）、版本、系统版本与开关状态，不含学号、姓名或课表。"),
+    section("手机代抓（旧版 App / iOS 小组件）"),
     tiles(
       tile("有链接的用户", p.linked, `允许代抓 ${p.enabled}`),
       tile("代抓正常", p.healthy, "24 小时内成功且之后没失败"),

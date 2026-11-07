@@ -4,6 +4,7 @@ import { post } from "../api.js";
 import { h, on, replace } from "../dom.js";
 import { icon, REPO_URL } from "../icons.js";
 import { createSliderCaptcha } from "../components/slider-captcha.js";
+import { createAppPromo } from "../components/app-promo.js";
 
 const INTRO = {
   pwd: "由服务器代登录学校统一身份认证并仅读取课表数据，密码绝不明文存储。",
@@ -219,7 +220,7 @@ export function mountLogin(root, { onSuccess } = {}) {
       h("a", { href: REPO_URL, target: "_blank", rel: "noopener noreferrer" }, "GitHub"),
       " · GPL-3.0"));
 
-  const page = h("main", { class: "auth-page" }, card, footer);
+  const page = h("main", { class: "auth-page" }, createAppPromo(), card, footer);
   root.replaceChildren(page);
 
   // ---- 状态切换 ----

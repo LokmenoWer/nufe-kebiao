@@ -8,6 +8,7 @@ debug/
 my.json
 .nufe_device_id
 deploy/deploy.env
+deploy/deploy-*.env
 .DS_Store
 *.db
 *.db-wal

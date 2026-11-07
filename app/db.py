@@ -130,6 +130,23 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     created_at  REAL NOT NULL,
     expires_at  REAL NOT NULL
 );
+-- 2.0 起的本地优先安卓 App：不登录本站，只上报匿名心跳（随机安装 id 的哈希、版本），供管理员统计
+CREATE TABLE IF NOT EXISTS app_installs (
+    id_hash        TEXT PRIMARY KEY,   -- sha256(App 生成的随机安装 id)；不含学号等任何个人信息
+    version        TEXT,
+    version_code   INTEGER,
+    sdk            INTEGER,            -- Android API level
+    first_seen_at  REAL NOT NULL,
+    last_seen_at   REAL NOT NULL,
+    has_timetable  INTEGER NOT NULL DEFAULT 0,
+    assist         INTEGER NOT NULL DEFAULT 0,   -- 用户打开了“协助刷新”
+    assist_ok      INTEGER NOT NULL DEFAULT 0,   -- 累计协助成功 / 失败次数
+    assist_fail    INTEGER NOT NULL DEFAULT 0,
+    assist_streak  INTEGER NOT NULL DEFAULT 0,   -- 连续中继失败：到阈值后冷却一段时间不再派活
+    assist_at      REAL,                         -- 最近一次领到任务
+    assist_block_until REAL
+);
+CREATE INDEX IF NOT EXISTS idx_app_installs_seen ON app_installs(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_mobile_devices_user ON mobile_devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_widget_tasks_user ON widget_tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);

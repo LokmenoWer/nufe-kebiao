@@ -25,6 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from . import (
     admin,
     android_releases,
+    assist,
     cas,
     crypto,
     db,
@@ -179,7 +180,12 @@ def _widget_post(request: Request) -> bool:
     path = request.url.path
     return (request.method == "POST" and not request.headers.get("origin")
             and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
-                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload")))))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload", "/leave", "/push", "/forget-session")))
+                 or path in _APP_POSTS))
+
+
+# 安卓 App 的匿名心跳与协助刷新：不用 cookie，凭随机安装 id / 会话 token 认人，同样没有 CSRF 的问题
+_APP_POSTS = frozenset({"/api/app/heartbeat", "/api/app/enroll", "/api/assist/claim", "/api/assist/exchange"})
 
 
 @app.middleware("http")
@@ -196,7 +202,7 @@ async def security_mw(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
         return JSONResponse({"detail": "非法来源"}, 403)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
-                                   and not request.url.path.startswith("/api/admin/")):
+                                   and not request.url.path.startswith(("/api/admin/", "/api/app/", "/api/assist/"))):
         presence.mark_visitor(_client_ip(request))
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -1115,7 +1121,7 @@ def admin_schedule(_csrf=Depends(admin.current_admin)):
 
 
 @app.get("/api/admin/refreshes")
-def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|scheduled|manual|login)$"),
+def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|assist|device|scheduled|manual|login)$"),
                     failed: bool = False, limit: int = Query(100, ge=1, le=500),
                     _csrf=Depends(admin.current_admin)):
     return admin.recent_refreshes(limit, trigger, failed)
@@ -1163,6 +1169,247 @@ async def versioned_asset(version: str, path: str, request: Request):
         resp.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if version == _asset_version()
                                          else "no-cache")
     return resp
+
+
+# ---------- 本地优先安卓 App：匿名统计与协助刷新（见 assist.py） ----------
+
+app_heartbeat_by_ip = RateLimiter(60, 3600, prev=globals().get("app_heartbeat_by_ip"))
+app_new_install_by_ip = RateLimiter(10, 86400, prev=globals().get("app_new_install_by_ip"))
+assist_claim_by_install = RateLimiter(20, 3600, prev=globals().get("assist_claim_by_install"))
+assist_claim_by_ip = RateLimiter(60, 3600, prev=globals().get("assist_claim_by_ip"))
+ASSIST_EXCHANGE_MAX = 1024 * 1024
+
+
+class AppHeartbeatIn(BaseModel):
+    install_id: str = Field(min_length=16, max_length=64)
+    version: str | None = Field(None, max_length=40)
+    version_code: int | None = Field(None, ge=0, le=10_000_000)
+    sdk: int | None = Field(None, ge=1, le=1000)
+    has_timetable: bool = False
+    assist: bool = False
+
+
+@app.post("/api/app/heartbeat")
+def app_heartbeat(body: AppHeartbeatIn, request: Request):
+    """App 的匿名心跳：随机安装 id（只存哈希）+ 版本。不收学号、姓名、课表。"""
+    if not assist.valid_install_id(body.install_id):
+        raise HTTPException(400, "安装 id 格式不正确")
+    ip = _client_ip(request)
+    if not app_heartbeat_by_ip.hit(ip):
+        raise HTTPException(429, "请求过于频繁")
+    recorded = assist.heartbeat(body.install_id, body.version, body.version_code, body.sdk,
+                                body.has_timetable, body.assist, allow_new=False)
+    if not recorded and app_new_install_by_ip.hit(ip):
+        recorded = assist.heartbeat(body.install_id, body.version, body.version_code, body.sdk,
+                                    body.has_timetable, body.assist)
+    return {"ok": recorded, "assist_available": assist.ENABLED}
+
+
+class AssistClaimIn(BaseModel):
+    install_id: str = Field(min_length=16, max_length=64)
+
+
+@app.post("/api/assist/claim")
+def assist_claim(body: AssistClaimIn, request: Request):
+    if not assist.valid_install_id(body.install_id):
+        raise HTTPException(400, "安装 id 格式不正确")
+    if not assist_claim_by_ip.hit(_client_ip(request)) or not assist_claim_by_install.hit(body.install_id):
+        return {"task": None, "reason": "rate_limited"}
+    return assist.claim(body.install_id)
+
+
+@app.post("/api/assist/exchange")
+async def assist_exchange(request: Request):
+    """中继搬运：手机交上从学校收到的密文，取走要发给学校的密文。最多挂起 assist.LONG_POLL 秒。"""
+    size = request.headers.get("content-length") or "0"
+    if not size.isdigit() or int(size) > ASSIST_EXCHANGE_MAX:
+        raise HTTPException(413, "内容过大")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > ASSIST_EXCHANGE_MAX:
+            raise HTTPException(413, "内容过大")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "格式不正确") from None
+    if (not isinstance(body, dict) or not isinstance(body.get("session"), str)
+            or not isinstance(body.get("token"), str) or not isinstance(body.get("events", []), list)):
+        raise HTTPException(400, "格式不正确")
+    events = [e for e in body.get("events", [])[:64] if isinstance(e, dict)]
+    out = await asyncio.to_thread(assist.exchange, body["session"][:40], body["token"][:64], events)
+    if out is None:
+        raise HTTPException(404, "会话不存在")
+    return out
+
+
+app_enroll_by_ip = RateLimiter(10, 3600, prev=globals().get("app_enroll_by_ip"))
+
+
+class AppEnrollIn(BaseModel):
+    cookies: list[dict] = Field(max_length=service.APP_COOKIE_MAX)
+    public_key: str = Field(max_length=512)
+    name: str = Field("", max_length=128)
+    keep_session: bool = True   # False：只把手机当 iOS 小组件 / 日历的数据源，本站不留学校登录态
+
+
+def _ensure_widget_token(uid: int) -> str:
+    """托管需要一个只读链接作为设备的“门牌”。已有就沿用（重新生成会让用户别的小组件 / 设备失效）。"""
+    token = _widget_token(uid)
+    if token:
+        return token
+    token = secrets.token_urlsafe(24)
+    with db.tx() as c:
+        c.execute("UPDATE users SET widget_token_hash=?, enc_widget_token=? WHERE id=? AND enc_widget_token IS NULL",
+                  (crypto.token_hash(token), crypto.encrypt(token.encode(), "widget", uid), uid))
+    return _widget_token(uid) or token
+
+
+@app.post("/api/app/enroll")
+async def app_enroll(body: AppEnrollIn, request: Request):
+    """App 2.x 登录时勾了“托管到本站”：凭刚拿到的学校会话建号 / 换登录态，并直接绑定这台设备。
+
+    双层兜底：手机本机刷新失败时读本站这份；本站的登录态失效时，App 下次本机刷新成功会再交一次。
+    """
+    cookies = service.app_cookies(body.cookies)
+    if not any(c["domain"] == "jwxt.nufe.edu.cn" for c in cookies) and not any(c["name"] == "CASTGC" for c in cookies):
+        raise HTTPException(400, "没有可用的学校登录状态")
+    if not app_enroll_by_ip.hit(_client_ip(request)):
+        raise HTTPException(429, "尝试太频繁，请稍后再试")
+    try:
+        mobile_devices._public_key_der(body.public_key)
+    except mobile_devices.PairError as e:
+        raise HTTPException(400, str(e)) from e
+
+    def run():
+        try:
+            return service.enroll_from_app(cookies, keep_session=body.keep_session)
+        except service.LoginRejected as e:
+            raise HTTPException(400, str(e)) from None
+        except service.Busy:
+            raise HTTPException(409, "正在刷新，请稍后再试") from None
+
+    uid = await _upstream_call(run)
+    token = await asyncio.to_thread(_ensure_widget_token, uid)
+    device_id = await asyncio.to_thread(mobile_devices.bind_verified, uid, body.public_key, body.name)
+    await asyncio.to_thread(notify.device_bound, uid, body.name.strip()[:64] or "安卓设备")
+    row = db.connect().execute("SELECT student_id, name FROM users WHERE id=?", (uid,)).fetchone()
+    return JSONResponse({"token": token, "device_id": device_id,
+                         "student": {"code": row["student_id"], "name": row["name"]}},
+                        headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+def _signed_device(token: str, request: Request):
+    """/mobile/{token}/… 里要带设备签名的接口：返回 (user, None) 或 (None, 401 响应)。"""
+    user = _widget_user(token)
+    h = request.headers
+    try:
+        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+                                    h.get("x-device-signature", ""))
+    except mobile_devices.AuthError as e:
+        body = {"detail": "设备未绑定或签名无效"}
+        if e.skew:
+            body["server_time"] = int(db.now())
+        return None, JSONResponse(body, status_code=401, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+    return user, None
+
+
+@app.get("/mobile/{token}/timetable")
+def mobile_timetable(token: str, request: Request):
+    """托管的 App 读本站这份课表（原始排课，App 本机再投影）。也算“还在用”，到期会被排进后台刷新。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    presence.mark_user(user["id"], "mobile")
+    _record_use(user["id"])
+    return JSONResponse(service.app_timetable(user["id"]), headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+DEVICE_PUSH_MAX = 1024 * 1024
+
+
+@app.post("/mobile/{token}/push")
+async def mobile_push(token: str, request: Request):
+    """设备数据源：手机把本机刷到的课表推上来，iOS 小组件（/widget/…）和日历订阅（/ics/…）就读这份。"""
+    user, denied = await asyncio.to_thread(_signed_device, token, request)
+    if denied:
+        return denied
+    size = request.headers.get("content-length") or "0"
+    if not size.isdigit() or int(size) > DEVICE_PUSH_MAX:
+        raise HTTPException(413, "内容过大")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > DEVICE_PUSH_MAX:
+            raise HTTPException(413, "内容过大")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "格式不正确") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "格式不正确")
+
+    def run():
+        try:
+            return service.accept_device_push(user["id"], body)
+        except service.DevicePushRejected as e:
+            log.info("device push rejected for user %s: %s", user["id"], e)
+            raise HTTPException(400, str(e)) from None
+        except service.UserGone:
+            raise HTTPException(404) from None
+
+    out = await asyncio.to_thread(run)
+    return JSONResponse(out, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+def _ensure_ics_token(uid: int) -> str | None:
+    """日历订阅链接：已有就沿用，没有就生成一个（和网站设置页的“生成订阅链接”同一个 token）。"""
+    url = _ics_url(uid)
+    if url:
+        return url
+    token = secrets.token_urlsafe(24)
+    with db.tx() as c:
+        c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=? AND enc_ics_token IS NULL",
+                  (crypto.token_hash(token), crypto.encrypt(token.encode(), "ics", uid), uid))
+    return _ics_url(uid)
+
+
+@app.get("/mobile/{token}/links")
+def mobile_links(token: str, request: Request):
+    """给 App 展示的 iOS 小组件与日历订阅链接（只给签名过的本人设备）。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    ics = _ensure_ics_token(user["id"])
+    row = db.connect().execute("SELECT cred_mode, enc_cookies IS NOT NULL AS hosted, last_success_at FROM users WHERE id=?",
+                               (user["id"],)).fetchone()
+    return JSONResponse({
+        "widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json",
+        "script_url": f"{PUBLIC_BASE_URL}/widget/{token}.js",
+        "ics_url": ics,
+        "webcal_url": ics.replace("https://", "webcal://", 1).replace("http://", "webcal://", 1) if ics else None,
+        "server_refresh": bool(row["hosted"]) or row["cred_mode"] == "password",
+        "last_success_at": row["last_success_at"],
+    }, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+@app.post("/mobile/{token}/forget-session")
+def mobile_forget_session(token: str, request: Request):
+    """关掉服务器托管但保留数据源：删本站的学校登录态，设备与链接都保留。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    service.forget_session_from_app(user["id"])
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+@app.post("/mobile/{token}/leave")
+def mobile_leave(token: str, request: Request):
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    service.leave_from_app(user["id"], request.headers.get("x-device-id", ""))
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 @app.get("/android/releases.json")

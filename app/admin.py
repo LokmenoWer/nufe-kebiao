@@ -24,6 +24,7 @@ from fastapi import Depends, HTTPException, Request, Response
 
 from . import (
     android_releases,
+    assist,
     crypto,
     db,
     mobile_devices,
@@ -303,6 +304,9 @@ def android() -> dict:
         "devices": [{"student": mask_id(r["student_id"]), "name": r["name"], "created_at": r["created_at"],
                      "last_seen_at": r["last_seen_at"]} for r in rows],
         "releases": android_releases.status(),
+        "app": assist.install_stats(now),
+        "installs": assist.recent_installs(),
+        "assist": assist.state(),
     }
 
 
@@ -341,6 +345,8 @@ def overview() -> dict:
         "scheduler": _scheduler_state(),
         "phone": _phone_stats(conn, now),
         "device_stats": _device_stats(conn, now),
+        "app": assist.install_stats(now),
+        "assist": assist.state(),
         "release_sync": android_releases.sync_state(),
         "reload": reloader.status(),
     }

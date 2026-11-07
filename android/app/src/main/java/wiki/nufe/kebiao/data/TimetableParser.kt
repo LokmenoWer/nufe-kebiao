@@ -58,12 +58,35 @@ object TimetableParser {
         require(semesterDetail == null || semesterDetail.isNull("id") || integer(semesterDetail.opt("id")) == sid) {
             "学期详情与课表学期不一致"
         }
+        return assemble(sid, name, activities, student, detailMonday(semesterDetail), previous, Math.floorDiv(nowMs, 1000))
+    }
+
+    /**
+     * 托管到本站时，本机刷新失败就用本站那份（/mobile/{token}/timetable）。本站存的排课和本机解析器同一套字段
+     * （本解析器就是 jwxt.normalize 的移植），照样逐条校验、和旧课表比出调课。
+     */
+    fun fromServer(server: JSONObject, previous: JSONObject? = null, nowMs: Long = System.currentTimeMillis()): JSONObject {
+        val sid = integer(server.opt("semester_id")) ?: invalid("本站课表缺少学期 id")
+        val name = scalarText(server, "semester_name").ifBlank { sid.toString() }
+        val activities = readActivities(server.optJSONArray("activities") ?: invalid("本站课表缺少 activities 数组"))
+        val student = JSONObject()
+        server.optJSONObject("student")?.let { s ->
+            for (key in listOf("name", "code")) scalarText(s, key).takeIf { it.isNotBlank() }?.let { student.put(key, it) }
+        }
+        val fetched = (server.opt("fetched_at") as? Number)?.toLong() ?: Math.floorDiv(nowMs, 1000)
+        return assemble(sid, name, activities, student, date(server.optString("week1_monday")), previous,
+            minOf(fetched, Math.floorDiv(nowMs, 1000)))
+    }
+
+    private fun assemble(
+        sid: Int, name: String, activities: List<Activity>, student: JSONObject, sourceMonday: LocalDate?,
+        previous: JSONObject?, now: Long,
+    ): JSONObject {
         val sameSemester = previous?.let { integer(it.opt("semester_id")) == sid } == true
         val cachedMonday = if (sameSemester) date(previous.optString("week1_monday")) else null
-        val monday = calendar[name] ?: detailMonday(semesterDetail) ?: cachedMonday
+        val monday = calendar[name] ?: sourceMonday ?: cachedMonday
             ?: invalid("学期 $name 的校历未知：缺少第 1 周周一，请获取学期详情")
         require(monday.dayOfWeek.value == 1) { "学期校历的第 1 周日期不是周一" }
-        val now = Math.floorDiv(nowMs, 1000)
         val history = if (sameSemester) recent(previous.optJSONArray("changes"), sid, now).toMutableList()
             else mutableListOf()
         if (sameSemester) {

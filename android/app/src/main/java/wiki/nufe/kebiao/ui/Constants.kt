@@ -2,7 +2,7 @@ package wiki.nufe.kebiao.ui
 
 import androidx.compose.ui.graphics.Color
 
-internal const val SITE_URL = "https://kebiao.nufe.wiki"
+internal val SITE_URL: String = wiki.nufe.kebiao.BuildConfig.SITE
 internal const val REPO_URL = "https://github.com/LokmenoWer/nufe-kebiao"
 internal const val FEEDBACK_EMAIL = "lokmenower@163.com"
 internal const val PIN_COOLDOWN_MS = 2_000L

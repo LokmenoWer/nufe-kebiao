@@ -49,6 +49,21 @@ class MainActivity : ComponentActivity() {
             Reminders.reschedule(this@MainActivity)
             Sync.armBoundary(this@MainActivity)
             Sync.schedule(this@MainActivity)
+            scheduleCommunity(this@MainActivity)
+        }
+        // 只在调试包里：adb shell am start ... --ez assist_now true 立刻跑一次协助刷新（周期任务不能提前跑）
+        val debuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggable && intent?.getBooleanExtra("assist_now", false) == true) {
+            wiki.nufe.kebiao.assist.AssistWorker.runOnce(this)
+        }
+        // 只在调试包里：--ez host_now true 用本机已存的学校会话立即托管一次，再刷新（验证双层兜底）
+        if (debuggable && intent?.getBooleanExtra("host_now", false) == true) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                val app = applicationContext
+                val r = runCatching { wiki.nufe.kebiao.data.Hosting.enroll(app, wiki.nufe.kebiao.data.CasSessionManager(app).load()) }
+                Diag.i("debug host_now: ${r.exceptionOrNull()?.message ?: "ok"}")
+                wiki.nufe.kebiao.sync.Sync.now(app, refresh = true)
+            }
         }
         publishWidgetPreviews()
     }

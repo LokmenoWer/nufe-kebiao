@@ -474,4 +474,38 @@ class TimetableParserTest {
         assertEquals("周二 9/8 新增", c4[0].detail)
         assertEquals("新课程", c4[0].name)
     }
+
+    private fun server(vararg activities: JSONObject, sid: Any = parse(activity()).get("semester_id"),
+                       monday: String = parse(activity()).getString("week1_monday"), fetched: Long = ms() / 1000) =
+        JSONObject().put("status", "ok").put("semester_id", sid).put("semester_name", parse(activity()).getString("semester_name"))
+            .put("week1_monday", monday).put("fetched_at", fetched + 0.5)
+            .put("student", JSONObject().put("name", "合成同学").put("code", "SYNTHETIC-002"))
+            .put("activities", JSONArray(activities.toList()))
+
+    @Test fun importsHostedServerCopyWithSameSchemaAsLocalParse() {
+        val local = parse(activity())
+        val hosted = TimetableParser.fromServer(server(activity()), nowMs = ms())
+        assertEquals(local.get("semester_id"), hosted.get("semester_id"))
+        assertEquals(local.getString("week1_monday"), hosted.getString("week1_monday"))
+        assertEquals(local.getJSONArray("activities").toString(), hosted.getJSONArray("activities").toString())
+        assertEquals("SYNTHETIC-002", hosted.getJSONObject("student").getString("code"))
+        assertEquals(ms() / 1000, hosted.getLong("updated_at"))  // 用服务器抓取的时刻，而不是“现在”
+    }
+
+    @Test fun hostedServerCopyIsDiffedAgainstLocalForChanges() {
+        val initial = parse(activity())
+        val at = ms() + 120_000
+        val hosted = TimetableParser.fromServer(server(activity(room = "B202"), fetched = at / 1000), initial, at)
+        val lesson = TimetableParser.payload(hosted, at).today!!.lessons.single()
+        assertTrue(lesson.changed)
+        assertEquals("原 A101", lesson.was)
+    }
+
+    @Test fun rejectsMalformedHostedServerCopy() {
+        assertInvalid("学期 id") { TimetableParser.fromServer(server(activity()).put("semester_id", JSONObject.NULL)) }
+        assertInvalid { TimetableParser.fromServer(server(JSONObject().put("courseName", "x"))) }
+        // 本学期有内置校历：服务器给错的第 1 周日期也以内置为准，和本机解析一致
+        val fixed = TimetableParser.fromServer(server(activity(), monday = "2026-09-08"), nowMs = ms())
+        assertEquals(parse(activity()).getString("week1_monday"), fixed.getString("week1_monday"))
+    }
 }

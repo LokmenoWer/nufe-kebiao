@@ -265,7 +265,7 @@ class AppUpdater(context: Context) {
 
     private companion object {
         const val CHECK_EVERY_MS = 24 * 60 * 60_000L
-        const val DEFAULT_SITE = "https://kebiao.nufe.wiki"
+        val DEFAULT_SITE: String = wiki.nufe.kebiao.BuildConfig.SITE
         const val APK_MIME = "application/vnd.android.package-archive"
         const val MAX_APK_BYTES = 64 * 1024 * 1024L
         const val KEY_LAST = "last_check"

@@ -38,6 +38,8 @@ export function createAndroidSection({ mobileUrl, onChange } = {}) {
     h("li", {}, "在 App 内开启“上课通知”并设定提前提醒时间；国产定制系统请在电池设置中允许 App 自启动与后台不受限运行。"));
 
   const el = h("div", { class: "widget-settings" },
+    h("div", { class: "callout" }, "App 2.0 起可在手机上直接登录学校、课表只保存在本机，无需本站账号，也不需要下面的配对链接；"
+      + "可直接", h("a", { href: "android/latest.apk" }, "下载最新版安装包"), "。以下配对仅供旧版（1.x）App 使用。"),
     h("p", { class: "hint" }, "使用“nufe课表”安卓 App 查看今日与本周课程、添加桌面小组件并接收课前提醒。"
       + "课表基础链接不包含姓名、学号等个人身份信息，个人信息仅向已完成绑定的设备提供；绑定后 App 还会协助使用手机网络向教务系统同步课表"
       + "（可在上方 iOS 小组件模块中统一开关）。若手机丢失或链接外泄，请及时点击“重新生成”。"),

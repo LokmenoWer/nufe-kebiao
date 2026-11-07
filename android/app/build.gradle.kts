@@ -6,6 +6,11 @@ plugins {
 }
 
 // 发布签名：android/keystore.properties（不进仓库）写 storeFile / storePassword / keyAlias / keyPassword
+// 本 App 唯一会联系的项目服务器（心跳、托管、协助刷新、更新检查）。默认官网；
+// 给 beta 站测试的预发布包：./gradlew assembleRelease -PkebiaoSite=https://beta.kebiao.nufe.wiki
+val kebiaoSite = (findProperty("kebiaoSite") as String?)?.trimEnd('/') ?: "https://kebiao.nufe.wiki"
+require(Regex("""^https://[a-z0-9.-]+$""").matches(kebiaoSite)) { "kebiaoSite 必须是 https://主机名" }
+
 val keystore = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { file ->
     Properties().apply { file.inputStream().use { load(it) } }
 }
@@ -18,8 +23,9 @@ android {
         applicationId = "wiki.nufe.kebiao"
         minSdk = 26
         targetSdk = 37
-        versionCode = 22
-        versionName = "2.0.1"
+        versionCode = 24
+        versionName = "2.1.0"
+        buildConfigField("String", "SITE", "\"$kebiaoSite\"")
     }
 
     signingConfigs {
@@ -48,6 +54,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

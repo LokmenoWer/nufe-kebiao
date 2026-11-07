@@ -61,6 +61,7 @@ _RELOAD_ORDER = (
     "app.notify",
     "app.service",
     "app.scheduler",
+    "app.assist",
     "app.admin",
     "app.main",
 )

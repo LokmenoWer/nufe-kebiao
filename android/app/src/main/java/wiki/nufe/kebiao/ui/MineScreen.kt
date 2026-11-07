@@ -226,6 +226,10 @@ internal fun MineScreen(
             }
         }
         Spacer(Modifier.height(14.dp))
+        AssistSection(onLogin = onLogin)
+        Spacer(Modifier.height(14.dp))
+        DataSourceSection(repo = repo, onLogin = onLogin)
+        Spacer(Modifier.height(14.dp))
         WidgetSection()
         Spacer(Modifier.height(14.dp))
         ReminderSection(

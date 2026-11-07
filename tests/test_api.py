@@ -2841,3 +2841,187 @@ def test_pending_login_capacity_cap_evicts_oldest_and_wipes_password(up, monkeyp
     assert fids[0] not in service._pending
     assert flows[0].password == ""  # 被挤出的半途流程立即擦除内存中的明文密码
     assert fids[-1] in service._pending
+
+
+# ---------- 安卓 App 2.x 托管（双层兜底） ----------
+
+def _app_cookies(sid):
+    return [{"name": "CASTGC", "value": f"tgc-{sid}", "domain": "authserver.nufe.edu.cn", "path": "/authserver",
+             "expires": TGC_REMEMBER_UNTIL},
+            {"name": "SESSION", "value": "jw", "domain": "jwxt.nufe.edu.cn", "path": "/student"},
+            {"name": "evil", "value": "x", "domain": "example.com", "path": "/"},
+            {"name": "CASTGC", "value": "bad", "domain": "jwxt.nufe.edu.cn", "path": "/"}]
+
+
+class HostedApp:
+    def __init__(self):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.token = self.device_id = None
+
+    def public(self):
+        return base64.b64encode(self.key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+
+    def enroll(self, sid, **kw):
+        main.app_enroll_by_ip._hits.clear()
+        r = TestClient(app).post("/api/app/enroll", json={"cookies": kw.pop("cookies", _app_cookies(sid)),
+                                                          "public_key": self.public(), "name": "Pixel"}, **kw)
+        if r.status_code == 200:
+            self.token, self.device_id = r.json()["token"], r.json()["device_id"]
+        return r
+
+    def signed(self):
+        ts = str(int(time.time()))
+        sig = self.key.sign(mobile_devices.signed_message(self.token, self.device_id, ts), ec.ECDSA(hashes.SHA256()))
+        return {"X-Device-Id": self.device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+
+
+def test_app_enroll_creates_account_and_binds_device(up):
+    phone = HostedApp()
+    r = phone.enroll("2023001")
+    assert r.status_code == 200 and r.json()["student"]["code"] == "2023001"
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT status, cred_mode, enc_password FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["status"], row["cred_mode"], row["enc_password"]) == ("ok", "cookie", None)
+    # 只留下学校两个域名、格式正确的 cookie；教务域名下冒充的 CASTGC 被丢弃
+    from app import crypto
+    jar = crypto.decrypt_json(db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0],
+                              "cookies", uid)
+    assert sorted((c["name"], c["domain"]) for c in jar) == [("CASTGC", "authserver.nufe.edu.cn"),
+                                                             ("SESSION", "jwxt.nufe.edu.cn")]
+    t = TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).json()
+    assert t["status"] == "ok" and t["student"] == {"name": "学生1", "code": "2023001"}
+    assert t["activities"][0]["courseName"] == "高数" and t["semester_id"] == 161
+    assert mobile_devices.list_devices(uid)[0]["name"] == "Pixel"
+
+
+def test_app_enroll_rejects_dead_session(up):
+    up.expired.add("2023001")
+    r = HostedApp().enroll("2023001")
+    assert r.status_code == 400 and "重新登录" in r.json()["detail"]
+    assert db.connect().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+
+
+def test_app_enroll_needs_school_cookies(up):
+    r = HostedApp().enroll("2023001", cookies=[{"name": "a", "value": "b", "domain": "example.com", "path": "/"}])
+    assert r.status_code == 400
+
+
+def test_app_enroll_keeps_existing_website_account_and_link(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    old_token = c.post("/api/widget/rotate", headers=_csrf(c)).json()["widget_url"].split("/")[-1][:-5]
+    phone = HostedApp()
+    assert phone.enroll("2023001").status_code == 200
+    assert phone.token == old_token  # 不重新生成链接：用户的 iOS 小组件 / 旧设备不受影响
+    row = db.connect().execute("SELECT cred_mode FROM users WHERE student_id='2023001'").fetchone()
+    assert row["cred_mode"] == "password"  # 网站上存的密码不动
+    # 同一把设备公钥再托管：只换 id，不重复占名额
+    assert phone.enroll("2023001").status_code == 200
+    assert len(mobile_devices.list_devices(service_uid("2023001"))) == 1
+
+
+def test_app_timetable_requires_device_signature(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable").status_code == 401
+    other = HostedApp()
+    other.token, other.device_id = phone.token, phone.device_id
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=other.signed()).status_code == 401
+
+
+def test_app_leave_forgets_school_session(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).post(f"/mobile/{phone.token}/leave", headers=phone.signed()).json() == {"ok": True}
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT status, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+    assert row["enc_cookies"] is None and row["status"] == "needs_rebind"
+    assert mobile_devices.list_devices(uid) == []
+    assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401
+
+
+# ---------- 设备数据源：安卓手机给 iOS 小组件与日历供数 ----------
+
+def _push_body(sid="2023001", course="手机推的课", updated=None, semester_id=161):
+    return {"semester_id": semester_id, "semester_name": "2026-2027-1", "week1_monday": "2026-09-07",
+            "updated_at": updated or time.time(), "student": {"name": "学生1", "code": sid},
+            "activities": [{"courseName": course, "teachers": ["T"], "weekday": 2, "startUnit": 3, "endUnit": 4,
+                            "weekIndexes": list(range(1, 17)), "weeksStr": "1~16", "room": "C301", "building": "",
+                            "campus": "", "startTime": "10:00", "endTime": "11:35"}]}
+
+
+def _push(phone, body):
+    return TestClient(app).post(f"/mobile/{phone.token}/push", json=body, headers=phone.signed())
+
+
+def test_data_source_only_enroll_keeps_no_school_session(up):
+    phone = HostedApp()
+    main.app_enroll_by_ip._hits.clear()
+    r = TestClient(app).post("/api/app/enroll", json={"cookies": _app_cookies("2023001"), "public_key": phone.public(),
+                                                      "name": "Pixel", "keep_session": False})
+    assert r.status_code == 200
+    phone.token, phone.device_id = r.json()["token"], r.json()["device_id"]
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT cred_mode, enc_cookies, status FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["cred_mode"], row["enc_cookies"], row["status"]) == ("device", None, "ok")
+    # 调度器不替他刷；网站上点刷新也不会把他打成“需重新登录”
+    assert uid not in {u for _s, u in service.candidates(now=time.time() + 30 * 86400, limit=100)}
+    assert service.refresh_user(uid, "manual")["status"] == "device"
+    assert db.connect().execute("SELECT status FROM users WHERE id=?", (uid,)).fetchone()["status"] == "ok"
+
+    links = TestClient(app).get(f"/mobile/{phone.token}/links", headers=phone.signed()).json()
+    assert links["widget_url"].endswith(f"/widget/{phone.token}.json") and links["ics_url"].endswith(".ics")
+    assert links["webcal_url"].startswith("webcal://") and links["server_refresh"] is False
+
+    assert _push(phone, _push_body()).json() == {"ok": True, "stored": True}
+    feed = TestClient(app).get(f"/widget/{phone.token}.json").json()
+    assert "手机推的课" in json.dumps(feed, ensure_ascii=False)
+    ics = TestClient(app).get(links["ics_url"].removeprefix("http://testserver")).text
+    assert "手机推的课" in ics
+    row = db.connect().execute("SELECT enc_cookies, cred_mode FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["enc_cookies"], row["cred_mode"]) == (None, "device")
+    assert db.connect().execute("SELECT trigger FROM refresh_log WHERE user_id=? ORDER BY at DESC", (uid,)).fetchone()[0] == "device"
+
+
+def test_device_push_checks_owner_shape_and_freshness(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert _push(phone, _push_body(sid="2023002")).status_code == 400  # 不是本人的课表
+    # 本机数据没读到学号：设备签名已证明身份，照收
+    no_code = _push_body(course="无学号", updated=time.time() + 1)
+    no_code["student"] = {}
+    assert _push(phone, no_code).json()["stored"] is True
+    assert _push(phone, {**_push_body(), "activities": "x"}).status_code == 400
+    assert TestClient(app).post(f"/mobile/{phone.token}/push", json=_push_body()).status_code == 401  # 没签名
+    # 本站已有更新的那份：旧的推送不覆盖
+    old = _push(phone, _push_body(course="旧数据", updated=time.time() - 3600)).json()
+    assert old["stored"] is False
+    assert "旧数据" not in json.dumps(TestClient(app).get(f"/widget/{phone.token}.json").json(), ensure_ascii=False)
+    # 托管用户（服务器也在刷）推更新的数据：照收，两边谁新用谁
+    assert _push(phone, _push_body(course="新数据")).json()["stored"] is True
+    from app import crypto
+    uid = service_uid("2023001")
+    jar = crypto.decrypt_json(db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0],
+                              "cookies", uid)
+    assert any(c["name"] == "CASTGC" for c in jar)  # 推送不会冲掉服务器托管的登录态
+
+
+def test_forget_session_keeps_device_as_data_source(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).post(f"/mobile/{phone.token}/forget-session", headers=phone.signed()).json() == {"ok": True}
+    row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
+    assert (row["cred_mode"], row["enc_cookies"]) == ("device", None)
+    assert _push(phone, _push_body()).json()["stored"] is True
+
+
+def test_data_source_only_enroll_keeps_website_password(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    phone = HostedApp()
+    main.app_enroll_by_ip._hits.clear()
+    r = TestClient(app).post("/api/app/enroll", json={"cookies": _app_cookies("2023001"), "public_key": phone.public(),
+                                                      "name": "Pixel", "keep_session": False})
+    assert r.status_code == 200
+    row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
+    assert row["cred_mode"] == "password" and row["enc_cookies"] is not None  # 服务器照常刷新
