@@ -49,6 +49,12 @@ class MainActivity : ComponentActivity() {
             Reminders.reschedule(this@MainActivity)
             Sync.armBoundary(this@MainActivity)
             Sync.schedule(this@MainActivity)
+            scheduleCommunity(this@MainActivity)
+        }
+        // 只在调试包里：adb shell am start ... --ez assist_now true 立刻跑一次协助刷新（周期任务不能提前跑）
+        val debuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggable && intent?.getBooleanExtra("assist_now", false) == true) {
+            wiki.nufe.kebiao.assist.AssistWorker.runOnce(this)
         }
         publishWidgetPreviews()
     }
