@@ -9,6 +9,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -62,6 +64,7 @@ object Reminders {
         val end: String = "",
         val name: String = "",
         val room: String = "",
+        val teachers: String = "",
         val changed: Boolean = false,
         val was: String? = null,
     )
@@ -102,6 +105,7 @@ object Reminders {
                     end = lesson.end,
                     name = lesson.name,
                     room = place,
+                    teachers = lesson.teachers,
                     changed = lesson.changed,
                     was = lesson.was,
                 )
@@ -196,6 +200,16 @@ object Reminders {
         return ALARM_CLOCK_OEMS.any { it in id }
     }
 
+    /** 通知右侧大图标用应用图标（彩色）；状态栏小图标仍用单色。 */
+    internal fun appIconBitmap(context: Context): Bitmap {
+        val drawable = context.packageManager.getApplicationIcon(context.packageName)
+        val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(64)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(Canvas(bitmap))
+        return bitmap
+    }
+
     /** item = null 只用来查找已有的同号闹钟（取消用）。 */
     private fun pending(context: Context, index: Int, item: Item?): PendingIntent? {
         val intent = Intent(context, ReminderReceiver::class.java).setAction(ACTION)
@@ -208,6 +222,7 @@ object Reminders {
                 .putExtra("end", item.end)
                 .putExtra("name", item.name)
                 .putExtra("room", item.room)
+                .putExtra("teachers", item.teachers)
                 .putExtra("changed", item.changed)
                 .putExtra("was", item.was)
         }
@@ -263,11 +278,11 @@ class ReminderReceiver : BroadcastReceiver() {
             Diag.i("reminder skipped: disabled")
             return
         }
-        if (repo.liveUpdateEnabled &&
-            runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
-        ) {
-            Diag.i("live update posted")
-            return
+        if (repo.liveUpdateEnabled) {
+            // 灵动显示是普通提醒之上的叠加，不是二选一：额外发一张流体云卡片，普通提醒照常发。
+            if (runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)) {
+                Diag.i("live update posted")
+            }
         }
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) {
@@ -285,7 +300,8 @@ class ReminderReceiver : BroadcastReceiver() {
             (it + Reminders.IN_CLASS_VISIBLE_MS - System.currentTimeMillis()).coerceAtLeast(1L)
         } ?: Reminders.IN_CLASS_VISIBLE_MS
         val notification = NotificationCompat.Builder(context, Reminders.CHANNEL)
-            .setSmallIcon(R.drawable.ic_notify)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
+            .setLargeIcon(Reminders.appIconBitmap(context))
             .setContentTitle(intent.getStringExtra("title"))
             .setContentText(intent.getStringExtra("text"))
             .setCategory(NotificationCompat.CATEGORY_REMINDER)

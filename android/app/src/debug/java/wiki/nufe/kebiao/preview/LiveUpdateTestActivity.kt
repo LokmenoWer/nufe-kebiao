@@ -331,11 +331,11 @@ class LiveUpdateTestActivity : ComponentActivity() {
                     Notification.ProgressStyle.Segment(50).setColor(0xFFB9C3FF.toInt()),
                 ),
             )
-            .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notify))
+            .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notify_calendar))
             .setStyledByProgress(true)
 
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notify)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle("流体云测试")
             .setContentText("正在上课 · 算法设计与分析")
             .setSubText("博远楼JC406 · 10:00–11:25")

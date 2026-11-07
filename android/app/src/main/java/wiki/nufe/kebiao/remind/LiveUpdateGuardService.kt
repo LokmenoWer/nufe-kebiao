@@ -30,7 +30,7 @@ class LiveUpdateGuardService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val card = liveCard(intent)
+        val card = liveCard(intent) ?: restoredCard()
         if (card == null) {
             // 进入前台的通知随即被移除，系统不会真正展示出来。
             runCatching { enterForeground(LiveUpdates.GUARD_NOTIFICATION_ID, guardNotification()) }
@@ -58,7 +58,8 @@ class LiveUpdateGuardService : Service() {
         }
         Diag.i("live update guard started")
         startTicker()
-        return START_NOT_STICKY
+        // STICKY：被系统回收后尽量拉起，按持久化的卡片数据恢复流体云（需系统允许自启动）。
+        return START_STICKY
     }
 
     /** 胶囊/卡片上的“剩 N 分钟”每跨一分钟重发一次；系统倒计时只有秒级。 */
@@ -96,10 +97,20 @@ class LiveUpdateGuardService : Service() {
         }.getOrNull()
     }
 
+    /** 进程被回收后系统以 null Intent 重启：按持久化的卡片数据恢复流体云。 */
+    private fun restoredCard(): Triple<Notification, Long, Reminders.Item>? {
+        val item = LiveUpdates.savedItem(this) ?: return null
+        val startMs = lessonMs(item.date, item.start)
+        val endMs = lessonMs(item.date, item.end)
+        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        if (dismissMs <= System.currentTimeMillis()) return null
+        return LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
+    }
+
     private fun guardNotification(): Notification {
         LiveUpdates.ensureChannel(this)
         return Notification.Builder(this, LiveUpdates.CHANNEL)
-            .setSmallIcon(R.drawable.ic_notify)
+            .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle("课表提醒")
             .setContentText("保持流体云提醒")
             .setOngoing(true)
