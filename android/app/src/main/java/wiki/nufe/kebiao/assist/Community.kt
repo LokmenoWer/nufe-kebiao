@@ -27,7 +27,7 @@ object Community {
     private const val KEY_HEARTBEAT_AT = "heartbeat_at"
     private const val KEY_HELPED = "assist_helped"
     private const val KEY_DEV_SITE = "dev_site"
-    private const val SITE = "https://kebiao.nufe.wiki"
+    private val SITE = wiki.nufe.kebiao.BuildConfig.SITE
 
     internal val JSON = "application/json; charset=utf-8".toMediaType()
 
