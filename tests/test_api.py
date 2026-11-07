@@ -2938,3 +2938,90 @@ def test_app_leave_forgets_school_session(up):
     assert row["enc_cookies"] is None and row["status"] == "needs_rebind"
     assert mobile_devices.list_devices(uid) == []
     assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401
+
+
+# ---------- 设备数据源：安卓手机给 iOS 小组件与日历供数 ----------
+
+def _push_body(sid="2023001", course="手机推的课", updated=None, semester_id=161):
+    return {"semester_id": semester_id, "semester_name": "2026-2027-1", "week1_monday": "2026-09-07",
+            "updated_at": updated or time.time(), "student": {"name": "学生1", "code": sid},
+            "activities": [{"courseName": course, "teachers": ["T"], "weekday": 2, "startUnit": 3, "endUnit": 4,
+                            "weekIndexes": list(range(1, 17)), "weeksStr": "1~16", "room": "C301", "building": "",
+                            "campus": "", "startTime": "10:00", "endTime": "11:35"}]}
+
+
+def _push(phone, body):
+    return TestClient(app).post(f"/mobile/{phone.token}/push", json=body, headers=phone.signed())
+
+
+def test_data_source_only_enroll_keeps_no_school_session(up):
+    phone = HostedApp()
+    main.app_enroll_by_ip._hits.clear()
+    r = TestClient(app).post("/api/app/enroll", json={"cookies": _app_cookies("2023001"), "public_key": phone.public(),
+                                                      "name": "Pixel", "keep_session": False})
+    assert r.status_code == 200
+    phone.token, phone.device_id = r.json()["token"], r.json()["device_id"]
+    uid = service_uid("2023001")
+    row = db.connect().execute("SELECT cred_mode, enc_cookies, status FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["cred_mode"], row["enc_cookies"], row["status"]) == ("device", None, "ok")
+    # 调度器不替他刷；网站上点刷新也不会把他打成“需重新登录”
+    assert uid not in {u for _s, u in service.candidates(now=time.time() + 30 * 86400, limit=100)}
+    assert service.refresh_user(uid, "manual")["status"] == "device"
+    assert db.connect().execute("SELECT status FROM users WHERE id=?", (uid,)).fetchone()["status"] == "ok"
+
+    links = TestClient(app).get(f"/mobile/{phone.token}/links", headers=phone.signed()).json()
+    assert links["widget_url"].endswith(f"/widget/{phone.token}.json") and links["ics_url"].endswith(".ics")
+    assert links["webcal_url"].startswith("webcal://") and links["server_refresh"] is False
+
+    assert _push(phone, _push_body()).json() == {"ok": True, "stored": True}
+    feed = TestClient(app).get(f"/widget/{phone.token}.json").json()
+    assert "手机推的课" in json.dumps(feed, ensure_ascii=False)
+    ics = TestClient(app).get(links["ics_url"].removeprefix("http://testserver")).text
+    assert "手机推的课" in ics
+    row = db.connect().execute("SELECT enc_cookies, cred_mode FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["enc_cookies"], row["cred_mode"]) == (None, "device")
+    assert db.connect().execute("SELECT trigger FROM refresh_log WHERE user_id=? ORDER BY at DESC", (uid,)).fetchone()[0] == "device"
+
+
+def test_device_push_checks_owner_shape_and_freshness(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert _push(phone, _push_body(sid="2023002")).status_code == 400  # 不是本人的课表
+    # 本机数据没读到学号：设备签名已证明身份，照收
+    no_code = _push_body(course="无学号", updated=time.time() + 1)
+    no_code["student"] = {}
+    assert _push(phone, no_code).json()["stored"] is True
+    assert _push(phone, {**_push_body(), "activities": "x"}).status_code == 400
+    assert TestClient(app).post(f"/mobile/{phone.token}/push", json=_push_body()).status_code == 401  # 没签名
+    # 本站已有更新的那份：旧的推送不覆盖
+    old = _push(phone, _push_body(course="旧数据", updated=time.time() - 3600)).json()
+    assert old["stored"] is False
+    assert "旧数据" not in json.dumps(TestClient(app).get(f"/widget/{phone.token}.json").json(), ensure_ascii=False)
+    # 托管用户（服务器也在刷）推更新的数据：照收，两边谁新用谁
+    assert _push(phone, _push_body(course="新数据")).json()["stored"] is True
+    from app import crypto
+    uid = service_uid("2023001")
+    jar = crypto.decrypt_json(db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()[0],
+                              "cookies", uid)
+    assert any(c["name"] == "CASTGC" for c in jar)  # 推送不会冲掉服务器托管的登录态
+
+
+def test_forget_session_keeps_device_as_data_source(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    assert TestClient(app).post(f"/mobile/{phone.token}/forget-session", headers=phone.signed()).json() == {"ok": True}
+    row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
+    assert (row["cred_mode"], row["enc_cookies"]) == ("device", None)
+    assert _push(phone, _push_body()).json()["stored"] is True
+
+
+def test_data_source_only_enroll_keeps_website_password(up):
+    c = TestClient(app)
+    _login(c, "2023001", remember=True)
+    phone = HostedApp()
+    main.app_enroll_by_ip._hits.clear()
+    r = TestClient(app).post("/api/app/enroll", json={"cookies": _app_cookies("2023001"), "public_key": phone.public(),
+                                                      "name": "Pixel", "keep_session": False})
+    assert r.status_code == 200
+    row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
+    assert row["cred_mode"] == "password" and row["enc_cookies"] is not None  # 服务器照常刷新

@@ -180,7 +180,7 @@ def _widget_post(request: Request) -> bool:
     path = request.url.path
     return (request.method == "POST" and not request.headers.get("origin")
             and ((path.startswith("/widget/") and path.endswith(("/upload", "/calendar")))
-                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload", "/leave")))
+                 or (path.startswith("/mobile/") and path.endswith(("/pair", "/upload", "/leave", "/push", "/forget-session")))
                  or path in _APP_POSTS))
 
 
@@ -1121,7 +1121,7 @@ def admin_schedule(_csrf=Depends(admin.current_admin)):
 
 
 @app.get("/api/admin/refreshes")
-def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|assist|scheduled|manual|login)$"),
+def admin_refreshes(trigger: str | None = Query(None, pattern="^(widget|assist|device|scheduled|manual|login)$"),
                     failed: bool = False, limit: int = Query(100, ge=1, le=500),
                     _csrf=Depends(admin.current_admin)):
     return admin.recent_refreshes(limit, trigger, failed)
@@ -1250,6 +1250,7 @@ class AppEnrollIn(BaseModel):
     cookies: list[dict] = Field(max_length=service.APP_COOKIE_MAX)
     public_key: str = Field(max_length=512)
     name: str = Field("", max_length=128)
+    keep_session: bool = True   # False：只把手机当 iOS 小组件 / 日历的数据源，本站不留学校登录态
 
 
 def _ensure_widget_token(uid: int) -> str:
@@ -1282,7 +1283,7 @@ async def app_enroll(body: AppEnrollIn, request: Request):
 
     def run():
         try:
-            return service.enroll_from_app(cookies)
+            return service.enroll_from_app(cookies, keep_session=body.keep_session)
         except service.LoginRejected as e:
             raise HTTPException(400, str(e)) from None
         except service.Busy:
@@ -1322,6 +1323,84 @@ def mobile_timetable(token: str, request: Request):
     presence.mark_user(user["id"], "mobile")
     _record_use(user["id"])
     return JSONResponse(service.app_timetable(user["id"]), headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+DEVICE_PUSH_MAX = 1024 * 1024
+
+
+@app.post("/mobile/{token}/push")
+async def mobile_push(token: str, request: Request):
+    """设备数据源：手机把本机刷到的课表推上来，iOS 小组件（/widget/…）和日历订阅（/ics/…）就读这份。"""
+    user, denied = await asyncio.to_thread(_signed_device, token, request)
+    if denied:
+        return denied
+    size = request.headers.get("content-length") or "0"
+    if not size.isdigit() or int(size) > DEVICE_PUSH_MAX:
+        raise HTTPException(413, "内容过大")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > DEVICE_PUSH_MAX:
+            raise HTTPException(413, "内容过大")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "格式不正确") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "格式不正确")
+
+    def run():
+        try:
+            return service.accept_device_push(user["id"], body)
+        except service.DevicePushRejected as e:
+            log.info("device push rejected for user %s: %s", user["id"], e)
+            raise HTTPException(400, str(e)) from None
+        except service.UserGone:
+            raise HTTPException(404) from None
+
+    out = await asyncio.to_thread(run)
+    return JSONResponse(out, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+def _ensure_ics_token(uid: int) -> str | None:
+    """日历订阅链接：已有就沿用，没有就生成一个（和网站设置页的“生成订阅链接”同一个 token）。"""
+    url = _ics_url(uid)
+    if url:
+        return url
+    token = secrets.token_urlsafe(24)
+    with db.tx() as c:
+        c.execute("UPDATE users SET ics_token_hash=?, enc_ics_token=? WHERE id=? AND enc_ics_token IS NULL",
+                  (crypto.token_hash(token), crypto.encrypt(token.encode(), "ics", uid), uid))
+    return _ics_url(uid)
+
+
+@app.get("/mobile/{token}/links")
+def mobile_links(token: str, request: Request):
+    """给 App 展示的 iOS 小组件与日历订阅链接（只给签名过的本人设备）。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    ics = _ensure_ics_token(user["id"])
+    row = db.connect().execute("SELECT cred_mode, enc_cookies IS NOT NULL AS hosted, last_success_at FROM users WHERE id=?",
+                               (user["id"],)).fetchone()
+    return JSONResponse({
+        "widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json",
+        "script_url": f"{PUBLIC_BASE_URL}/widget/{token}.js",
+        "ics_url": ics,
+        "webcal_url": ics.replace("https://", "webcal://", 1).replace("http://", "webcal://", 1) if ics else None,
+        "server_refresh": bool(row["hosted"]) or row["cred_mode"] == "password",
+        "last_success_at": row["last_success_at"],
+    }, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
+
+
+@app.post("/mobile/{token}/forget-session")
+def mobile_forget_session(token: str, request: Request):
+    """关掉服务器托管但保留数据源：删本站的学校登录态，设备与链接都保留。"""
+    user, denied = _signed_device(token, request)
+    if denied:
+        return denied
+    service.forget_session_from_app(user["id"])
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
 @app.post("/mobile/{token}/leave")

@@ -68,7 +68,7 @@ const fmtInterval = (min) => (min < 60 ? `${min} 分钟` : min < 1440 ? `${+(min
 const fmtSize = (bytes) => (bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : "—");
 
 const VIA = { web: "网页", widget: "iOS 小组件", mobile: "安卓 App", ics: "日历" };
-const TRIGGER = { widget: "手机代抓", assist: "App 协助", scheduled: "后台", manual: "手动", login: "登录" };
+const TRIGGER = { widget: "手机代抓", assist: "App 协助", device: "App 推送", scheduled: "后台", manual: "手动", login: "登录" };
 const RELOAD_TRIGGER = { sighup: "SIGHUP 信号", admin: "后台手动", watch: "文件监听", manual: "手动" };
 const STATUS_PILL = {
   ok: ["正常", "pill-ok"],
@@ -173,7 +173,7 @@ function attentionBox(o) {
 }
 
 function refreshBars(r) {
-  const rows = ["widget", "assist", "scheduled", "manual", "login"].map((t) => ({
+  const rows = ["widget", "assist", "device", "scheduled", "manual", "login"].map((t) => ({
     key: t, ok: r[`${t}_ok`] || 0, fail: r[`${t}_fail`] || 0,
   }));
   const max = Math.max(1, ...rows.map((x) => x.ok + x.fail));
@@ -190,7 +190,7 @@ function refreshBars(r) {
 
 /** 手机（代抓 + App 协助）占后台刷新的比例：越高，服务器 IP 打学校越少。 */
 function phoneShare(r) {
-  const phone = (r.widget_ok || 0) + (r.assist_ok || 0);
+  const phone = (r.widget_ok || 0) + (r.assist_ok || 0) + (r.device_ok || 0);
   const server = (r.scheduled_ok || 0) + (r.scheduled_fail || 0);
   return phone + server ? `${Math.round((phone / (phone + server)) * 100)}%` : "—";
 }
@@ -236,7 +236,7 @@ function renderOverview(o) {
     section("24 小时刷新"),
     tiles(
       tile("刷新次数", count("_ok") + count("_fail"), `成功 ${count("_ok")} · 失败 ${count("_fail")}`),
-      tile("手机分担占比", phoneShare(r), "（手机代抓 + App 协助）÷（它们 + 后台）")),
+      tile("手机分担占比", phoneShare(r), "（手机代抓 + App 协助 + App 推送）÷（它们 + 后台）")),
     refreshBars(r),
     section("服务器"),
     kv(

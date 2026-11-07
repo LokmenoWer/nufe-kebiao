@@ -504,10 +504,12 @@ def app_cookies(raw) -> list[dict]:
     return out
 
 
-def enroll_from_app(cookies: list[dict]) -> int:
+def enroll_from_app(cookies: list[dict], keep_session: bool = True) -> int:
     """App 用自己在 WebView 里登录得到的学校会话来本站托管：本站拿它读一次课表，读得到学号就算本人。
 
     和网站登录同等强度：能拿出有效学校会话的人就是这个学号的主人。已有账号时只换登录态、不动已存的密码。
+    keep_session=False（只把手机当 iOS 小组件 / 日历的数据源）：验明身份后不留学校会话，课表只靠手机推送；
+    账号原本就有网站存的登录态 / 密码时保持不变，服务器照常刷新，两边谁新用谁。
     返回 uid；读不到课表抛 LoginRejected。
     """
     s = PoliteSession()
@@ -545,12 +547,98 @@ def enroll_from_app(cookies: list[dict]) -> int:
     if not lock.acquire(timeout=30):
         raise Busy()
     try:
+        existing = _stored_cookies(uid)
         with db.tx() as c:
-            _save_success(c, uid, dump_cookies(s), data, "login")
+            _save_success(c, uid, dump_cookies(s) if keep_session else existing, data, "login")
+            if not keep_session and not existing:
+                # 本站手里没有任何学校凭据：标成“设备数据源”，调度器不再替他刷（刷也刷不了）
+                c.execute("""UPDATE users SET enc_cookies=NULL, cred_mode='device', enc_password=NULL
+                             WHERE id=? AND cred_mode<>'password'""", (uid,))
     finally:
         lock.release()
-    _after_change(uid, "login", None)
     return uid
+
+
+def _stored_cookies(uid: int) -> list[dict]:
+    row = db.connect().execute("SELECT enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["enc_cookies"]:
+        return []
+    try:
+        cookies = crypto.decrypt_json(row["enc_cookies"], "cookies", uid)
+    except crypto.CryptoError:
+        return []
+    return cookies if isinstance(cookies, list) else []
+
+
+class DevicePushRejected(Exception):
+    """手机推来的课表不能用：给 App 看的原因。"""
+
+
+DEVICE_PUSH_MAX_ACTIVITIES = 600
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def accept_device_push(uid: int, body: dict, now: float | None = None) -> dict:
+    """绑定过的手机把本机刷到的课表推上来，本站据此给 iOS 小组件和日历订阅供数（“设备数据源”）。
+
+    设备签名已经证明是本人的手机；内容仍按教务原始结构过一遍 jwxt.normalize，带了学号就必须是本人。
+    本站自己刷到的那份更新时不覆盖（两边谁新用谁）。
+    """
+    now = db.now() if now is None else now
+    sid = body.get("semester_id")
+    name = body.get("semester_name")
+    acts = body.get("activities")
+    student = body.get("student") if isinstance(body.get("student"), dict) else {}
+    updated = body.get("updated_at")
+    if (not isinstance(sid, int) or isinstance(sid, bool) or not 1 <= sid <= 2_000_000
+            or not isinstance(name, str) or not 0 < len(name) <= 64
+            or not isinstance(acts, list) or len(acts) > DEVICE_PUSH_MAX_ACTIVITIES
+            or not isinstance(updated, int | float) or updated <= 0):
+        raise DevicePushRejected("课表格式不正确")
+    updated = min(float(updated), now)
+    user = db.connect().execute("SELECT student_id, last_success_at, semesters_json, current_semester_id FROM users WHERE id=?",
+                                (uid,)).fetchone()
+    if not user:
+        raise UserGone(uid)
+    # 设备签名已证明是这个账号的手机；本机数据可能读不到学号（部分教务返回不带），读得到就必须是本人
+    code = str(student.get("code") or "")
+    if code and code != user["student_id"]:
+        raise DevicePushRejected("课表不是本人的")
+    if user["current_semester_id"] == sid and (user["last_success_at"] or 0) >= updated:
+        return {"ok": True, "stored": False, "message": "本站已有更新的课表"}
+    normalized = jwxt.normalize({"studentTableVms": [{"name": student.get("name"), "code": user["student_id"],
+                                                      "activities": [a for a in acts if isinstance(a, dict)]}]})
+    semesters = [x for x in _json_list(user["semesters_json"]) if isinstance(x, dict)]
+    if not any(x.get("id") == sid for x in semesters):
+        semesters.append({"id": sid, "name": name})
+    data = {"semester_id": sid, "semester_name": name, "current_semester_id": sid, "semesters": semesters,
+            "semester_detail": None, **normalized}
+    week1 = body.get("week1_monday")
+    lock = _locks[uid]
+    if not lock.acquire(timeout=10):
+        return {"ok": False, "stored": False, "message": "服务器正在刷新，稍后再推"}
+    try:
+        cookies = _stored_cookies(uid)
+        with db.tx() as c:
+            changes = _save_success(c, uid, cookies, data, "device")
+            if not cookies:
+                c.execute("UPDATE users SET enc_cookies=NULL WHERE id=?", (uid,))
+            if isinstance(week1, str) and _DATE_RE.match(week1):
+                c.execute("UPDATE semesters SET week1_monday=COALESCE(week1_monday, ?) WHERE semester_id=?",
+                          (week1, sid))
+            # 手机的抓取时刻才是数据的真实新鲜度
+            c.execute("UPDATE users SET last_success_at=? WHERE id=?", (updated, uid))
+    finally:
+        lock.release()
+    _after_change(uid, "device", changes)
+    return {"ok": True, "stored": True}
+
+
+def forget_session_from_app(uid: int) -> None:
+    """App 里关掉“服务器托管”但仍当数据源：删掉本站存的学校登录态，设备保留。网站上存的密码不动。"""
+    with db.tx() as c:
+        c.execute("UPDATE users SET enc_cookies=NULL, cred_mode='device' WHERE id=? AND cred_mode<>'password'", (uid,))
+        c.execute("UPDATE users SET enc_cookies=NULL WHERE id=? AND cred_mode='password'", (uid,))
 
 
 def leave_from_app(uid: int, device_id: str) -> None:
@@ -679,6 +767,9 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
     if not user:
         raise KeyError(uid)
 
+    if user["cred_mode"] == "device" and not user["enc_cookies"]:
+        # 课表由用户自己的安卓手机推送（设备数据源），本站没有学校凭据：不刷、也不记失败
+        return {"ok": False, "status": "device", "message": "课表由你的安卓手机提供，请在 App 内刷新"}
     s = session or PoliteSession()
     if user["enc_cookies"]:
         try:
@@ -742,7 +833,7 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
 def _after_change(uid: int, trigger: str, changes: dict | None) -> None:
     if not changes:
         return
-    if trigger in ("scheduled", "widget", "assist"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
+    if trigger in ("scheduled", "widget", "assist", "device"):  # 后台发现的变动才发邮件；手动刷新 / 登录时用户就在屏幕前
         _notify_safely(notify.timetable_changed, uid, changes["semester_name"], changes["added"], changes["removed"])
     try:
         n = alert_classmates(uid, changes["semester_id"], changes["old"], changes["new"])
@@ -1193,7 +1284,8 @@ def candidates(now: float | None = None, limit: int = 50) -> list[tuple[float, i
             f"{_WIDGET_COLS}, {_SIGNAL_COLS}")
     rows = conn.execute(
         f"""SELECT {cols} FROM users
-            WHERE status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?)""",
+            WHERE cred_mode<>'device'
+              AND (status='ok' OR (status='error' AND next_refresh_at IS NOT NULL AND next_refresh_at <= ?))""",
         (now,)).fetchall()
     stale_next = [r["id"] for r in rows
                   if (r["next_class_at"] and r["next_class_at"] <= now)
