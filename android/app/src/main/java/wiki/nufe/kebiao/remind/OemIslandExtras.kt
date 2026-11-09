@@ -66,20 +66,47 @@ internal object OemIslandExtras {
     }
 
     /**
-     * 解析标准 Notification 的 `(contentText, subText)` 通道分配：
-     * - 未开启秒级倒计时（默认）：`contentText`（第二行）显示课程名，`subText`（第三行）显示剩余分钟状态；
-     * - 开启秒级倒计时（`chronometer = true`）：ColorOS 16 流体云等系统会将系统 `Chronometer` 计时器直接渲染在
-     *   `text`（`contentText`）通道，若仍把课程名放在 `contentText` 会被计时器覆盖导致课名消失，且 `subText`
-     *   会与计时器重复显示倒计时；此时将课程名下移至 `subText` 通道，`contentText` 放状态文案供普通通知模板回退。
+     * 生成卡片第三层（`subText`）统一格式的上课/下课倒计时文本：
+     * - 无论分钟级还是秒级，固定在第三层以 `"xx后上课"` / `"xx后下课"` 文本形式展示，不调用系统
+     *   `setUsesChronometer(true)`（避免 ColorOS 16 流体云将裸 `MM:SS` 计时器强行渲染在第二层导致二、三层顺序颠倒）；
+     * - 分钟级（`chronometer = false`）：`"14分钟后上课"` / `"45分钟后下课"`；
+     * - 秒级（`chronometer = true`）：`"13分48秒后上课"` / `"48秒后上课"`、`"44分05秒后下课"` / `"5秒后下课"`。
      */
-    fun resolveCardTextChannels(
-        course: String,
-        status: String,
-        chronometer: Boolean,
-    ): Pair<String, String> = if (chronometer) {
-        status to course
-    } else {
-        course to status
+    fun formatCountdownStatus(
+        isBeforeClass: Boolean,
+        remainMs: Long,
+        chronometer: Boolean = false,
+    ): String {
+        val suffix = if (isBeforeClass) "后上课" else "后下课"
+        return if (chronometer) {
+            val totalSeconds = ((remainMs + 950L) / 1_000L).coerceAtLeast(1L)
+            val mins = totalSeconds / 60L
+            val secs = totalSeconds % 60L
+            if (mins > 0L) {
+                "${mins}分${secs.toString().padStart(2, '0')}秒$suffix"
+            } else {
+                "${secs}秒$suffix"
+            }
+        } else {
+            val mins = ((remainMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+            "${mins}分钟$suffix"
+        }
+    }
+
+    /**
+     * 计算距离下一次卡片文本跳变的毫秒延迟：
+     * - 秒级模式（`chronometer = true`）：对齐下一整秒边界（若距边界不足 `100ms` 则顺延至下一秒，保持 `100..1_099ms`）；
+     * - 分钟级模式（`chronometer = false`）：对齐下一整分边界（`1_000..60_000ms`）。
+     */
+    fun nextRefreshDelayMs(leftMs: Long, chronometer: Boolean): Long {
+        if (leftMs <= 0L) return 0L
+        return if (chronometer) {
+            val rem = leftMs % 1_000L
+            if (rem < 100L) rem + 1_000L else rem
+        } else {
+            val rem = leftMs % 60_000L
+            if (rem == 0L) 60_000L else rem.coerceAtLeast(1_000L)
+        }
     }
 
     /**

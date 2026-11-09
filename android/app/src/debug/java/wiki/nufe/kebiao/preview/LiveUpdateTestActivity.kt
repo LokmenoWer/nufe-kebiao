@@ -322,24 +322,22 @@ class LiveUpdateTestActivity : ComponentActivity() {
         val shortText = "剩 ${formatRemaining(remainingMs)}"
         val titleLine = "10:00-11:25 博远楼JC406"
         val course = "算法设计与分析（双语）"
-        val statusText = "${liveUpdateName()}测试 · 正在上课"
-        val (contentText, subText) = OemIslandExtras.resolveCardTextChannels(
-            course = course,
-            status = statusText,
+        val statusText = OemIslandExtras.formatCountdownStatus(
+            isBeforeClass = false,
+            remainMs = remainingMs,
             chronometer = true,
         )
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle(titleLine)
-            .setContentText(contentText)
-            .setSubText(subText)
+            .setContentText(course)
+            .setSubText(statusText)
             .setContentIntent(openAppIntent())
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOnlyAlertOnce(true)
-            .setWhen(System.currentTimeMillis() + remainingMs)
-            .setUsesChronometer(true)
-            .setChronometerCountDown(true)
+            .setShowWhen(false)
+            .setUsesChronometer(false)
 
         if (Build.VERSION.SDK_INT >= 36) {
             runCatching {

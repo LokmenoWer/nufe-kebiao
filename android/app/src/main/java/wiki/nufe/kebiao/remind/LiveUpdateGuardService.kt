@@ -1,6 +1,7 @@
 package wiki.nufe.kebiao.remind
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -58,7 +59,7 @@ class LiveUpdateGuardService : Service() {
         }
         val started = runCatching { enterForeground(LiveUpdates.NOTIFICATION_ID, notification) }.isSuccess
         if (!started) {
-            // 个别 ROM 不接受 promoted 通知直接当前台通知；退回一张最小通知继续保活。
+            // 个别 ROM 不接受 promoted 通知直接当前台通知；退回一张最小通知继续保活，并确保主卡片已发出。
             val fallback = runCatching {
                 enterForeground(LiveUpdates.GUARD_NOTIFICATION_ID, guardNotification())
             }.isSuccess
@@ -66,6 +67,7 @@ class LiveUpdateGuardService : Service() {
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
+            getSystemService(NotificationManager::class.java)?.notify(LiveUpdates.NOTIFICATION_ID, notification)
             Diag.w("live update guard using fallback notification")
         }
         Diag.i("live update guard started")
@@ -75,9 +77,26 @@ class LiveUpdateGuardService : Service() {
         return START_STICKY
     }
 
-    /** 胶囊/卡片上的“剩 N 分钟”与进度条每跨一分钟重发一次；系统倒计时只有秒级。 */
+    /** 按分钟或按秒定期重发卡片以更新第三层倒计时与进度条；首次由 enterForeground 发出后直接等待下一边界。 */
     private fun startTicker() {
         ticker?.let(handler::removeCallbacks)
+        val initialItem = cardItem ?: run {
+            stopSelf()
+            return
+        }
+        val initialConfig = cardConfig ?: LiveUpdates.configFrom(null, this)
+        val initialDelay = LiveUpdates.refresh(
+            context = this,
+            item = initialItem,
+            config = initialConfig,
+            isPreview = cardIsPreview,
+            notifyNow = false,
+        )
+        if (initialDelay <= 0L) {
+            LiveUpdates.clearRemembered(this)
+            stopSelf()
+            return
+        }
         ticker = object : Runnable {
             override fun run() {
                 val item = cardItem ?: run {
@@ -85,7 +104,7 @@ class LiveUpdateGuardService : Service() {
                     return
                 }
                 val config = cardConfig ?: LiveUpdates.configFrom(null, this@LiveUpdateGuardService)
-                val delay = LiveUpdates.refresh(this@LiveUpdateGuardService, item, config, cardIsPreview)
+                val delay = LiveUpdates.refresh(this@LiveUpdateGuardService, item, config, cardIsPreview, notifyNow = true)
                 if (delay > 0) {
                     val dismissMs = LiveUpdates.resolveDismissMs(this@LiveUpdateGuardService, item, config, cardIsPreview)
                     val remainDismiss = (dismissMs - System.currentTimeMillis()).coerceAtLeast(1_000L)
@@ -99,7 +118,7 @@ class LiveUpdateGuardService : Service() {
                     stopSelf()
                 }
             }
-        }.also { it.run() }
+        }.also { handler.postDelayed(it, initialDelay) }
     }
 
     override fun onDestroy() {

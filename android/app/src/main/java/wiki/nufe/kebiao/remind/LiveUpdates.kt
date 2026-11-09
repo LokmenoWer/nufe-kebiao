@@ -304,8 +304,14 @@ object LiveUpdates {
         val changedText = if (item.changed) "（已调课${item.was?.let { "：$it" } ?: ""}）" else ""
         val course = (item.name.ifBlank { "下一节课" }) + changedText
         val titleLine = "${item.start}-${item.end} $room"
-        val remain = remainingMinutes(phase, startMs, endMs)
-        val status = if (phase == Phase.BEFORE) "${remain}分钟后上课" else "正在上课 · 还有 $remain 分钟下课"
+        val targetMs = if (phase == Phase.BEFORE) startMs else endMs
+        val remainMs = (targetMs - now).coerceAtLeast(1L)
+        val remain = ((remainMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        val status = OemIslandExtras.formatCountdownStatus(
+            isBeforeClass = phase == Phase.BEFORE,
+            remainMs = remainMs,
+            chronometer = config.chronometer,
+        )
         val short = OemIslandExtras.formatCapsuleShortText(
             isBeforeClass = phase == Phase.BEFORE,
             remainMinutes = remain,
@@ -326,33 +332,21 @@ object LiveUpdates {
             Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val (contentText, subText) = OemIslandExtras.resolveCardTextChannels(
-            course = course,
-            status = status,
-            chronometer = config.chronometer,
-        )
+        // 固定三层顺序：第一层（contentTitle）上课时间与教室，第二层（contentText）课程名称，
+        // 第三层（subText）“xx后上课 / xx后下课”倒计时；不启用系统 Chronometer 以免流体云强占第二层。
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle(titleLine)
-            .setContentText(contentText)
-            .setSubText(subText)
+            .setContentText(course)
+            .setSubText(status)
             .setContentIntent(open)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setUsesChronometer(false)
             .setTimeoutAfter(timeout)
-
-        if (config.chronometer) {
-            val targetMs = if (phase == Phase.BEFORE) startMs else endMs
-            builder.setWhen(targetMs)
-                .setShowWhen(true)
-                .setUsesChronometer(true)
-                .setChronometerCountDown(true)
-        } else {
-            builder.setShowWhen(false)
-                .setUsesChronometer(false)
-        }
 
         if (Build.VERSION.SDK_INT >= 36) {
             if (config.progressEnabled) {
@@ -377,21 +371,15 @@ object LiveUpdates {
         return builder.build()
     }
 
-    /** 剩余分钟数：课前倒数到开课，课上倒数到下课。 */
-    private fun remainingMinutes(phase: Phase, startMs: Long, endMs: Long): Long {
-        val target = if (phase == Phase.BEFORE) startMs else endMs
-        return ((target - System.currentTimeMillis() + 59_999L) / 60_000L).coerceAtLeast(1L)
-    }
-
     /**
-     * 剩余分钟变化时重发同一张卡片（系统倒计时只有秒级，胶囊也只显示一段文字）。
-     * 返回距下一次分钟跳变的毫秒数；0 表示卡片已到收起时间。
+     * 按当前配置（分钟级 60s / 秒级 1s）重发同一张卡片并返回距下一次跳变的毫秒数；0 表示卡片已到收起时间。
      */
     internal fun refresh(
         context: Context,
         item: Reminders.Item,
         config: LiveConfig = configFrom(null, context),
         isPreview: Boolean = isPreview(null, context),
+        notifyNow: Boolean = true,
     ): Long {
         val now = System.currentTimeMillis()
         val startMs = lessonMs(item.date, item.start)
@@ -399,16 +387,17 @@ object LiveUpdates {
         val dismissMs = resolveDismissMs(context, item, config, isPreview)
         if (dismissMs <= now) return 0L
         val manager = context.getSystemService(NotificationManager::class.java) ?: return 0L
-        // 卡片已被用户划掉，或 cancel() 已撤销：不再重发，否则一分钟后又会冒出来。
-        if (manager.activeNotifications.none { it.id == NOTIFICATION_ID }) return 0L
-        buildNotification(context, item, config, isUpdate = true, isPreview = isPreview)?.let {
-            manager.notify(NOTIFICATION_ID, it)
+        if (notifyNow) {
+            // 卡片已被用户划掉，或 cancel() 已撤销：不再重发，否则又会冒出来。
+            if (manager.activeNotifications.none { it.id == NOTIFICATION_ID }) return 0L
+            buildNotification(context, item, config, isUpdate = true, isPreview = isPreview)?.let {
+                manager.notify(NOTIFICATION_ID, it)
+            }
         }
         val target = if (now < startMs) startMs else endMs
         val left = target - now
         if (left <= 0) return 0L
-        val rem = left % 60_000L
-        return if (rem == 0L) 60_000L else rem.coerceAtLeast(1_000L)
+        return OemIslandExtras.nextRefreshDelayMs(left, config.chronometer)
     }
 
     /** Android 16 ProgressStyle：通过 runCatching 保护，防止部分裁剪 API 36 框架缺少类或方法。 */

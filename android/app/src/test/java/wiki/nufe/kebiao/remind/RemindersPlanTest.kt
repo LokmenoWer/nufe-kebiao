@@ -114,21 +114,48 @@ class RemindersPlanTest {
             ),
         )
         assertEquals(
-            "算法设计与分析（双语）" to "20分钟后上课",
-            OemIslandExtras.resolveCardTextChannels(
-                course = "算法设计与分析（双语）",
-                status = "20分钟后上课",
+            "14分钟后上课",
+            OemIslandExtras.formatCountdownStatus(
+                isBeforeClass = true,
+                remainMs = 13 * 60_000L + 48_000L,
                 chronometer = false,
             ),
         )
         assertEquals(
-            "20分钟后上课" to "算法设计与分析（双语）",
-            OemIslandExtras.resolveCardTextChannels(
-                course = "算法设计与分析（双语）",
-                status = "20分钟后上课",
+            "45分钟后下课",
+            OemIslandExtras.formatCountdownStatus(
+                isBeforeClass = false,
+                remainMs = 44 * 60_000L + 12_000L,
+                chronometer = false,
+            ),
+        )
+        assertEquals(
+            "13分48秒后上课",
+            OemIslandExtras.formatCountdownStatus(
+                isBeforeClass = true,
+                remainMs = 13 * 60_000L + 48_000L,
                 chronometer = true,
             ),
         )
+        assertEquals(
+            "48秒后上课",
+            OemIslandExtras.formatCountdownStatus(
+                isBeforeClass = true,
+                remainMs = 48_000L,
+                chronometer = true,
+            ),
+        )
+        assertEquals(
+            "44分05秒后下课",
+            OemIslandExtras.formatCountdownStatus(
+                isBeforeClass = false,
+                remainMs = 44 * 60_000L + 5_000L,
+                chronometer = true,
+            ),
+        )
+        assertEquals(450L, OemIslandExtras.nextRefreshDelayMs(13_450L, chronometer = true))
+        assertEquals(1_020L, OemIslandExtras.nextRefreshDelayMs(13_020L, chronometer = true))
+        assertEquals(13_450L, OemIslandExtras.nextRefreshDelayMs(73_450L, chronometer = false))
     }
 
     @Test
