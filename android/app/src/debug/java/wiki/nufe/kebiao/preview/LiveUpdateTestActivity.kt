@@ -323,11 +323,16 @@ class LiveUpdateTestActivity : ComponentActivity() {
         val titleLine = "10:00-11:25 博远楼JC406"
         val course = "算法设计与分析（双语）"
         val statusText = "${liveUpdateName()}测试 · 正在上课"
+        val (contentText, subText) = OemIslandExtras.resolveCardTextChannels(
+            course = course,
+            status = statusText,
+            chronometer = true,
+        )
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle(titleLine)
-            .setContentText(course)
-            .setSubText(statusText)
+            .setContentText(contentText)
+            .setSubText(subText)
             .setContentIntent(openAppIntent())
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)

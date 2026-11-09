@@ -260,7 +260,7 @@ internal fun ReminderSection(
                 Column(Modifier.weight(1f)) {
                     Text("显示秒级倒计时", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(2.dp))
-                    Hint("在通知右上角附加系统实时跳秒计时器")
+                    Hint("启用系统实时跳秒倒计时（开启后课程名将移至第三行展示）")
                 }
                 Switch(
                     checked = chronometerEnabled,

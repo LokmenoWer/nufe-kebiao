@@ -113,6 +113,22 @@ class RemindersPlanTest {
                 dismissMode = LiveDismissMode.UNTIL_CLASS_END,
             ),
         )
+        assertEquals(
+            "算法设计与分析（双语）" to "20分钟后上课",
+            OemIslandExtras.resolveCardTextChannels(
+                course = "算法设计与分析（双语）",
+                status = "20分钟后上课",
+                chronometer = false,
+            ),
+        )
+        assertEquals(
+            "20分钟后上课" to "算法设计与分析（双语）",
+            OemIslandExtras.resolveCardTextChannels(
+                course = "算法设计与分析（双语）",
+                status = "20分钟后上课",
+                chronometer = true,
+            ),
+        )
     }
 
     @Test

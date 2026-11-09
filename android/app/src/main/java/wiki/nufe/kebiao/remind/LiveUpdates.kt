@@ -326,11 +326,16 @@ object LiveUpdates {
             Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val (contentText, subText) = OemIslandExtras.resolveCardTextChannels(
+            course = course,
+            status = status,
+            chronometer = config.chronometer,
+        )
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle(titleLine)
-            .setContentText(course)
-            .setSubText(status)
+            .setContentText(contentText)
+            .setSubText(subText)
             .setContentIntent(open)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
@@ -346,6 +351,7 @@ object LiveUpdates {
                 .setChronometerCountDown(true)
         } else {
             builder.setShowWhen(false)
+                .setUsesChronometer(false)
         }
 
         if (Build.VERSION.SDK_INT >= 36) {

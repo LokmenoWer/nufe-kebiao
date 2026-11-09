@@ -66,6 +66,23 @@ internal object OemIslandExtras {
     }
 
     /**
+     * 解析标准 Notification 的 `(contentText, subText)` 通道分配：
+     * - 未开启秒级倒计时（默认）：`contentText`（第二行）显示课程名，`subText`（第三行）显示剩余分钟状态；
+     * - 开启秒级倒计时（`chronometer = true`）：ColorOS 16 流体云等系统会将系统 `Chronometer` 计时器直接渲染在
+     *   `text`（`contentText`）通道，若仍把课程名放在 `contentText` 会被计时器覆盖导致课名消失，且 `subText`
+     *   会与计时器重复显示倒计时；此时将课程名下移至 `subText` 通道，`contentText` 放状态文案供普通通知模板回退。
+     */
+    fun resolveCardTextChannels(
+        course: String,
+        status: String,
+        chronometer: Boolean,
+    ): Pair<String, String> = if (chronometer) {
+        status to course
+    } else {
+        course to status
+    }
+
+    /**
      * 生成状态栏胶囊（`setShortCriticalText` 及各 ROM 胶囊摘要区）显示的简短文案。
      * 状态栏胶囊空间极窄（通常仅约 4 个汉字宽度），固定展示高可读性的剩余时间或上课状态。
      */
