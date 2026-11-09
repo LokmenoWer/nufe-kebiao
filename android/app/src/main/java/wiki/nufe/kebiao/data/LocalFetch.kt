@@ -38,13 +38,8 @@ class LocalFetch(
     userAgent: String,
     private val allowed: (String) -> Boolean = SchoolUrls::allowed,
 ) {
-    private val client = OkHttpClient.Builder()
+    private val client = baseClient.newBuilder()
         .cookieJar(jar)
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .callTimeout(25, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val request = chain.request()
             if (!allowed(request.url.toString())) throw IOException("已阻止非学校地址")
@@ -139,7 +134,17 @@ class LocalFetch(
 
     companion object {
         const val MAX_BODY_BYTES = 2 * 1024 * 1024
-        fun hasCourseData(html: String) = Regex("""\bpersonId\s*=\s*\d+""").containsMatchIn(html) &&
-            Regex("""\bcurrentSemester\s*=\s*\{""").containsMatchIn(html)
+        private val PERSON_ID_REGEX = Regex("""\bpersonId\s*=\s*\d+""")
+        private val SEMESTER_REGEX = Regex("""\bcurrentSemester\s*=\s*\{""")
+        private val baseClient = OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(25, TimeUnit.SECONDS)
+            .build()
+
+        fun hasCourseData(html: String) = PERSON_ID_REGEX.containsMatchIn(html) &&
+            SEMESTER_REGEX.containsMatchIn(html)
     }
 }

@@ -57,7 +57,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -258,11 +262,15 @@ internal fun HomeScreen(
     var jumpWeek by remember { mutableStateOf<Int?>(null) }
     var jumpPulse by remember { mutableIntStateOf(0) }
     val pendingChanges = snapshot?.payload?.changes.orEmpty().filter { changeKey(it) !in dismissedChanges }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(30_000)
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             now = Now.current()
+            while (true) {
+                delay(30_000)
+                now = Now.current()
+            }
         }
     }
 
@@ -391,9 +399,10 @@ private fun StatusPill(plan: DayPlan?, now: Now) {
     }
 }
 
-private fun syncTime(ms: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+private val SYNC_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
     .withZone(ZoneId.of("Asia/Shanghai"))
-    .format(Instant.ofEpochMilli(ms))
+
+private fun syncTime(ms: Long): String = SYNC_TIME_FORMATTER.format(Instant.ofEpochMilli(ms))
 
 internal fun homeSyncText(snapshot: Snapshot): String {
     val updated = snapshot.payload.updatedAt?.takeIf { it > 0L }
@@ -472,7 +481,7 @@ private fun TodayCardView(
     jumpWeek: Int?,
     jumpPulse: Int,
 ) {
-    var mode by remember { mutableStateOf(CardMode.DAY) }
+    var mode by rememberSaveable { mutableStateOf(CardMode.DAY) }
     val view = LocalView.current
     LaunchedEffect(viewPulse, initialWeek) {
         if (viewPulse > 0) {
@@ -480,11 +489,11 @@ private fun TodayCardView(
             onViewConsumed()
         }
     }
-    var preferWeek by remember { mutableStateOf<Int?>(null) }
+    var preferWeek by rememberSaveable { mutableStateOf<Int?>(null) }
     var weekDir by remember { mutableStateOf(1) }
     var selectedCourse by remember { mutableStateOf<SelectedCourse?>(null) }
     val tomorrow = plan?.title == "明天"
-    var showAll by remember(plan?.day?.date) { mutableStateOf(false) }
+    var showAll by rememberSaveable(plan?.day?.date) { mutableStateOf(false) }
     val fullSlots = plan?.day
         ?.let { if (tomorrow) annotate(it.lessons, -1, false) else annotate(it.lessons, now.minutes) }
         .orEmpty()

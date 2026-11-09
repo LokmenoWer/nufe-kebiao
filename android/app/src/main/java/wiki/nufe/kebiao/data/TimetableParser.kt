@@ -2,10 +2,10 @@ package wiki.nufe.kebiao.data
 
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -30,6 +30,19 @@ object TimetableParser {
     )
     private val lessonOrder = compareBy<Occurrence>({ it.date }, { it.start }, { it.end },
         { it.name }, { it.room }, { it.campus }, { it.teachers.joinToString("、") })
+    private val WHITESPACE_REGEX = Regex("\\s+")
+    private val PARITY_BARE_REGEX = Regex("([单双])(?=,|$)")
+    private val PARITY_SUFFIX_REGEX = Regex("\\(([单双])\\)$")
+    private val WEEK_RANGE_REGEX = Regex("^(\\d+)(?:-(\\d+))?(?:\\(([单双])\\))?$")
+    private val CLOCK_OLD_REGEX = Regex("""\d{1,2}:\d{2}""")
+    private val PERSON_ID_LINE_REGEX = Regex("\\bpersonId\\s*=\\s*[1-9]\\d*(?=\\s*[,;<\\r\\n]|\\s*$)")
+    private val CURRENT_SEMESTER_REGEX = Regex("\\bcurrentSemester\\s*=\\s*\\{")
+    private val SELECT_TAG_REGEX = Regex("<select\\b([^<>]*)>", RegexOption.IGNORE_CASE)
+    private val ALL_SEMESTERS_ID_REGEX = Regex("\\bid\\s*=\\s*(['\"])allSemesters\\1")
+    private val OPTION_TAG_REGEX = Regex("<option\\b([^<>]*)>([^<]*)</option>", RegexOption.IGNORE_CASE)
+    private val OPTION_VALUE_REGEX = Regex("\\bvalue\\s*=\\s*(['\"])(\\d+)\\1")
+    private val HTML_ENTITY_REGEX = Regex("&(#x[0-9a-fA-F]+|#\\d+|amp|quot|apos|lt|gt|nbsp);")
+    private val JSON_NUMBER_REGEX = Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?")
 
     fun semesterId(courseHtml: String): Int = coursePage(courseHtml).first
 
@@ -118,6 +131,9 @@ object TimetableParser {
         return (previous.optJSONArray("activities")?.length() ?: 0) > 0 &&
             (next.optJSONArray("activities")?.length() ?: 0) == 0
     }
+
+    internal fun formatNow(nowMs: Long): String =
+        Instant.ofEpochMilli(nowMs).atZone(zone).withNano(0).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 
     /** Reprojects the entire cached term at the supplied instant, including offline week rollover. */
     fun payload(
@@ -211,7 +227,7 @@ object TimetableParser {
             .put("last_day", all.maxOf { it.date }.toString())
         val upcoming = (1L..14L).asSequence().map { day(today.plusDays(it)) }
             .firstOrNull { it.getJSONArray("lessons").length() > 0 }
-        return Payload.parse(JSONObject()
+        return Payload.fromJson(JSONObject()
             .put("now", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
             .put("semester", timetable.optString("semester_name"))
             .put("semester_id", sid).put("updated_at", timetable.opt("updated_at"))
@@ -222,7 +238,7 @@ object TimetableParser {
             .put("changes", JSONArray(changeItems))
             .put("changed_at", changes.maxOfOrNull { it.at } ?: JSONObject.NULL)
             .put("refresh", JSONObject().put("pending", false).put("due", false))
-            .put("delegate", false).put("poll_after", JSONObject.NULL).toString())
+            .put("delegate", false).put("poll_after", JSONObject.NULL))
     }
 
     private data class Activity(
@@ -287,19 +303,18 @@ object TimetableParser {
     }
 
     private fun parseWeeks(text: String): List<Int> {
-        var s = text.replace(Regex("\\s+"), "").replace('（', '(').replace('）', ')')
+        var s = text.replace(WHITESPACE_REGEX, "").replace('（', '(').replace('）', ')')
             .replace('，', ',').replace('、', ',').replace('；', ',').replace(';', ',')
             .replace('～', '-').replace('~', '-').replace('—', '-').replace('–', '-')
             .replace("至", "-").replace("第", "").replace("周", "")
-        s = s.replace(Regex("([单双])(?=,|$)"), "($1)")
-        val qualifier = Regex("\\(([单双])\\)$")
-        val suffix = qualifier.find(s)
+        s = s.replace(PARITY_BARE_REGEX, "($1)")
+        val suffix = PARITY_SUFFIX_REGEX.find(s)
         // A single final qualifier (1-8,10-16(单)) applies to the entire expression.
         val global = if (s.count { it == '(' } == 1) suffix?.groupValues?.get(1) else null
         if (global != null) s = s.substring(0, suffix!!.range.first)
         val weeks = sortedSetOf<Int>()
         for (part in s.split(',')) {
-            val match = Regex("^(\\d+)(?:-(\\d+))?(?:\\(([单双])\\))?$").matchEntire(part)
+            val match = WEEK_RANGE_REGEX.matchEntire(part)
                 ?: invalid("无法识别周次范围")
             val start = match.groupValues[1].toIntOrNull() ?: invalid("周次越界")
             val endText = match.groupValues[2]
@@ -427,7 +442,7 @@ object TimetableParser {
             old.startsWith("教师") -> l.optString("teachers")
             old.startsWith("第") -> "第 ${l.optString("units")} 节"
             old.contains("–") -> "${l.optString("start")}–${l.optString("end")}"
-            Regex("""\d{1,2}:\d{2}""").matches(old) -> l.optString("start")
+            CLOCK_OLD_REGEX.matches(old) -> l.optString("start")
             else -> l.optString("room")
         }
         return "$old → $new"
@@ -465,23 +480,23 @@ object TimetableParser {
 
     private fun coursePage(html: String): Pair<Int, String> {
         require(html.length <= 1024 * 1024) { "课表页面过大" }
-        require(Regex("\\bpersonId\\s*=\\s*[1-9]\\d*(?=\\s*[,;<\\r\\n]|\\s*$)").containsMatchIn(html)) {
+        require(PERSON_ID_LINE_REGEX.containsMatchIn(html)) {
             "课表页结构异常：未找到 personId / currentSemester"
         }
-        val start = Regex("\\bcurrentSemester\\s*=\\s*\\{").find(html)?.range?.last
+        val start = CURRENT_SEMESTER_REGEX.find(html)?.range?.last
             ?: invalid("课表页结构异常：未找到 currentSemester")
         val values = objectScalars(html, start)
         val id = values["id"]?.toIntOrNull()?.takeIf { it > 0 }
             ?: invalid("课表页结构异常：currentSemester 缺少顶层 id")
-        val select = Regex("<select\\b([^<>]*)>", RegexOption.IGNORE_CASE).findAll(html).firstOrNull {
-            Regex("\\bid\\s*=\\s*(['\"])allSemesters\\1").containsMatchIn(it.groupValues[1])
+        val select = SELECT_TAG_REGEX.findAll(html).firstOrNull {
+            ALL_SEMESTERS_ID_REGEX.containsMatchIn(it.groupValues[1])
         }
         if (select != null) {
             val end = html.indexOf("</select>", select.range.last + 1, ignoreCase = true)
             if (end >= 0) {
                 val options = html.substring(select.range.last + 1, end)
-                for (option in Regex("<option\\b([^<>]*)>([^<]*)</option>", RegexOption.IGNORE_CASE).findAll(options)) {
-                    val value = Regex("\\bvalue\\s*=\\s*(['\"])(\\d+)\\1").find(option.groupValues[1])
+                for (option in OPTION_TAG_REGEX.findAll(options)) {
+                    val value = OPTION_VALUE_REGEX.find(option.groupValues[1])
                     if (value?.groupValues?.get(2)?.toIntOrNull() == id) {
                         val name = unescapeHtml(option.groupValues[2]).trim()
                         if (name.isNotEmpty()) return id to name
@@ -558,7 +573,7 @@ object TimetableParser {
         invalid("课表页字符串不完整")
     }
 
-    private fun unescapeHtml(text: String): String = Regex("&(#x[0-9a-fA-F]+|#\\d+|amp|quot|apos|lt|gt|nbsp);").replace(text) {
+    private fun unescapeHtml(text: String): String = HTML_ENTITY_REGEX.replace(text) {
         val entity = it.groupValues[1]
         when (entity) {
             "amp" -> "&"; "quot" -> "\""; "apos" -> "'"; "lt" -> "<"; "gt" -> ">"; "nbsp" -> " "
@@ -638,7 +653,7 @@ object TimetableParser {
                 else -> {
                     val from = i
                     while (i < text.length && text[i] in "0123456789.eE+-") i++
-                    require(Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?").matches(text.substring(from, i))) {
+                    require(JSON_NUMBER_REGEX.matches(text.substring(from, i))) {
                         "JSON 数字无效"
                     }
                 }
@@ -669,7 +684,7 @@ object TimetableParser {
         val h = parts[0].trim().toIntOrNull() ?: return null
         val m = parts[1].trim().toIntOrNull() ?: return null
         if (h !in 0..23 || m !in 0..59) return null
-        return LocalTime.of(h, m).format(DateTimeFormatter.ofPattern("HH:mm"))
+        return "%02d:%02d".format(Locale.ROOT, h, m)
     }
 
     private fun invalid(message: String): Nothing = throw IllegalArgumentException(message)

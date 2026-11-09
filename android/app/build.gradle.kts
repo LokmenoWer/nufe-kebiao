@@ -57,6 +57,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        localeFilters += listOf("zh", "zh-rCN")
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
