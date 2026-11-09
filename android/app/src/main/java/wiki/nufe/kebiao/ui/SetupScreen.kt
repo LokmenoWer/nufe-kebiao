@@ -43,14 +43,15 @@ internal fun PermissionSetupDialog(
     onOpenBattery: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val rom = remember { detectRomFamily() }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("先开启提醒权限") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "开启以下权限后，课前提醒、桌面小组件与${liveName}才能准时生效。点击对应项将直接跳转至系统授权页。" +
-                        "部分系统（如 ColorOS）还需允许“自启动”，否则 App 被清理后提醒无法唤醒。",
+                    "开启以下权限后，课前提醒、桌面小组件${if (isLiveUpdateSupported()) "与$liveName" else ""}才能准时生效。点击对应项将直接跳转至系统授权页。" +
+                        if (rom.needsAutoStart) "当前系统（${rom.displayName}）还需允许“自启动”，否则 App 被清理后提醒无法唤醒。" else "",
                     fontSize = 13.sp,
                     lineHeight = 20.sp,
                 )
@@ -72,7 +73,7 @@ internal fun PermissionSetupDialog(
                         onClick = onOpenExactAlarm,
                     )
                 }
-                if (Build.VERSION.SDK_INT >= 36) {
+                if (detectLiveUpdateTier() == LiveUpdateTier.NATIVE_PROMOTED) {
                     PermissionDialogRow(
                         title = "${liveName}提醒",
                         detail = "在状态栏与通知栏展示课前倒计时卡片",
@@ -81,10 +82,10 @@ internal fun PermissionSetupDialog(
                         onClick = onOpenPromoted,
                     )
                 }
-                if (isColorOsLike()) {
+                if (rom.needsAutoStart) {
                     PermissionDialogRow(
                         title = "自启动",
-                        detail = "打开系统设置 → 应用 → 自启动，勾选本 app",
+                        detail = rom.autoStartStep,
                         allowed = false,
                         action = "去设置",
                         onClick = onOpenAutoStart,
@@ -92,10 +93,10 @@ internal fun PermissionSetupDialog(
                 }
                 PermissionDialogRow(
                     title = "后台运行",
-                    detail = "在耗电管理或后台行为中，设置为完全允许后台行为",
+                    detail = rom.batteryStep,
                     allowed = batteryOk,
                     action = "去设置",
-                    note = if (isColorOsLike()) "电池白名单不够，还要允许自启动/后台运行" else null,
+                    note = if (rom.needsAutoStart) "电池白名单不够，还要允许自启动/后台运行" else null,
                     onClick = onOpenBattery,
                 )
             }
