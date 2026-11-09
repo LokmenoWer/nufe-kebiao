@@ -188,6 +188,26 @@ object Hosting {
         return ok
     }
 
+    /** 同步完成签名、清本机托管记录并重置签名密钥，只把网络通知放到后台线程，避免重新登录时误删新密钥。 */
+    fun leaveAndResetAsync(context: Context) {
+        val app = context.applicationContext
+        val token = prefs(app).getString(KEY_TOKEN, null)
+        val request = if (token != null) {
+            runCatching {
+                signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/leave")
+                    .post(ByteArray(0).toRequestBody(null))).build()
+            }.getOrNull()
+        } else null
+        forget(app, null)
+        prefs(app).edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_SOURCE, false).apply()
+        DeviceKeys.resetSigning()
+        if (request != null) {
+            Thread({
+                runCatching { Community.http.newCall(request).execute().close() }
+            }, "hosting-leave").start()
+        }
+    }
+
     private fun forget(context: Context, error: String?) {
         prefs(context).edit().remove(KEY_TOKEN).remove(KEY_DEVICE).remove(KEY_STATUS).remove(KEY_CHECKED)
             .remove(KEY_KEEP).remove(KEY_PUSHED)

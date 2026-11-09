@@ -13,7 +13,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -73,12 +75,14 @@ class SchoolLoginActivity : ComponentActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         hostWanted = Hosting.wanted(this) || Hosting.active(this)
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.textZoom = 100
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -136,11 +140,21 @@ class SchoolLoginActivity : ComponentActivity() {
         }
         setContent {
             KebiaoTheme {
+                BackHandler(enabled = !importing) {
+                    if (web.canGoBack()) web.goBack() else finish()
+                }
                 Surface(Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             TextButton(onClick = { finish() }) { Text("返回") }
-                            Button(onClick = { captureWhenReady() }, enabled = !importing) { Text("导入课表") }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = { web.reload() }, enabled = !importing) { Text("刷新") }
+                                Button(onClick = { captureWhenReady() }, enabled = !importing) { Text("导入课表") }
+                            }
                         }
                         Text(status, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
                         Surface(
@@ -315,6 +329,16 @@ class SchoolLoginActivity : ComponentActivity() {
     /** 学校移动登录模板会把内容容器算成 height:0 + overflow:hidden，将已渲染好的多因子卡片整块裁掉；这里内联撑开并兜住 Vue 重渲染。 */
     private fun applyMfaLayoutFix(view: WebView) {
         view.evaluateJavascript(FIX_JS, null)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        web.onResume()
+    }
+
+    override fun onPause() {
+        web.onPause()
+        super.onPause()
     }
 
     override fun onDestroy() {

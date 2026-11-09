@@ -11,12 +11,13 @@ import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
 import java.io.File
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import okhttp3.Request
 import org.json.JSONArray
+import wiki.nufe.kebiao.assist.Community
 import wiki.nufe.kebiao.diag.Diag
 
 /** 比当前版本新的版本。url 是发布页（自动更新不成时在浏览器里打开），apkUrl 是安装包的下载地址。 */
@@ -132,14 +133,14 @@ class AppUpdater(context: Context) {
         update
     }
 
-    private fun siteUrl() = DEFAULT_SITE
+    private fun siteUrl() = Community.site(app)
 
     /**
      * 下载新版本并确认它确实是这个 App 的新版本，返回可以安装的文件。之前下载好的直接复用。
      * 校验不过的文件不留；所有地址都失败时抛最后一个异常。
      */
     suspend fun download(update: AppUpdate, onProgress: (Int?) -> Unit): File = withContext(Dispatchers.IO) {
-        val target = File(updatesDir, "${update.version.replace(Regex("[^0-9A-Za-z.-]"), "_")}.apk")
+        val target = File(updatesDir, "${update.version.replace(SAFE_FILE_REGEX, "_")}.apk")
         if (target.exists()) {
             if (runCatching { verify(target) }.isSuccess) return@withContext target
             target.delete()
@@ -172,18 +173,27 @@ class AppUpdater(context: Context) {
     }
 
     private fun fetch(url: String, to: File, onProgress: (Int?) -> Unit) {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        try {
-            conn.connectTimeout = 8_000
-            conn.readTimeout = 20_000
-            conn.setRequestProperty("User-Agent", "nufe-kebiao-android/1")
-            val status = conn.responseCode
-            if (status !in 200..299) throw IOException("HTTP $status")
-            val total = conn.contentLengthLong
+        val client = Community.http.newBuilder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(false)
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "nufe-kebiao-android/1")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            val body = response.body ?: throw IOException("empty body")
+            val total = body.contentLength()
             if (total > MAX_APK_BYTES) throw UpdateRejectedException("too large")
             var done = 0L
-            onProgress(if (total > 0) 0 else null)
-            conn.inputStream.use { input ->
+            var lastPercent: Int? = if (total > 0) 0 else null
+            onProgress(lastPercent)
+            body.byteStream().use { input ->
                 to.outputStream().use { output ->
                     val buffer = ByteArray(32 * 1024)
                     while (true) {
@@ -192,13 +202,15 @@ class AppUpdater(context: Context) {
                         output.write(buffer, 0, n)
                         done += n
                         if (done > MAX_APK_BYTES) throw UpdateRejectedException("too large")
-                        onProgress(if (total > 0) (done * 100 / total).toInt().coerceAtMost(100) else null)
+                        val percent = if (total > 0) (done * 100 / total).toInt().coerceAtMost(100) else null
+                        if (percent != lastPercent) {
+                            lastPercent = percent
+                            onProgress(percent)
+                        }
                     }
                 }
             }
             if (total > 0 && done != total) throw IOException("truncated")
-        } finally {
-            conn.disconnect()
         }
     }
 
@@ -245,17 +257,22 @@ class AppUpdater(context: Context) {
     }
 
     private fun read(url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        try {
-            conn.connectTimeout = 6_000
-            conn.readTimeout = 10_000
-            conn.setRequestProperty("Accept", "application/json")
-            conn.setRequestProperty("User-Agent", "nufe-kebiao-android/1")
-            val status = conn.responseCode
-            if (status !in 200..299) throw IOException("HTTP $status")
-            return conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
+        val client = Community.http.newBuilder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(12, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(false)
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "nufe-kebiao-android/1")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            return response.body?.string() ?: throw IOException("empty body")
         }
     }
 
@@ -265,7 +282,7 @@ class AppUpdater(context: Context) {
 
     private companion object {
         const val CHECK_EVERY_MS = 24 * 60 * 60_000L
-        val DEFAULT_SITE: String = wiki.nufe.kebiao.BuildConfig.SITE
+        private val SAFE_FILE_REGEX = Regex("[^0-9A-Za-z.-]")
         const val APK_MIME = "application/vnd.android.package-archive"
         const val MAX_APK_BYTES = 64 * 1024 * 1024L
         const val KEY_LAST = "last_check"

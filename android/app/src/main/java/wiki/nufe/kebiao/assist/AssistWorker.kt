@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import wiki.nufe.kebiao.data.SHANGHAI
 import wiki.nufe.kebiao.diag.Diag
 
 /** 每天一次匿名心跳；只要求联网。 */
@@ -90,7 +91,7 @@ class AssistWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     /** 当天已用流量，跨天清零。 */
     private class DataBudget(context: Context) {
         private val prefs = context.getSharedPreferences("community", Context.MODE_PRIVATE)
-        private val today = LocalDate.now().toString()
+        private val today = LocalDate.now(SHANGHAI).toString()
 
         fun remaining(): Long {
             val used = if (prefs.getString("bytes_day", null) == today) prefs.getLong("bytes_used", 0L) else 0L

@@ -267,6 +267,7 @@ internal fun MineScreen(
         )
 
         Spacer(Modifier.height(14.dp))
+        val rom = remember { detectRomFamily() }
         SectionCard {
             Text("权限", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
@@ -275,10 +276,7 @@ internal fun MineScreen(
                 detail = "课前提醒和系统通知",
                 allowed = notificationsOk,
             ) {
-                context.startActivity(
-                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                )
+                openNotificationSettings(context)
             }
             // Android 12 以下不需要也没有“闹钟和提醒”授权页，启动该 intent 会抛 ActivityNotFoundException。
             if (Build.VERSION.SDK_INT >= 31) {
@@ -288,32 +286,26 @@ internal fun MineScreen(
                     detail = "避免系统推迟上课提醒",
                     allowed = exactOk,
                 ) {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                            Uri.parse("package:${context.packageName}"),
-                        ),
-                    )
+                    openExactAlarmSettings(context)
                 }
             }
-            if (Build.VERSION.SDK_INT >= 36) {
+            if (isLiveUpdateSupported()) {
+                val tier = detectLiveUpdateTier()
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
                 PermissionRow(
                     title = "系统实时提醒（$liveName）",
                     detail = "在锁屏或状态栏显示课程倒计时",
                     allowed = promotedOk,
+                    statusOverride = if (tier != LiveUpdateTier.NATIVE_PROMOTED) "已就绪" else null,
                 ) {
-                    context.startActivity(
-                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                    )
+                    openPromotedNotificationSettings(context)
                 }
             }
-            if (isColorOsLike()) {
+            if (rom.needsAutoStart) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
                 PermissionRow(
                     title = "自启动",
-                    detail = "打开系统设置 → 应用 → 自启动，勾选本 app",
+                    detail = rom.autoStartStep,
                     allowed = false,
                     statusOverride = "请确认",
                 ) {
@@ -323,7 +315,7 @@ internal fun MineScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
             PermissionRow(
                 title = "后台运行",
-                detail = "在耗电管理或后台行为中，设置为完全允许后台行为",
+                detail = rom.batteryStep,
                 allowed = batteryOk,
             ) {
                 openBatteryOptimizationSettings(context)

@@ -86,7 +86,7 @@ internal class UpdateFlow(
     }
 
     fun openInBrowser(update: AppUpdate) {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        openExternalUrl(context, update.url)
     }
 
     private fun proceed() {
