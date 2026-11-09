@@ -28,19 +28,6 @@ enum class LiveDismissMode(val code: String, val label: String, val desc: String
     }
 }
 
-/** 灵动显示状态栏胶囊（短文本区）展示内容。 */
-enum class LiveCapsuleTextMode(val code: String, val label: String, val desc: String) {
-    COUNTDOWN("countdown", "剩余时间", "显示“剩 N 分钟”或“正在上课”"),
-    ROOM_FIRST("room", "教室优先", "优先显示紧凑教室号（如 博观101、J1-203）"),
-    COURSE_SHORT("course", "课程简称", "优先显示课程名称前 5 个字"),
-    ;
-
-    companion object {
-        fun fromCode(code: String?): LiveCapsuleTextMode =
-            entries.firstOrNull { it.code == code } ?: COUNTDOWN
-    }
-}
-
 data class Snapshot(val payload: Payload, val fetchedAtMs: Long, val offline: Boolean)
 
 class Repository(context: Context) {
@@ -77,10 +64,6 @@ class Repository(context: Context) {
     var liveDismissMode: LiveDismissMode
         get() = LiveDismissMode.fromCode(prefs.getString("live_dismiss_mode", null))
         set(value) = prefs.edit().putString("live_dismiss_mode", value.code).apply()
-
-    var liveCapsuleTextMode: LiveCapsuleTextMode
-        get() = LiveCapsuleTextMode.fromCode(prefs.getString("live_capsule_text_mode", null))
-        set(value) = prefs.edit().putString("live_capsule_text_mode", value.code).apply()
 
     /**
      * 是否在灵动卡片/岛展开态展示进度条：ColorOS 16 流体云无进度条时三行文字排版更干净（默认关），

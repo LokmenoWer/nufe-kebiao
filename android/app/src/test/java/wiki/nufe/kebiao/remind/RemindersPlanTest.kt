@@ -6,7 +6,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import wiki.nufe.kebiao.data.Day
 import wiki.nufe.kebiao.data.Lesson
-import wiki.nufe.kebiao.data.LiveCapsuleTextMode
 import wiki.nufe.kebiao.data.LiveDismissMode
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Payload
@@ -84,44 +83,34 @@ class RemindersPlanTest {
             OemIslandExtras.resolveDismissMs(startMs, endMs, LiveDismissMode.UNTIL_CLASS_END),
         )
 
-        assertEquals("博远JC406", OemIslandExtras.compactRoom("博远楼JC406"))
-        assertEquals("德济202", OemIslandExtras.compactRoom("德济楼 202"))
+        assertEquals("博远楼JC406", OemIslandExtras.displayRoom("仙林校区 博远楼 JC406"))
+        assertEquals("博观楼101", OemIslandExtras.displayRoom("仙林校区 博观楼 101"))
+        assertEquals("综合楼302", OemIslandExtras.displayRoom("福建路校区 综合楼 302"))
+        assertEquals("博远楼JC406", OemIslandExtras.displayRoom("博远楼JC406"))
+        assertEquals("仙林校区", OemIslandExtras.displayRoom("仙林校区"))
+        assertEquals("地点待定", OemIslandExtras.displayRoom("   "))
 
-        val sampleItem = Reminders.Item(
-            atMs = startMs,
-            title = "10 分钟后：高等数学",
-            text = "10:00–11:25 · 博远楼JC406",
-            date = "2026-11-03",
-            start = "10:00",
-            end = "11:25",
-            name = "高等数学（上）",
-            room = "博远楼JC406",
-        )
         assertEquals(
             "剩 10 分钟",
             OemIslandExtras.formatCapsuleShortText(
-                item = sampleItem,
                 isBeforeClass = true,
                 remainMinutes = 10,
-                textMode = LiveCapsuleTextMode.COUNTDOWN,
             ),
         )
         assertEquals(
-            "博远JC406",
+            "正在上课",
             OemIslandExtras.formatCapsuleShortText(
-                item = sampleItem,
-                isBeforeClass = true,
-                remainMinutes = 10,
-                textMode = LiveCapsuleTextMode.ROOM_FIRST,
+                isBeforeClass = false,
+                remainMinutes = 35,
+                dismissMode = LiveDismissMode.FIVE_MIN_AFTER_START,
             ),
         )
         assertEquals(
-            "高等数学（",
+            "剩 35分",
             OemIslandExtras.formatCapsuleShortText(
-                item = sampleItem,
-                isBeforeClass = true,
-                remainMinutes = 10,
-                textMode = LiveCapsuleTextMode.COURSE_SHORT,
+                isBeforeClass = false,
+                remainMinutes = 35,
+                dismissMode = LiveDismissMode.UNTIL_CLASS_END,
             ),
         )
     }
@@ -129,11 +118,11 @@ class RemindersPlanTest {
     @Test
     fun oemIslandExtrasBuildValidMiuiFocusParamJson() {
         val json = OemIslandExtras.buildMiuiFocusParamJson(
-            course = "算法设计与分析",
+            titleLine = "10:00-11:25 博远楼JC406",
+            course = "算法设计与分析（双语）",
             room = "博远楼JC406",
-            timeRange = "10:00–11:25",
-            meta = "博远楼JC406 · 10:00–11:25",
-            status = "10 分钟后上课",
+            timeRange = "10:00-11:25",
+            status = "10分钟后上课",
             shortText = "剩 10 分钟",
             progress = 50,
             showProgress = true,
@@ -143,6 +132,8 @@ class RemindersPlanTest {
         assertEquals(1, v2.getInt("protocol"))
         assertEquals("schedule", v2.getString("business"))
         assertTrue(v2.getBoolean("updatable"))
+        assertEquals("10:00-11:25 博远楼JC406", v2.getJSONObject("baseInfo").getString("title"))
+        assertEquals("算法设计与分析（双语）", v2.getJSONObject("baseInfo").getString("content"))
         assertEquals(
             "剩 10 分钟",
             v2.getJSONObject("param_island")

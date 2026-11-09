@@ -62,7 +62,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlin.math.abs
 import wiki.nufe.kebiao.R
-import wiki.nufe.kebiao.data.LiveCapsuleTextMode
 import wiki.nufe.kebiao.data.LiveDismissMode
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.remind.LiveUpdates
@@ -83,12 +82,10 @@ internal fun ReminderSection(
     var canNotify by remember { mutableStateOf(Reminders.canNotify(context)) }
     var promotedOk by remember { mutableStateOf(isPromotedPermissionOk(context)) }
     var dismissMode by remember { mutableStateOf(repo.liveDismissMode) }
-    var capsuleTextMode by remember { mutableStateOf(repo.liveCapsuleTextMode) }
     var progressEnabled by remember { mutableStateOf(repo.liveProgressEnabled) }
     var chronometerEnabled by remember { mutableStateOf(repo.liveChronometer) }
     var previewActive by remember { mutableStateOf(LiveUpdates.isActive(context)) }
     var showDismissPicker by remember { mutableStateOf(false) }
-    var showCapsulePicker by remember { mutableStateOf(false) }
 
     val permission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -238,33 +235,6 @@ internal fun ReminderSection(
                 modifier = Modifier.padding(vertical = 12.dp),
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showCapsulePicker = true },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("状态栏胶囊内容", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        capsuleTextMode.label,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Icon(
-                    painter = painterResource(R.drawable.ic_chevron_right),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 12.dp),
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("显示卡片进度条", fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -393,22 +363,6 @@ internal fun ReminderSection(
                 showDismissPicker = false
                 dismissMode = mode
                 repo.liveDismissMode = mode
-                LiveUpdates.refreshActiveIfShown(context)
-            },
-        )
-    }
-
-    if (showCapsulePicker) {
-        OptionPickerDialog(
-            title = "状态栏胶囊内容",
-            subtitle = "选择状态栏胶囊或短文本优先展示的信息",
-            options = LiveCapsuleTextMode.entries.map { it to (it.label to it.desc) },
-            selected = capsuleTextMode,
-            onDismiss = { showCapsulePicker = false },
-            onSelect = { mode ->
-                showCapsulePicker = false
-                capsuleTextMode = mode
-                repo.liveCapsuleTextMode = mode
                 LiveUpdates.refreshActiveIfShown(context)
             },
         )

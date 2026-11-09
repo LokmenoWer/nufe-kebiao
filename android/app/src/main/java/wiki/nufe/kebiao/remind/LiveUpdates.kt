@@ -14,7 +14,6 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import wiki.nufe.kebiao.R
-import wiki.nufe.kebiao.data.LiveCapsuleTextMode
 import wiki.nufe.kebiao.data.LiveDismissMode
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Repository
@@ -64,7 +63,6 @@ object LiveUpdates {
         if (intent != null && intent.hasExtra("cfg_dismiss")) {
             return LiveConfig(
                 dismissMode = LiveDismissMode.fromCode(intent.getStringExtra("cfg_dismiss")),
-                capsuleTextMode = LiveCapsuleTextMode.fromCode(intent.getStringExtra("cfg_capsule")),
                 progressEnabled = intent.getBooleanExtra("cfg_progress", false),
                 chronometer = intent.getBooleanExtra("cfg_chrono", false),
             )
@@ -73,7 +71,6 @@ object LiveUpdates {
         if (prefs.contains("cfg_dismiss")) {
             return LiveConfig(
                 dismissMode = LiveDismissMode.fromCode(prefs.getString("cfg_dismiss", null)),
-                capsuleTextMode = LiveCapsuleTextMode.fromCode(prefs.getString("cfg_capsule", null)),
                 progressEnabled = prefs.getBoolean("cfg_progress", false),
                 chronometer = prefs.getBoolean("cfg_chrono", false),
             )
@@ -122,8 +119,18 @@ object LiveUpdates {
         return repo.alarmEnabled && repo.liveUpdateEnabled && available(context)
     }
 
-    /** 灵动卡片是否一定以系统级实时通知展示，从而可以让同次普通提醒静默。 */
-    internal fun replacesAlert(): Boolean = detectLiveUpdateTier() == LiveUpdateTier.NATIVE_PROMOTED
+    /**
+     * 灵动卡片是否自身已具备声音/震动提醒能力，从而可以让同次普通提醒静默。
+     * 默认 `class_live_update` 通道为 `IMPORTANCE_LOW`（无声，避免每分钟刷新时反复响铃），
+     * 此时必须保留普通课前提醒的声音/震动；仅当用户在系统设置中将灵动通道调至默认及以上且开启声音/震动时才静默普通提醒。
+     */
+    internal fun replacesAlert(context: Context): Boolean {
+        if (detectLiveUpdateTier() != LiveUpdateTier.NATIVE_PROMOTED) return false
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        val channel = manager.getNotificationChannel(CHANNEL) ?: return false
+        return channel.importance >= NotificationManager.IMPORTANCE_DEFAULT &&
+            (channel.sound != null || channel.shouldVibrate())
+    }
 
     /** 当前是否有灵动提醒卡片正在状态栏/通知栏展示。 */
     fun isActive(context: Context): Boolean {
@@ -293,18 +300,16 @@ object LiveUpdates {
     ): Notification? {
         if (detectLiveUpdateTier() == LiveUpdateTier.UNSUPPORTED) return null
         val now = System.currentTimeMillis()
-        val room = item.room.ifBlank { "地点待定" }
+        val room = OemIslandExtras.displayRoom(item.room)
         val changedText = if (item.changed) "（已调课${item.was?.let { "：$it" } ?: ""}）" else ""
         val course = (item.name.ifBlank { "下一节课" }) + changedText
-        val meta = "${item.start}–${item.end} · $room"
+        val titleLine = "${item.start}-${item.end} $room"
         val remain = remainingMinutes(phase, startMs, endMs)
-        val status = if (phase == Phase.BEFORE) "准备上课 · 剩 $remain 分钟" else "正在上课 · 还有 $remain 分钟下课"
+        val status = if (phase == Phase.BEFORE) "${remain}分钟后上课" else "正在上课 · 还有 $remain 分钟下课"
         val short = OemIslandExtras.formatCapsuleShortText(
-            item = item,
             isBeforeClass = phase == Phase.BEFORE,
             remainMinutes = remain,
             dismissMode = config.dismissMode,
-            textMode = config.capsuleTextMode,
         )
         val progress = OemIslandExtras.computeProgressPercent(
             remindAtMs = item.atMs,
@@ -323,9 +328,8 @@ object LiveUpdates {
         )
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify_calendar)
-            .setLargeIcon(Icon.createWithBitmap(Reminders.appIconBitmap(context)))
-            .setContentTitle(course)
-            .setContentText(meta)
+            .setContentTitle(titleLine)
+            .setContentText(course)
             .setSubText(status)
             .setContentIntent(open)
             .setOngoing(true)
@@ -355,8 +359,8 @@ object LiveUpdates {
             context = context,
             builder = builder,
             item = item,
+            titleLine = titleLine,
             course = course,
-            meta = meta,
             status = status,
             shortText = short,
             progress = progress,
@@ -511,7 +515,6 @@ object LiveUpdates {
             .putBoolean("changed", item.changed)
             .putString("was", item.was)
             .putString("cfg_dismiss", config.dismissMode.code)
-            .putString("cfg_capsule", config.capsuleTextMode.code)
             .putBoolean("cfg_progress", config.progressEnabled)
             .putBoolean("cfg_chrono", config.chronometer)
             .putBoolean("preview", isPreview)
@@ -591,7 +594,6 @@ object LiveUpdates {
             .putExtra("preview", isPreview)
         if (config != null) {
             intent.putExtra("cfg_dismiss", config.dismissMode.code)
-                .putExtra("cfg_capsule", config.capsuleTextMode.code)
                 .putExtra("cfg_progress", config.progressEnabled)
                 .putExtra("cfg_chrono", config.chronometer)
         }

@@ -305,9 +305,9 @@ class ReminderReceiver : BroadcastReceiver() {
         val liveShown = repo.liveUpdateEnabled &&
             runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
         if (liveShown) Diag.i("live update posted")
-        // 只有系统原生 promoted 卡片才确定会弹出/响铃；厂商扩展字段在未入白名单的机型上只是一条低优先级常驻通知，
-        // 此时普通提醒必须照常响，否则用户会完全收不到课前提醒。
-        val silenceAlert = liveShown && LiveUpdates.replacesAlert()
+        // 仅当系统原生 promoted 通知通道自身被用户配置为有声/震动时才静默普通提醒；
+        // 默认灵动通道为 IMPORTANCE_LOW（静音，避免按分钟刷新时反复响铃），此时普通提醒照常响铃。
+        val silenceAlert = liveShown && LiveUpdates.replacesAlert(context)
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) {
             Diag.i("reminder skipped: stale")

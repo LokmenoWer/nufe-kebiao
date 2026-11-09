@@ -320,11 +320,14 @@ class LiveUpdateTestActivity : ComponentActivity() {
 
     private fun postLiveUpdate(progress: Int, remainingMs: Long) {
         val shortText = "剩 ${formatRemaining(remainingMs)}"
+        val titleLine = "10:00-11:25 博远楼JC406"
+        val course = "算法设计与分析（双语）"
+        val statusText = "${liveUpdateName()}测试 · 正在上课"
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notify_calendar)
-            .setContentTitle("${liveUpdateName()}测试")
-            .setContentText("正在上课 · 算法设计与分析")
-            .setSubText("博远楼JC406 · 10:00–11:25")
+            .setContentTitle(titleLine)
+            .setContentText(course)
+            .setSubText(statusText)
             .setContentIntent(openAppIntent())
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
@@ -352,20 +355,20 @@ class LiveUpdateTestActivity : ComponentActivity() {
         val testItem = Reminders.Item(
             atMs = System.currentTimeMillis(),
             title = "${liveUpdateName()}测试",
-            text = "10:00–11:25 · 博远楼JC406",
+            text = "10:00–11:25 · 仙林校区 博远楼 JC406",
             date = Now.current().date,
             start = "10:00",
             end = "11:25",
-            name = "算法设计与分析",
-            room = "博远楼JC406",
+            name = course,
+            room = "仙林校区 博远楼 JC406",
         )
         OemIslandExtras.applyOemExtras(
             context = this,
             builder = builder,
             item = testItem,
-            course = "算法设计与分析",
-            meta = "博远楼JC406 · 10:00–11:25",
-            status = "${liveUpdateName()}测试",
+            titleLine = titleLine,
+            course = course,
+            status = statusText,
             shortText = shortText,
             progress = progress,
             showProgress = true,

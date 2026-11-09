@@ -8,7 +8,6 @@ import android.os.Build
 import android.os.Bundle
 import org.json.JSONObject
 import wiki.nufe.kebiao.R
-import wiki.nufe.kebiao.data.LiveCapsuleTextMode
 import wiki.nufe.kebiao.data.LiveDismissMode
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.ui.RomFamily
@@ -20,14 +19,12 @@ import wiki.nufe.kebiao.ui.detectRomFamily
  */
 data class LiveConfig(
     val dismissMode: LiveDismissMode = LiveDismissMode.FIVE_MIN_AFTER_START,
-    val capsuleTextMode: LiveCapsuleTextMode = LiveCapsuleTextMode.COUNTDOWN,
     val progressEnabled: Boolean = false,
     val chronometer: Boolean = false,
 ) {
     companion object {
         fun from(repo: Repository): LiveConfig = LiveConfig(
             dismissMode = repo.liveDismissMode,
-            capsuleTextMode = repo.liveCapsuleTextMode,
             progressEnabled = repo.liveProgressEnabled,
             chronometer = repo.liveChronometer,
         )
@@ -42,6 +39,9 @@ internal object OemIslandExtras {
     const val BRAND_TRACK_COLOR_INT: Int = 0xFFB9C3FF.toInt()
     const val BRAND_COLOR_HEX: String = "#4B63E0"
 
+    private val CAMPUS_PREFIX_REGEX = Regex("""^\S+?校区\s+""")
+    private val WHITESPACE_REGEX = Regex("""\s+""")
+
     /** 根据用户选择的收起模式计算灵动卡片收起时间戳。 */
     fun resolveDismissMs(
         startMs: Long,
@@ -54,36 +54,28 @@ internal object OemIslandExtras {
     }
 
     /**
-     * 提取适合状态栏胶囊展示的紧凑教室名称（控制在 7 个字符以内）：
-     * 例如 `"博观楼 101"` -> `"博观101"`，`"德济楼 202"` -> `"德济202"`，`"博远楼JC406"` -> `"博远JC406"`。
+     * 提取适合灵动卡片主标题展示的精简教室名称：
+     * 去除冗余的“xx校区 ”前缀与内部空格（如 `"仙林校区 博远楼 JC406"` -> `"博远楼JC406"`，
+     * `"仙林校区 博观楼 101"` -> `"博观楼101"`），确保“时间 + 教室”能在一行大号粗体中完整展示。
      */
-    fun compactRoom(room: String): String {
+    fun displayRoom(room: String): String {
         val trimmed = room.trim()
-        if (trimmed.isEmpty() || trimmed == "地点待定" || trimmed == "待定") return ""
-        val noSpace = trimmed.replace(Regex("""\s+"""), "")
-            .replace("教学楼", "")
-            .replace("实验楼", "")
-        val withoutBuildingSuffix = noSpace.replace("楼", "").ifBlank { noSpace }
-        if (withoutBuildingSuffix.length <= 7) return withoutBuildingSuffix
-        // 若仍超长，优先取末尾的房间号/代码（如 J1-203、JC406）
-        val codeMatch = Regex("""[A-Za-z0-9-]{2,7}$""").find(withoutBuildingSuffix)
-        if (codeMatch != null) return codeMatch.value
-        return withoutBuildingSuffix.take(7)
+        if (trimmed.isEmpty()) return "地点待定"
+        val withoutCampus = trimmed.replaceFirst(CAMPUS_PREFIX_REGEX, "").ifBlank { trimmed }
+        return withoutCampus.replace(WHITESPACE_REGEX, "")
     }
 
     /**
      * 生成状态栏胶囊（`setShortCriticalText` 及各 ROM 胶囊摘要区）显示的简短文案。
-     * Android 16 规范建议不超过 7 个字符，避免在挖孔旁被截断。
+     * 状态栏胶囊空间极窄（通常仅约 4 个汉字宽度），固定展示高可读性的剩余时间或上课状态。
      */
     fun formatCapsuleShortText(
-        item: Reminders.Item,
         isBeforeClass: Boolean,
         remainMinutes: Long,
         dismissMode: LiveDismissMode = LiveDismissMode.FIVE_MIN_AFTER_START,
-        textMode: LiveCapsuleTextMode = LiveCapsuleTextMode.COUNTDOWN,
     ): String {
         val remain = remainMinutes.coerceAtLeast(1L)
-        val countdownText = if (isBeforeClass) {
+        return if (isBeforeClass) {
             if (remain >= 100L) "剩${remain}分" else "剩 $remain 分钟"
         } else {
             if (dismissMode == LiveDismissMode.UNTIL_CLASS_END) {
@@ -91,11 +83,6 @@ internal object OemIslandExtras {
             } else {
                 "正在上课"
             }
-        }
-        return when (textMode) {
-            LiveCapsuleTextMode.COUNTDOWN -> countdownText
-            LiveCapsuleTextMode.ROOM_FIRST -> compactRoom(item.room).ifBlank { countdownText }
-            LiveCapsuleTextMode.COURSE_SHORT -> item.name.trim().take(5).ifBlank { countdownText }
         }
     }
 
@@ -127,13 +114,14 @@ internal object OemIslandExtras {
 
     /**
      * 构建小米澎湃 OS（HyperOS 1 / 2 / 3）焦点通知与超级岛 `miui.focus.param` JSON 字符串。
-     * 包含 `param_v2` 下的 `baseInfo`（通知中心/锁屏焦点卡）与 `param_island`（超级岛大小岛结构）。
+     * 包含 `param_v2` 下的 `baseInfo`（通知中心/锁屏焦点卡，主标题放大时间与教室，次行展示课程名）
+     * 与 `param_island`（超级岛大小岛结构）。
      */
     fun buildMiuiFocusParamJson(
+        titleLine: String,
         course: String,
         room: String,
         timeRange: String,
-        meta: String,
         status: String,
         shortText: String,
         progress: Int,
@@ -143,8 +131,8 @@ internal object OemIslandExtras {
         val coercedProgress = progress.coerceIn(0, 100)
         val baseInfo = JSONObject()
             .put("type", 1)
-            .put("title", course)
-            .put("content", meta)
+            .put("title", titleLine)
+            .put("content", course)
             .put("subContent", status)
             .put("color", BRAND_COLOR_HEX)
 
@@ -167,13 +155,13 @@ internal object OemIslandExtras {
                 "picInfo",
                 JSONObject()
                     .put("type", 1)
-                    .put("pic", "miui.focus.pic_app"),
+                    .put("pic", "miui.focus.pic_ticker"),
             )
             .put(
                 "textInfo",
                 JSONObject()
-                    .put("title", course)
-                    .put("content", room)
+                    .put("title", room)
+                    .put("content", course)
                     .put("narrowFont", false),
             )
 
@@ -210,9 +198,9 @@ internal object OemIslandExtras {
             .put("business", "schedule")
             .put("enableFloat", false)
             .put("updatable", true)
-            .put("ticker", "$course · $shortText")
+            .put("ticker", "$titleLine · $shortText")
             .put("tickerPic", "miui.focus.pic_ticker")
-            .put("aodTitle", "$course $shortText")
+            .put("aodTitle", "$titleLine $shortText")
             .put("aodPic", "miui.focus.pic_ticker")
             .put("baseInfo", baseInfo)
             .put("param_island", paramIsland)
@@ -227,8 +215,8 @@ internal object OemIslandExtras {
         context: Context,
         builder: Notification.Builder,
         item: Reminders.Item,
+        titleLine: String,
         course: String,
-        meta: String,
         status: String,
         shortText: String,
         progress: Int,
@@ -239,17 +227,16 @@ internal object OemIslandExtras {
     ) {
         val op = if (isUpdate) 1 else 0
         val smallIcon = Icon.createWithResource(context, R.drawable.ic_notify_calendar)
-        val appIcon = Icon.createWithBitmap(Reminders.appIconBitmap(context))
-        val room = item.room.ifBlank { "地点待定" }
-        val timeRange = "${item.start}–${item.end}"
+        val room = displayRoom(item.room)
+        val timeRange = "${item.start}-${item.end}"
 
         when (family) {
             RomFamily.HYPER_OS -> {
                 val json = buildMiuiFocusParamJson(
+                    titleLine = titleLine,
                     course = course,
                     room = room,
                     timeRange = timeRange,
-                    meta = meta,
                     status = status,
                     shortText = shortText,
                     progress = progress,
@@ -257,7 +244,6 @@ internal object OemIslandExtras {
                 )
                 val pics = Bundle().apply {
                     putParcelable("miui.focus.pic_ticker", smallIcon)
-                    putParcelable("miui.focus.pic_app", appIcon)
                 }
                 val extras = Bundle().apply {
                     putString("miui.focus.param", json)
@@ -273,13 +259,13 @@ internal object OemIslandExtras {
                     putParcelable("notification.live.capsuleIcon", smallIcon)
                     putInt("notification.live.capsuleBgColor", BRAND_COLOR_INT)
                     putString("notification.live.capsuleTitle", shortText)
-                    putString("notification.live.capsuleContent", course)
+                    putString("notification.live.capsuleContent", room)
                     putInt("notification.live.capsuleContentColor", 0xFFFFFFFF.toInt())
                     putBoolean("notification.live.capsuleRemind", !isUpdate)
                 }
                 val feature = Bundle().apply {
-                    putCharSequence("notification.live.feature.title", course)
-                    putCharSequence("notification.live.feature.content", meta)
+                    putCharSequence("notification.live.feature.title", titleLine)
+                    putCharSequence("notification.live.feature.content", course)
                     putCharSequence("notification.live.feature.subText", status)
                     if (showProgress) {
                         putInt("notification.live.feature.progress", progress.coerceIn(0, 100))
@@ -289,7 +275,7 @@ internal object OemIslandExtras {
                     putInt("notification.live.operation", op)
                     putInt("notification.live.type", if (showProgress) 3 else 1)
                     putString("notification.live.event", "SCHEDULE")
-                    putCharSequence("notification.live.titleOverlay", course)
+                    putCharSequence("notification.live.titleOverlay", titleLine)
                     putBundle("notification.live.capsule", capsule)
                     putBundle("notification.live.feature", feature)
                 }
@@ -298,16 +284,15 @@ internal object OemIslandExtras {
 
             RomFamily.ORIGIN_OS -> {
                 val baseInfos = Bundle().apply {
-                    putParcelable("notification.superx.baseInfos.icon", appIcon)
-                    putCharSequence("notification.superx.baseInfos.title", course)
-                    putCharSequence("notification.superx.baseInfos.content", meta)
+                    putCharSequence("notification.superx.baseInfos.title", titleLine)
+                    putCharSequence("notification.superx.baseInfos.content", course)
                     putCharSequence("notification.superx.baseInfos.subInfo", status)
                 }
                 val capsule = Bundle().apply {
                     putInt("notification.superx.capsule.status", 1)
                     putParcelable("notification.superx.capsule.icon", smallIcon)
                     putCharSequence("notification.superx.capsule.title", shortText)
-                    putCharSequence("notification.superx.capsule.content", course)
+                    putCharSequence("notification.superx.capsule.content", room)
                     putString("notification.superx.capsule.bgColor", BRAND_COLOR_HEX)
                 }
                 val superxExtras = Bundle().apply {
@@ -331,7 +316,7 @@ internal object OemIslandExtras {
                         putInt("actionStatus", op)
                         putString("entityName", "SCHEDULE")
                         putString("capsuleTitle", shortText)
-                        putString("capsuleContent", course)
+                        putString("capsuleContent", room)
                     }
                     builder.addExtras(fluidExtras)
                 }

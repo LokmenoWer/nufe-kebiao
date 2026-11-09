@@ -107,8 +107,7 @@ object Diagnostics {
                 "提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，" +
                     "灵动显示（${liveUpdateName()}）${repo.liveUpdateEnabled} " +
                     "[tier=${detectLiveUpdateTier().name}, dismiss=${repo.liveDismissMode.code}, " +
-                    "capsule=${repo.liveCapsuleTextMode.code}, progress=${repo.liveProgressEnabled}, " +
-                    "chrono=${repo.liveChronometer}]",
+                    "progress=${repo.liveProgressEnabled}, chrono=${repo.liveChronometer}]",
             )
             appendLine("提醒队列（上次排定，未到点）：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
