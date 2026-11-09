@@ -13,6 +13,33 @@ import org.json.JSONObject
 import wiki.nufe.kebiao.diag.Diag
 import wiki.nufe.kebiao.sync.ChangeAlert
 import wiki.nufe.kebiao.sync.LoginAlert
+import wiki.nufe.kebiao.ui.isColorOsLike
+
+/** 灵动显示（流体云 / 超级岛 / 原子岛 / 实况通知等）自动收起时机。 */
+enum class LiveDismissMode(val code: String, val label: String, val desc: String) {
+    FIVE_MIN_AFTER_START("5m", "开课 5 分钟后", "课前倒数开课，上课切换为“正在上课”，开课 5 分钟后自动收起"),
+    AT_CLASS_START("start", "上课时立即收起", "仅在课前显示倒计时，到点上课即刻收起"),
+    UNTIL_CLASS_END("end", "持续展示至下课", "课前倒数开课，课中全程倒数下课，下课时刻自动收起"),
+    ;
+
+    companion object {
+        fun fromCode(code: String?): LiveDismissMode =
+            entries.firstOrNull { it.code == code } ?: FIVE_MIN_AFTER_START
+    }
+}
+
+/** 灵动显示状态栏胶囊（短文本区）展示内容。 */
+enum class LiveCapsuleTextMode(val code: String, val label: String, val desc: String) {
+    COUNTDOWN("countdown", "剩余时间", "显示“剩 N 分钟”或“正在上课”"),
+    ROOM_FIRST("room", "教室优先", "优先显示紧凑教室号（如 博观101、J1-203）"),
+    COURSE_SHORT("course", "课程简称", "优先显示课程名称前 5 个字"),
+    ;
+
+    companion object {
+        fun fromCode(code: String?): LiveCapsuleTextMode =
+            entries.firstOrNull { it.code == code } ?: COUNTDOWN
+    }
+}
 
 data class Snapshot(val payload: Payload, val fetchedAtMs: Long, val offline: Boolean)
 
@@ -47,6 +74,32 @@ class Repository(context: Context) {
         get() = prefs.getBoolean("live_update_enabled", false)
         set(value) = prefs.edit().putBoolean("live_update_enabled", value).apply()
 
+    var liveDismissMode: LiveDismissMode
+        get() = LiveDismissMode.fromCode(prefs.getString("live_dismiss_mode", null))
+        set(value) = prefs.edit().putString("live_dismiss_mode", value.code).apply()
+
+    var liveCapsuleTextMode: LiveCapsuleTextMode
+        get() = LiveCapsuleTextMode.fromCode(prefs.getString("live_capsule_text_mode", null))
+        set(value) = prefs.edit().putString("live_capsule_text_mode", value.code).apply()
+
+    /**
+     * 是否在灵动卡片/岛展开态展示进度条：ColorOS 16 流体云无进度条时三行文字排版更干净（默认关），
+     * 其他系统（原生 Android 16、One UI、HyperOS、OriginOS 等）默认开；用户可手动切换。
+     */
+    var liveProgressEnabled: Boolean
+        get() {
+            if (prefs.contains("live_progress_enabled")) {
+                return prefs.getBoolean("live_progress_enabled", false)
+            }
+            return !isColorOsLike()
+        }
+        set(value) = prefs.edit().putBoolean("live_progress_enabled", value).apply()
+
+    /** 是否启用系统 Chronometer 秒级跳动倒计时（默认关闭，按分钟刷新）。 */
+    var liveChronometer: Boolean
+        get() = prefs.getBoolean("live_chronometer", false)
+        set(value) = prefs.edit().putBoolean("live_chronometer", value).apply()
+
     /** 首页“今日节奏”表盘用 12 小时制（与真实钟表一致）；false 为 24 小时制整天一圈。 */
     var rhythmClock12h: Boolean
         get() = prefs.getBoolean(KEY_RHYTHM_12H, true)
@@ -65,10 +118,30 @@ class Repository(context: Context) {
         set(value) = prefs.edit().putBoolean("widget_punctual", value).apply()
 
     private fun stored(): JSONObject? = synchronized(cacheLock) {
-        if (!timetableFile.baseFile.exists()) return null
+        val file = timetableFile.baseFile
+        if (!file.exists()) {
+            cachedStoredJson = null
+            cachedPayload = null
+            return null
+        }
+        val epoch = generation.get()
+        val mtime = file.lastModified()
+        val len = file.length()
+        val currentJson = cachedStoredJson
+        if (currentJson != null && cachedEpoch == epoch && cachedFileMtime == mtime && cachedFileLen == len) {
+            return currentJson
+        }
         try {
-            JSONObject(String(DeviceKeys.decrypt(timetableFile.readFully(), PURPOSE), Charsets.UTF_8))
+            val parsed = JSONObject(String(DeviceKeys.decrypt(timetableFile.readFully(), PURPOSE), Charsets.UTF_8))
+            cachedStoredJson = parsed
+            cachedEpoch = epoch
+            cachedFileMtime = mtime
+            cachedFileLen = len
+            cachedPayload = null
+            parsed
         } catch (_: Exception) {
+            cachedStoredJson = null
+            cachedPayload = null
             prefs.edit().putBoolean("needs_login", true).putString("local_error", "本地课表无法读取，请重新登录导入").apply()
             null
         }
@@ -76,13 +149,32 @@ class Repository(context: Context) {
 
     fun cached(): Snapshot? {
         val data = stored()
-        if (data != null) return Snapshot(
+        if (data != null) {
+            val now = Now.current()
             // 本机会话过期但本站托管那份还好：不催重新登录（双层兜底的意义）
-            TimetableParser.payload(data, nowMs = Now.current().ms,
-                status = if (needsLogin && !Hosting.coversForLocal(app)) "needs_rebind" else "ok"),
-            data.optLong("updated_at") * 1000,
-            offline = prefs.getBoolean("local_offline", false),
-        )
+            val status = if (needsLogin && !Hosting.coversForLocal(app)) "needs_rebind" else "ok"
+            val payload = synchronized(cacheLock) {
+                val epoch = generation.get()
+                val p = cachedPayload
+                if (p != null && cachedEpoch == epoch && cachedPayloadDate == now.date &&
+                    cachedPayloadStatus == status && kotlin.math.abs(now.ms - cachedPayloadNowMs) < 300_000L
+                ) {
+                    p.copy(now = TimetableParser.formatNow(now.ms))
+                } else {
+                    TimetableParser.payload(data, nowMs = now.ms, status = status).also {
+                        cachedPayload = it
+                        cachedPayloadDate = now.date
+                        cachedPayloadStatus = status
+                        cachedPayloadNowMs = now.ms
+                    }
+                }
+            }
+            return Snapshot(
+                payload,
+                data.optLong("updated_at") * 1000,
+                offline = prefs.getBoolean("local_offline", false),
+            )
+        }
         return synchronized(cacheLock) {
             if (!legacyCache.exists()) return null
             runCatching {
@@ -244,6 +336,11 @@ class Repository(context: Context) {
             throw error
         }
         legacyCache.delete()
+        cachedStoredJson = timetable
+        cachedEpoch = epoch
+        cachedFileMtime = timetableFile.baseFile.lastModified()
+        cachedFileLen = timetableFile.baseFile.length()
+        cachedPayload = null
         true
     }
 
@@ -256,6 +353,8 @@ class Repository(context: Context) {
 
     fun clearLocalData() = synchronized(cacheLock) {
         generation.incrementAndGet()
+        cachedStoredJson = null
+        cachedPayload = null
         timetableFile.delete()
         legacyCache.delete()
         session.clear()
@@ -264,8 +363,8 @@ class Repository(context: Context) {
             .remove("change_alert_at").remove("change_seen").putBoolean("needs_login", true).apply()
         DeviceKeys.reset()
         if (Hosting.active(app)) {
-            // 先签最后一次“取消托管”，再删签名密钥；放到后台线程，不卡清除按钮
-            Thread({ Hosting.leave(app); DeviceKeys.resetSigning() }, "hosting-leave").start()
+            // 先签最后一次“取消托管”，立即删签名密钥，再把网络请求放到后台线程，不卡清除按钮
+            Hosting.leaveAndResetAsync(app)
         } else {
             DeviceKeys.resetSigning()
         }
@@ -279,6 +378,14 @@ class Repository(context: Context) {
         private const val KEY_RHYTHM_12H = "rhythm_clock_12h"
         private val syncMutex = Mutex()
         private val generation = java.util.concurrent.atomic.AtomicLong()
+        private var cachedStoredJson: JSONObject? = null
+        private var cachedEpoch: Long = -1L
+        private var cachedFileMtime: Long = -1L
+        private var cachedFileLen: Long = -1L
+        private var cachedPayload: Payload? = null
+        private var cachedPayloadDate: String = ""
+        private var cachedPayloadStatus: String = ""
+        private var cachedPayloadNowMs: Long = 0L
         const val DEFAULT_REMIND_MINUTES = 20
     }
 }

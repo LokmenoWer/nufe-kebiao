@@ -1,5 +1,6 @@
 package wiki.nufe.kebiao.widget
 
+import android.appwidget.AppWidgetManager
 import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.DpSize
@@ -43,6 +44,11 @@ class TodayWidget : DayWidget()
 
 class TodayReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = TodayWidget()
+
+    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
+        onWidgetSystemUpdate(context)
+        super.onUpdate(context, appWidgetManager, appWidgetIds)
+    }
 }
 
 private const val ROW_H = 44      // 列表一行（课名 + 时间教室）的高度，含间距；汉字行高约 1.4 倍字号

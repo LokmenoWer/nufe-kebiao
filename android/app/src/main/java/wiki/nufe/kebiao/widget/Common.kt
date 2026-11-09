@@ -47,14 +47,18 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.data.Note
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.data.Tone
+import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.sync.Sync
 import wiki.nufe.kebiao.ui.MainActivity
 
@@ -79,6 +83,23 @@ fun loadData(context: Context): WidgetData {
 object WidgetVersion {
     val flow = MutableStateFlow(0)
     fun bump() = flow.update { it + 1 }
+}
+
+private val widgetScope = CoroutineScope(Dispatchers.IO)
+
+/**
+ * 系统桌面或 AppWidgetService 周期性触发 onUpdate 时：
+ * 先推进会话版本让已有 Glance 会话按当前时间重绘，再顺带恢复可能被国产 ROM 清理掉的边界闹钟与上课提醒。
+ */
+fun onWidgetSystemUpdate(context: Context) {
+    WidgetVersion.bump()
+    val app = context.applicationContext
+    widgetScope.launch {
+        runCatching {
+            Sync.armBoundary(app)
+            Reminders.reschedule(app)
+        }
+    }
 }
 
 @Composable
