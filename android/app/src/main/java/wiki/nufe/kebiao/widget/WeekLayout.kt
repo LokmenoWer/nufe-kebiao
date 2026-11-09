@@ -80,6 +80,8 @@ class TextMeasure(context: Context) {
     private val density = metrics.density
     private val paints = HashMap<Pair<Float, Boolean>, TextPaint>()
     private val cache = HashMap<String, Float>()
+    private val widthCache = HashMap<String, Float>()
+    private val linesCache = HashMap<String, Int>()
 
     private fun paint(sp: Float, bold: Boolean) = paints.getOrPut(sp to bold) {
         TextPaint(TextPaint.ANTI_ALIAS_FLAG).apply {
@@ -89,7 +91,10 @@ class TextMeasure(context: Context) {
         }
     }
 
-    fun width(text: String, sp: Float, bold: Boolean): Float = paint(sp, bold).measureText(text) / density
+    fun width(text: String, sp: Float, bold: Boolean): Float =
+        widthCache.getOrPut("$sp|$bold|$text") {
+            paint(sp, bold).measureText(text) / density
+        }
 
     fun fits(text: String, sp: Float, bold: Boolean, widthDp: Float) = width(text, sp, bold) <= widthDp
 
@@ -101,7 +106,9 @@ class TextMeasure(context: Context) {
 
     /** 不限行数时要几行。 */
     fun lines(text: String, sp: Float, bold: Boolean, widthDp: Float): Int =
-        layout(text, sp, bold, widthDp, Int.MAX_VALUE).lineCount
+        linesCache.getOrPut("$sp|$bold|$widthDp|$text") {
+            layout(text, sp, bold, widthDp, Int.MAX_VALUE).lineCount
+        }
 
     // Layout.BREAK_STRATEGY_HIGH_QUALITY 与 API 29 的 LineBreaker 常量同值，minSdk 26 只能用前者。
     @SuppressLint("WrongConstant")
@@ -118,8 +125,11 @@ class TextMeasure(context: Context) {
     }
 }
 
+private val ROOM_CODE_REGEX = Regex("""^[\s一-鿿]+(?=[A-Za-z])""")
+private val UNIT_RANGE_REGEX = Regex("""^(\d+)(?:\D+(\d+))?$""")
+
 /** 楼名 + 编号（“德业楼Z4-106”）里的编号；编号里没有字母（“食工楼203”）就拆不开，返回 null。 */
-fun roomCode(room: String): String? = Regex("""^[\s一-鿿]+(?=[A-Za-z])""").find(room)
+fun roomCode(room: String): String? = ROOM_CODE_REGEX.find(room)
     ?.let { room.substring(it.range.last + 1) }?.takeIf { it.isNotEmpty() }
 
 /** 一段字实际用的字号：时间按列宽单独定了字号就用它的，否则按基准乘版面字号。 */
@@ -333,7 +343,7 @@ private class Axis(
 
 /** 课的节次：“3–5” → 3..5，“6” → 6..6；没写返回 null。 */
 private fun unitRange(units: String): IntRange? {
-    val m = Regex("""^(\d+)(?:\D+(\d+))?$""").find(units.trim()) ?: return null
+    val m = UNIT_RANGE_REGEX.find(units.trim()) ?: return null
     val a = m.groupValues[1].toInt()
     val b = m.groupValues[2].ifEmpty { m.groupValues[1] }.toInt()
     return if (b >= a) a..b else null

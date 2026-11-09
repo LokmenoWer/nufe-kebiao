@@ -1,7 +1,9 @@
 package wiki.nufe.kebiao.widget
 
+import android.appwidget.AppWidgetManager
 import android.content.Context
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -67,6 +69,11 @@ class WeekWidget : GlanceAppWidget() {
 
 class WeekReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = WeekWidget()
+
+    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
+        onWidgetSystemUpdate(context)
+        super.onUpdate(context, appWidgetManager, appWidgetIds)
+    }
 }
 
 private const val COL_GAP = 3f
@@ -146,7 +153,9 @@ private fun WeekContent(context: Context, data: WidgetData) {
     val now = Now.current()
     val (title, block) = weekToShow(snapshot.payload, now)
     val size = LocalSize.current
-    val m = TextMeasure(context)
+    val m = remember(context.resources.configuration.fontScale, context.resources.displayMetrics.density) {
+        TextMeasure(context)
+    }
     val widthScale = when {
         size.width.value >= 520f -> 1.25f
         size.width.value >= 360f -> 1.1f

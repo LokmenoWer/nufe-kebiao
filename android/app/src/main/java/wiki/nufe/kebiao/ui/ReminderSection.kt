@@ -2,11 +2,8 @@ package wiki.nufe.kebiao.ui
 
 import android.Manifest
 import android.app.AlarmManager
-import android.app.NotificationManager
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Spring
@@ -35,6 +32,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,10 +60,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 import wiki.nufe.kebiao.R
+import wiki.nufe.kebiao.data.LiveDismissMode
 import wiki.nufe.kebiao.data.Repository
+import wiki.nufe.kebiao.remind.LiveUpdates
 import wiki.nufe.kebiao.remind.Reminders
 
 @Composable
@@ -80,8 +79,14 @@ internal fun ReminderSection(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
-    val manager = context.getSystemService(NotificationManager::class.java)
     var canNotify by remember { mutableStateOf(Reminders.canNotify(context)) }
+    var promotedOk by remember { mutableStateOf(isPromotedPermissionOk(context)) }
+    var dismissMode by remember { mutableStateOf(repo.liveDismissMode) }
+    var progressEnabled by remember { mutableStateOf(repo.liveProgressEnabled) }
+    var chronometerEnabled by remember { mutableStateOf(repo.liveChronometer) }
+    var previewActive by remember { mutableStateOf(LiveUpdates.isActive(context)) }
+    var showDismissPicker by remember { mutableStateOf(false) }
+
     val permission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -95,7 +100,9 @@ internal fun ReminderSection(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 canNotify = Reminders.canNotify(context)
+                promotedOk = isPromotedPermissionOk(context)
                 batteryOk = ignoringBatteryOptimizations(context)
+                previewActive = LiveUpdates.isActive(context)
             }
         }
         lifecycle.addObserver(observer)
@@ -150,20 +157,27 @@ internal fun ReminderSection(
             modifier = Modifier.padding(vertical = 12.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         )
-        val fluidAvailable = isColorOsLike() && Build.VERSION.SDK_INT >= 36
+        val fluidAvailable = isLiveUpdateSupported()
+        val tier = remember { detectLiveUpdateTier() }
+        val rom = remember { detectRomFamily() }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(
                 Modifier
                     .weight(1f)
                     .alpha(if (alarmEnabled && fluidAvailable) 1f else 0.45f),
             ) {
-                Text("灵动显示", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("灵动显示（$liveName）", fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(2.dp))
                 Hint(
-                    when {
-                        !isColorOsLike() -> "仅 ColorOS 16+ 的流体云可用；当前系统将使用普通通知。"
-                        Build.VERSION.SDK_INT < 36 -> "需要 Android 16（ColorOS 16）。"
-                        else -> "开课前后在状态栏显示流体云卡片，开课 5 分钟后自动收起。"
+                    when (tier) {
+                        LiveUpdateTier.NATIVE_PROMOTED ->
+                            "开课前后在状态栏与通知栏显示${liveName}实时卡片，收起时间与样式可在下方自定义。"
+                        LiveUpdateTier.FLYME_CAPSULE ->
+                            "尝试通过魅族${liveName}扩展在状态栏与通知栏显示实时卡片，收起时间与样式可在下方自定义。"
+                        LiveUpdateTier.OEM_EXTRAS ->
+                            "实验性：附带${rom.displayName}${liveName}扩展字段（若受系统白名单限制则显示为常驻倒计时通知，不影响正常响铃提醒）。"
+                        LiveUpdateTier.UNSUPPORTED ->
+                            "需要 Android 16+ 或受支持的定制系统；当前系统将使用普通通知。"
                     },
                 )
                 if (!alarmEnabled) {
@@ -175,25 +189,138 @@ internal fun ReminderSection(
                 checked = liveUpdate,
                 onCheckedChange = {
                     view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    if (!it) previewActive = false
                     onLiveUpdateChange(it)
                 },
                 enabled = alarmEnabled && fluidAvailable,
             )
         }
-        if (Build.VERSION.SDK_INT >= 36 && liveUpdate && alarmEnabled &&
-            manager?.canPostPromotedNotifications() != true
-        ) {
+        if (fluidAvailable && liveUpdate && alarmEnabled && !promotedOk) {
             Spacer(Modifier.height(6.dp))
             Hint("尚未授予${liveName}权限，请前往系统“设置 → 通知与控制中心 → $liveName”中开启。")
             TextButton(
-                onClick = {
-                    context.startActivity(
-                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                    )
-                },
+                onClick = { openPromotedNotificationSettings(context) },
                 contentPadding = PaddingValues(0.dp),
             ) { Text("去通知设置", fontSize = 12.sp) }
+        }
+        if (fluidAvailable && liveUpdate && alarmEnabled) {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showDismissPicker = true },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("自动收起时机", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        dismissMode.label,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("显示卡片进度条", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Hint("在实时卡片中显示课前准备或课堂进度条")
+                }
+                Switch(
+                    checked = progressEnabled,
+                    onCheckedChange = {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        progressEnabled = it
+                        repo.liveProgressEnabled = it
+                        LiveUpdates.refreshActiveIfShown(context)
+                    },
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("显示秒级倒计时", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Hint("在卡片第三行以“X分XX秒后上/下课”形式实时跳秒")
+                }
+                Switch(
+                    checked = chronometerEnabled,
+                    onCheckedChange = {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        chronometerEnabled = it
+                        repo.liveChronometer = it
+                        LiveUpdates.refreshActiveIfShown(context)
+                    },
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        if (previewActive) {
+                            LiveUpdates.cancel(context)
+                            previewActive = false
+                            Toast.makeText(context, "已收起${liveName}预览", Toast.LENGTH_SHORT).show()
+                        } else if (!canNotify && Build.VERSION.SDK_INT >= 33) {
+                            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            val shown = LiveUpdates.preview(context)
+                            previewActive = shown
+                            val msg = if (shown) {
+                                "已发送${liveName}预览，请查看状态栏或通知栏"
+                            } else {
+                                "无法发送预览，请先开启通知权限"
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (previewActive) "收起${liveName}预览" else "立即预览${liveName}效果",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Hint(
+                        if (previewActive) "当前正在显示实时卡片，点击可立即关闭"
+                        else "发送一条测试卡片，立即查看当前系统的展示效果",
+                    )
+                }
+                Icon(
+                    painter = painterResource(R.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
         if (alarmEnabled && minutes > 0 && !canNotify && Build.VERSION.SDK_INT >= 33) {
             TextButton(
@@ -205,30 +332,101 @@ internal fun ReminderSection(
             context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms() == false
         ) {
             TextButton(
-                onClick = {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                            Uri.parse("package:${context.packageName}"),
-                        ),
-                    )
-                },
+                onClick = { openExactAlarmSettings(context) },
                 contentPadding = PaddingValues(0.dp),
             ) { Text("允许准时提醒", fontSize = 12.sp) }
         }
-        if (alarmEnabled && (!batteryOk || isColorOsLike())) {
+        if (alarmEnabled && (!batteryOk || rom.needsAutoStart)) {
             Spacer(Modifier.height(6.dp))
             Hint(
-                if (isColorOsLike()) {
-                    "ColorOS 的电池白名单不等于后台放行；请在“耗电管理 / 自启动”里允许本应用。"
+                if (rom.needsAutoStart) {
+                    "${rom.displayName} 的电池白名单不等于后台放行；${rom.batteryToast}。"
                 } else {
                     "系统可能会限制应用后台运行，导致课前提醒或小组件刷新被推迟。"
                 },
             )
             TextButton(
-                onClick = { openBatteryOptimizationSettings(context) },
+                onClick = { openBatteryOptimizationSettings(context, preferOemPage = batteryOk) },
                 contentPadding = PaddingValues(0.dp),
-            ) { Text(if (isColorOsLike()) "检查后台设置" else "允许后台运行", fontSize = 12.sp) }
+            ) { Text(if (rom.needsAutoStart && batteryOk) "检查后台设置" else "允许后台运行", fontSize = 12.sp) }
+        }
+    }
+
+    if (showDismissPicker) {
+        OptionPickerDialog(
+            title = "自动收起时机",
+            subtitle = "选择${liveName}卡片在何时自动关闭",
+            options = LiveDismissMode.entries.map { it to (it.label to it.desc) },
+            selected = dismissMode,
+            onDismiss = { showDismissPicker = false },
+            onSelect = { mode ->
+                showDismissPicker = false
+                dismissMode = mode
+                repo.liveDismissMode = mode
+                LiveUpdates.refreshActiveIfShown(context)
+            },
+        )
+    }
+}
+
+@Composable
+private fun <T> OptionPickerDialog(
+    title: String,
+    subtitle: String,
+    options: List<Pair<T, Pair<String, String>>>,
+    selected: T,
+    onDismiss: () -> Unit,
+    onSelect: (T) -> Unit,
+) {
+    PopupCard(onDismissRequest = onDismiss) {
+        Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            subtitle,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(10.dp))
+        options.forEachIndexed { index, (value, textPair) ->
+            if (index > 0) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(value) }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(textPair.first, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        textPair.second,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                RadioButton(
+                    selected = value == selected,
+                    onClick = { onSelect(value) },
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ),
+            ) { Text("取消") }
         }
     }
 }

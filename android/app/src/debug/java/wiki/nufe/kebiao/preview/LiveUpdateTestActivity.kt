@@ -50,9 +50,15 @@ import kotlinx.coroutines.launch
 import wiki.nufe.kebiao.R
 import wiki.nufe.kebiao.data.Now
 import wiki.nufe.kebiao.remind.LiveUpdates
+import wiki.nufe.kebiao.remind.OemIslandExtras
 import wiki.nufe.kebiao.remind.ReminderReceiver
 import wiki.nufe.kebiao.remind.Reminders
 import wiki.nufe.kebiao.ui.MainActivity
+import wiki.nufe.kebiao.ui.canPostPromotedNotificationsCompat
+import wiki.nufe.kebiao.ui.detectLiveUpdateTier
+import wiki.nufe.kebiao.ui.detectRomFamily
+import wiki.nufe.kebiao.ui.liveUpdateName
+import wiki.nufe.kebiao.ui.openPromotedNotificationSettings
 
 /**
  * Android 16 Live Updates / ColorOS 16 流体云测试。
@@ -261,29 +267,21 @@ class LiveUpdateTestActivity : ComponentActivity() {
     }
 
     private fun describe(): String {
-        val canPromote = if (Build.VERSION.SDK_INT >= 36) {
-            manager.canPostPromotedNotifications()
-        } else {
-            false
-        }
+        val canPromote = canPostPromotedNotificationsCompat(manager)
+        val tier = detectLiveUpdateTier()
+        val rom = detectRomFamily()
         return buildString {
-            appendLine("Android ${Build.VERSION.RELEASE} · API ${Build.VERSION.SDK_INT}")
+            appendLine("Android ${Build.VERSION.RELEASE} · API ${Build.VERSION.SDK_INT} · ${rom.displayName}")
+            appendLine("灵动名称：${liveUpdateName(rom)} · 支撑层级：${tier.name}")
             appendLine("通知总开关：${manager.areNotificationsEnabled()}")
             appendLine("canPostPromotedNotifications：$canPromote")
-            if (Build.VERSION.SDK_INT < 36) {
-                append("需要 Android 16 / ColorOS 16（API 36+）才能测试 Live Updates。")
-            } else if (!canPromote) {
-                append("系统未允许 promoted notifications，流体云可能不会出现；请去通知设置里打开。")
+            if (Build.VERSION.SDK_INT >= 36 && !canPromote) {
+                append("系统未允许 promoted notifications，请去通知设置里打开。")
             }
         }
     }
 
     private fun begin() {
-        if (Build.VERSION.SDK_INT < 36) {
-            status = describe()
-            Toast.makeText(this, "需要 Android 16 / ColorOS 16", Toast.LENGTH_LONG).show()
-            return
-        }
         if (!manager.areNotificationsEnabled()) {
             status = "通知总开关被关闭了，请先打开通知。"
             openNotificationSettings()
@@ -300,7 +298,6 @@ class LiveUpdateTestActivity : ComponentActivity() {
     }
 
     private fun startLiveUpdate() {
-        if (Build.VERSION.SDK_INT < 36) return
         job?.cancel()
         ensureChannel()
         running = true
@@ -322,32 +319,65 @@ class LiveUpdateTestActivity : ComponentActivity() {
     }
 
     private fun postLiveUpdate(progress: Int, remainingMs: Long) {
-        if (Build.VERSION.SDK_INT < 36) return
-        val style = Notification.ProgressStyle()
-            .setProgress(progress)
-            .setProgressSegments(
-                listOf(
-                    Notification.ProgressStyle.Segment(50).setColor(0xFF4B63E0.toInt()),
-                    Notification.ProgressStyle.Segment(50).setColor(0xFFB9C3FF.toInt()),
-                ),
-            )
-            .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notify_calendar))
-            .setStyledByProgress(true)
-
+        val shortText = "剩 ${formatRemaining(remainingMs)}"
+        val titleLine = "10:00-11:25 博远楼JC406"
+        val course = "算法设计与分析（双语）"
+        val statusText = OemIslandExtras.formatCountdownStatus(
+            isBeforeClass = false,
+            remainMs = remainingMs,
+            chronometer = true,
+        )
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notify_calendar)
-            .setContentTitle("流体云测试")
-            .setContentText("正在上课 · 算法设计与分析")
-            .setSubText("博远楼JC406 · 10:00–11:25")
+            .setContentTitle(titleLine)
+            .setContentText(course)
+            .setSubText(statusText)
             .setContentIntent(openAppIntent())
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setOnlyAlertOnce(true)
-            .setStyle(style)
-            .setWhen(System.currentTimeMillis() + remainingMs)
-            .setUsesChronometer(true)
-            .setChronometerCountDown(true)
-        applyPromotedFlags(builder, "剩 ${formatRemaining(remainingMs)}")
+            .setShowWhen(false)
+            .setUsesChronometer(false)
+
+        if (Build.VERSION.SDK_INT >= 36) {
+            runCatching {
+                val style = Notification.ProgressStyle()
+                    .setProgress(progress)
+                    .setProgressSegments(
+                        listOf(
+                            Notification.ProgressStyle.Segment(50).setColor(0xFF4B63E0.toInt()),
+                            Notification.ProgressStyle.Segment(50).setColor(0xFFB9C3FF.toInt()),
+                        ),
+                    )
+                    .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notify_calendar))
+                    .setStyledByProgress(true)
+                builder.setStyle(style)
+            }
+        }
+        applyPromotedFlags(builder, shortText)
+        val testItem = Reminders.Item(
+            atMs = System.currentTimeMillis(),
+            title = "${liveUpdateName()}测试",
+            text = "10:00–11:25 · 仙林校区 博远楼 JC406",
+            date = Now.current().date,
+            start = "10:00",
+            end = "11:25",
+            name = course,
+            room = "仙林校区 博远楼 JC406",
+        )
+        OemIslandExtras.applyOemExtras(
+            context = this,
+            builder = builder,
+            item = testItem,
+            titleLine = titleLine,
+            course = course,
+            status = statusText,
+            shortText = shortText,
+            progress = progress,
+            showProgress = true,
+            isUpdate = true,
+            openIntent = openAppIntent(),
+        )
         manager.notify(NOTIFICATION_ID, builder.build())
     }
 
@@ -383,9 +413,7 @@ class LiveUpdateTestActivity : ComponentActivity() {
     }
 
     private fun openNotificationSettings() {
-        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-            .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-        startActivity(intent)
+        openPromotedNotificationSettings(this)
     }
 
     private fun formatRemaining(ms: Long): String {

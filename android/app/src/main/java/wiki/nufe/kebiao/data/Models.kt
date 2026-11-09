@@ -27,8 +27,9 @@ data class Payload(
     val pollAfterSeconds: Long?,   // 服务器建议多久后再来问
 ) {
     companion object {
-        fun parse(text: String): Payload {
-            val o = JSONObject(text)
+        fun parse(text: String): Payload = fromJson(JSONObject(text))
+
+        fun fromJson(o: JSONObject): Payload {
             return Payload(
                 now = o.str("now"),
                 semester = o.str("semester"),
@@ -114,8 +115,8 @@ data class Lesson(
     val changed: Boolean,
     val was: String?,              // "原 A101" / "原 10:00"
 ) {
-    val startMinutes get() = toMinutes(start)
-    val endMinutes get() = toMinutes(end)
+    val startMinutes: Int = toMinutes(start)
+    val endMinutes: Int = toMinutes(end)
 
     companion object {
         fun parse(o: JSONObject) = Lesson(
@@ -133,8 +134,8 @@ data class Lesson(
 }
 
 data class Cancelled(val name: String, val start: String, val end: String, val room: String, val color: String) {
-    val startMinutes get() = toMinutes(start)
-    val endMinutes get() = toMinutes(end)
+    val startMinutes: Int = toMinutes(start)
+    val endMinutes: Int = toMinutes(end)
 
     companion object {
         fun parse(o: JSONObject) = Cancelled(

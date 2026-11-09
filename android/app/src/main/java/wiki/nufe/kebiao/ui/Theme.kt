@@ -14,8 +14,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
@@ -67,9 +66,13 @@ internal fun AppBackground(content: @Composable BoxScope.() -> Unit) {
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .offset(x = 90.dp, y = (-130).dp)
-                .size(300.dp)
-                .blur(100.dp)
-                .background(glow.copy(alpha = 0.65f), CircleShape),
+                .size(340.dp)
+                .background(
+                    brush = Brush.radialGradient(
+                        colors = listOf(glow.copy(alpha = 0.55f), Color.Transparent),
+                    ),
+                    shape = CircleShape,
+                ),
         )
         content()
     }

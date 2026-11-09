@@ -97,10 +97,10 @@ internal fun AboutScreen(
         SectionCard {
             SectionTitle("产品信息")
             AboutRow("官网介绍与下载", SITE_URL) {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL)))
+                openExternalUrl(context, SITE_URL)
             }
             AboutRow("GitHub 仓库", "LokmenoWer/nufe-kebiao") {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(REPO_URL)))
+                openExternalUrl(context, REPO_URL)
             }
             AboutRow("当前版本", version.ifBlank { currentVersion })
             AboutRow(
@@ -142,9 +142,7 @@ internal fun AboutScreen(
             SectionTitle("其他信息")
             AboutRow("开源许可证", "GPL-3.0-or-later")
             AboutRow("第三方组件与图标", "IconPark · Apache-2.0") {
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bytedance/IconPark")),
-                )
+                openExternalUrl(context, "https://github.com/bytedance/IconPark")
             }
             AboutRow("隐私与数据说明", "数据来自学校教务系统") {
                 showPrivacy = true

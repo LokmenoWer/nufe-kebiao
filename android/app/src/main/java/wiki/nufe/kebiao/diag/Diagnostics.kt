@@ -22,6 +22,11 @@ import java.util.TimeZone
 import wiki.nufe.kebiao.data.Repository
 import wiki.nufe.kebiao.data.Snapshot
 import wiki.nufe.kebiao.remind.Reminders
+import wiki.nufe.kebiao.ui.detectLiveUpdateTier
+import wiki.nufe.kebiao.ui.isLiveUpdateSupported
+import wiki.nufe.kebiao.ui.isPromotedPermissionOk
+import wiki.nufe.kebiao.ui.liveUpdateName
+import wiki.nufe.kebiao.ui.romSummary
 import wiki.nufe.kebiao.widget.TodayReceiver
 import wiki.nufe.kebiao.widget.WeekReceiver
 
@@ -35,6 +40,9 @@ object Diag {
 
 object Diagnostics {
     private const val MAX_LOG_CHARS = 200_000
+    private val TOKEN_PATH_REGEX = Regex("""/(mobile|widget)/[A-Za-z0-9_-]{16,}(\.json)?""")
+    private val SETUP_URL_REGEX = Regex("""nufekebiao://setup\?url=[^\s]+""")
+    private val EMAIL_REGEX = Regex("""[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}""")
 
     /** 生成诊断文件；只包含链接域名和状态，不写入 token、密码或邮箱。 */
     fun export(context: Context, repo: Repository, snapshot: Snapshot?): File {
@@ -89,12 +97,18 @@ object Diagnostics {
             appendLine("版本：$version ($code)")
             appendLine("Android：${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
+            appendLine("系统 ROM：${romSummary()}")
             appendLine("时区：${TimeZone.getDefault().id}，语言：${Locale.getDefault()}")
             appendLine("本地课表：${repo.hasTimetable}，需要学校登录：${repo.needsLogin}")
             appendLine("缓存：${snapshot?.fetchedAtMs?.let(::time) ?: "无"}")
             appendLine("离线：${snapshot?.offline == true}")
             appendLine("服务状态：${payload?.status ?: "无"}")
-            appendLine("提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，流体云 ${repo.liveUpdateEnabled}")
+            appendLine(
+                "提醒：提前 ${repo.remindMinutes} 分钟，上课通知 ${repo.alarmEnabled}，" +
+                    "灵动显示（${liveUpdateName()}）${repo.liveUpdateEnabled} " +
+                    "[tier=${detectLiveUpdateTier().name}, dismiss=${repo.liveDismissMode.code}, " +
+                    "progress=${repo.liveProgressEnabled}, chrono=${repo.liveChronometer}]",
+            )
             appendLine("提醒队列（上次排定，未到点）：$alarmCount 个${nextAlarm?.let { "，下次 ${time(it)}" } ?: ""}")
             appendLine("通知权限：${Reminders.canNotify(context)}")
             appendLine(
@@ -107,8 +121,10 @@ object Diagnostics {
             appendLine("准时提醒：${Build.VERSION.SDK_INT < 31 || alarms?.canScheduleExactAlarms() == true}")
             appendLine(
                 "系统实时提醒：${
-                    Build.VERSION.SDK_INT < 36 ||
-                        notifications?.canPostPromotedNotifications() == true
+                    if (!isLiveUpdateSupported()) "当前系统不支持"
+                    else "${isPromotedPermissionOk(context)} (promoted=${
+                        wiki.nufe.kebiao.ui.canPostPromotedNotificationsCompat(notifications)
+                    })"
                 }",
             )
             appendLine("小组件：今天 $todayIds 个，本周 $weekIds 个")
@@ -135,9 +151,9 @@ object Diagnostics {
     }.getOrElse { "读取日志失败：${it.javaClass.simpleName}" }
 
     private fun redact(text: String): String = text
-        .replace(Regex("""/(mobile|widget)/[A-Za-z0-9_-]{16,}(\.json)?"""), "/$1/<redacted>")
-        .replace(Regex("""nufekebiao://setup\?url=[^\s]+"""), "nufekebiao://setup?url=<redacted>")
-        .replace(Regex("""[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"""), "<email>")
+        .replace(TOKEN_PATH_REGEX, "/$1/<redacted>")
+        .replace(SETUP_URL_REGEX, "nufekebiao://setup?url=<redacted>")
+        .replace(EMAIL_REGEX, "<email>")
 
     private fun time(ms: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(ms))

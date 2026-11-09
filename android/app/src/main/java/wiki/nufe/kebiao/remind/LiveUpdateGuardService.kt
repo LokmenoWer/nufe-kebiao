@@ -1,6 +1,7 @@
 package wiki.nufe.kebiao.remind
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -9,13 +10,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import wiki.nufe.kebiao.R
-import wiki.nufe.kebiao.data.lessonMs
 import wiki.nufe.kebiao.diag.Diag
 
 /**
- * 流体云展示期间的前台守护。
+ * 灵动卡片展示期间的前台守护。
  *
- * ColorOS 在用户清理后台时会连同 App 的 promoted 通知一起收起；把同一张卡片
+ * 国产定制系统在用户清理后台时会连同 App 的 promoted / 实况通知一起收起；把同一张卡片
  * 绑到前台服务上，系统就不会把进程当作可随手清理的后台应用。
  *
  * 服务由 startForegroundService 拉起，没调用 startForeground 就停止会让进程崩溃，
@@ -25,7 +25,17 @@ class LiveUpdateGuardService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var stopRunnable: Runnable? = null
     private var cardItem: Reminders.Item? = null
+    private var cardConfig: LiveConfig? = null
+    private var cardIsPreview: Boolean = false
     private var ticker: Runnable? = null
+
+    private data class ActiveCard(
+        val notification: Notification,
+        val dismissMs: Long,
+        val item: Reminders.Item,
+        val config: LiveConfig,
+        val isPreview: Boolean,
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -38,15 +48,18 @@ class LiveUpdateGuardService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        val (notification, dismissMs, item) = card
+        val (notification, dismissMs, item, config, isPreview) = card
         cardItem = item
+        cardConfig = config
+        cardIsPreview = isPreview
+        LiveUpdates.remember(this, item, dismissMs, config, isPreview)
         stopRunnable?.let(handler::removeCallbacks)
         stopRunnable = Runnable { stopSelf(startId) }.also {
             handler.postDelayed(it, (dismissMs - System.currentTimeMillis()).coerceAtLeast(1_000L))
         }
         val started = runCatching { enterForeground(LiveUpdates.NOTIFICATION_ID, notification) }.isSuccess
         if (!started) {
-            // 个别 ROM 不接受 promoted 通知直接当前台通知；退回一张最小通知继续保活。
+            // 个别 ROM 不接受 promoted 通知直接当前台通知；退回一张最小通知继续保活，并确保主卡片已发出。
             val fallback = runCatching {
                 enterForeground(LiveUpdates.GUARD_NOTIFICATION_ID, guardNotification())
             }.isSuccess
@@ -54,25 +67,58 @@ class LiveUpdateGuardService : Service() {
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
+            getSystemService(NotificationManager::class.java)?.notify(LiveUpdates.NOTIFICATION_ID, notification)
             Diag.w("live update guard using fallback notification")
         }
         Diag.i("live update guard started")
         startTicker()
-        // STICKY：被系统回收后尽量拉起，按持久化的卡片数据恢复流体云。Android 12+ 后台重启时
+        // STICKY：被系统回收后尽量拉起，按持久化的卡片数据恢复。Android 12+ 后台重启时
         // 只有已解除电池优化（或允许自启动）才允许再进前台；不允许时上面的 runCatching 会退出，不会崩溃。
         return START_STICKY
     }
 
-    /** 胶囊/卡片上的“剩 N 分钟”每跨一分钟重发一次；系统倒计时只有秒级。 */
+    /** 按分钟或按秒定期重发卡片以更新第三层倒计时与进度条；首次由 enterForeground 发出后直接等待下一边界。 */
     private fun startTicker() {
         ticker?.let(handler::removeCallbacks)
+        val initialItem = cardItem ?: run {
+            stopSelf()
+            return
+        }
+        val initialConfig = cardConfig ?: LiveUpdates.configFrom(null, this)
+        val initialDelay = LiveUpdates.refresh(
+            context = this,
+            item = initialItem,
+            config = initialConfig,
+            isPreview = cardIsPreview,
+            notifyNow = false,
+        )
+        if (initialDelay <= 0L) {
+            LiveUpdates.clearRemembered(this)
+            stopSelf()
+            return
+        }
         ticker = object : Runnable {
             override fun run() {
-                val item = cardItem ?: return
-                val delay = LiveUpdates.refresh(this@LiveUpdateGuardService, item)
-                if (delay > 0) handler.postDelayed(this, delay)
+                val item = cardItem ?: run {
+                    stopSelf()
+                    return
+                }
+                val config = cardConfig ?: LiveUpdates.configFrom(null, this@LiveUpdateGuardService)
+                val delay = LiveUpdates.refresh(this@LiveUpdateGuardService, item, config, cardIsPreview, notifyNow = true)
+                if (delay > 0) {
+                    val dismissMs = LiveUpdates.resolveDismissMs(this@LiveUpdateGuardService, item, config, cardIsPreview)
+                    val remainDismiss = (dismissMs - System.currentTimeMillis()).coerceAtLeast(1_000L)
+                    stopRunnable?.let {
+                        handler.removeCallbacks(it)
+                        handler.postDelayed(it, remainDismiss)
+                    }
+                    handler.postDelayed(this, delay)
+                } else {
+                    LiveUpdates.clearRemembered(this@LiveUpdateGuardService)
+                    stopSelf()
+                }
             }
-        }.also { it.run() }
+        }.also { handler.postDelayed(it, initialDelay) }
     }
 
     override fun onDestroy() {
@@ -80,34 +126,40 @@ class LiveUpdateGuardService : Service() {
         ticker?.let(handler::removeCallbacks)
         ticker = null
         cardItem = null
+        cardConfig = null
+        cardIsPreview = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         Diag.i("live update guard stopped")
         super.onDestroy()
     }
 
     /** 还需要展示的卡片和它的收起时间；已过期或数据无效时返回 null。 */
-    private fun liveCard(intent: Intent?): Triple<Notification, Long, Reminders.Item>? {
+    private fun liveCard(intent: Intent?): ActiveCard? {
         if (intent == null) return null
         return runCatching {
             val item = LiveUpdates.itemFrom(intent)
-            val startMs = lessonMs(item.date, item.start)
-            val endMs = lessonMs(item.date, item.end)
-            val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+            val config = LiveUpdates.configFrom(intent, this)
+            val isPreview = LiveUpdates.isPreview(intent, this)
+            val dismissMs = LiveUpdates.resolveDismissMs(this, item, config, isPreview)
             if (dismissMs <= System.currentTimeMillis()) return null
-            LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
+            LiveUpdates.buildNotification(this, item, config, isUpdate = true, isPreview = isPreview)?.let {
+                ActiveCard(it, dismissMs, item, config, isPreview)
+            }
         }.getOrNull()
     }
 
-    /** 进程被回收后系统以 null Intent 重启：按持久化的卡片数据恢复流体云。 */
-    private fun restoredCard(): Triple<Notification, Long, Reminders.Item>? = runCatching {
-        // 用户在此期间关掉了提醒 / 灵动显示，或在系统里收回了流体云权限：不再恢复。
+    /** 进程被回收后系统以 null Intent 重启：按持久化的卡片数据恢复。 */
+    private fun restoredCard(): ActiveCard? = runCatching {
+        // 用户在此期间关掉了提醒 / 灵动显示，或在系统里收回了权限：不再恢复。
         if (!LiveUpdates.restorable(this)) return null
         val item = LiveUpdates.savedItem(this) ?: return null
-        val startMs = lessonMs(item.date, item.start)
-        val endMs = lessonMs(item.date, item.end)
-        val dismissMs = minOf(endMs, startMs + Reminders.IN_CLASS_VISIBLE_MS)
+        val config = LiveUpdates.configFrom(null, this)
+        val isPreview = LiveUpdates.isPreview(null, this)
+        val dismissMs = LiveUpdates.resolveDismissMs(this, item, config, isPreview)
         if (dismissMs <= System.currentTimeMillis()) return null
-        LiveUpdates.buildNotification(this, item)?.let { Triple(it, dismissMs, item) }
+        LiveUpdates.buildNotification(this, item, config, isUpdate = true, isPreview = isPreview)?.let {
+            ActiveCard(it, dismissMs, item, config, isPreview)
+        }
     }.getOrNull()
 
     private fun guardNotification(): Notification {
@@ -115,7 +167,7 @@ class LiveUpdateGuardService : Service() {
         return Notification.Builder(this, LiveUpdates.CHANNEL)
             .setSmallIcon(R.drawable.ic_notify_calendar)
             .setContentTitle("课表提醒")
-            .setContentText("保持流体云提醒")
+            .setContentText("保持灵动提醒")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSound(null)

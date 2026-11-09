@@ -119,31 +119,49 @@ object Reminders {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "上课提醒", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "课前按设定的分钟数提醒课程、时间和教室"
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             },
         )
     }
 
     /** 按缓存里的课表整批重排。启动恢复和后台同步可能同时进来，串行化避免互相抵消。 */
     @Synchronized
-    fun reschedule(context: Context) {
+    fun reschedule(context: Context, force: Boolean = false) {
         val repo = Repository(context)
         val snapshot = repo.cached()
         val items = if (snapshot == null || !repo.hasTimetable || !repo.alarmEnabled) emptyList()
         else plan(snapshot.payload, Now.current(), repo.remindMinutes)
-        val alarms = context.getSystemService(AlarmManager::class.java)
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val useClock = needsAlarmClock()
+        val signature = buildString {
+            append(useClock)
+            for (item in items) {
+                append('|').append(item.atMs).append(':').append(item.title).append(':').append(item.text)
+            }
+        }
+        val nowMs = System.currentTimeMillis()
+        val savedSig = prefs.getString("sig", null)
+        val savedMinAt = prefs.getLong("min_at", 0L)
+        // 被强行停止 / ROM 清理后闹钟和 PendingIntent 都会被系统移除；此时签名虽相同也必须重排。
+        val armed = items.isEmpty() || pending(context, 0, null) != null
+        if (!force && savedSig == signature && armed && (items.isEmpty() || savedMinAt > nowMs)) {
+            return
+        }
+        val alarms = context.getSystemService(AlarmManager::class.java)
         val previous = prefs.getInt("count", MAX)
         for (i in items.size until maxOf(previous, items.size)) {
             pending(context, i, null)?.let { alarms.cancel(it); it.cancel() }
         }
         items.forEachIndexed { i, item ->
-            schedule(context, item.atMs, i, pending(context, i, item)!!)
+            schedule(context, item.atMs, i, pending(context, i, item)!!, useClock)
         }
         prefs.edit()
             .putInt("count", items.size)
             .putString("times", items.joinToString(",") { it.atMs.toString() })
+            .putString("sig", signature)
+            .putLong("min_at", items.firstOrNull()?.atMs ?: 0L)
             .apply()
-        Diag.i("reminders scheduled=${items.size} alarmClock=${needsAlarmClock()}")
+        Diag.i("reminders scheduled=${items.size} alarmClock=$useClock")
     }
 
     /**
@@ -287,6 +305,9 @@ class ReminderReceiver : BroadcastReceiver() {
         val liveShown = repo.liveUpdateEnabled &&
             runCatching { LiveUpdates.post(context, LiveUpdates.itemFrom(intent)) }.getOrDefault(false)
         if (liveShown) Diag.i("live update posted")
+        // 仅当系统原生 promoted 通知通道自身被用户配置为有声/震动时才静默普通提醒；
+        // 默认灵动通道为 IMPORTANCE_LOW（静音，避免按分钟刷新时反复响铃），此时普通提醒照常响铃。
+        val silenceAlert = liveShown && LiveUpdates.replacesAlert(context)
         // 手机关机 / 休眠错过太久（超过 5 分钟）就不补发，免得课都上了才响
         if (at > 0 && System.currentTimeMillis() - at > 5 * 60_000L) {
             Diag.i("reminder skipped: stale")
@@ -312,7 +333,7 @@ class ReminderReceiver : BroadcastReceiver() {
             .setContentIntent(open)
             .setAutoCancel(true)
             .setTimeoutAfter(timeout)
-            .setSilent(liveShown)
+            .setSilent(silenceAlert)
             .build()
         try {
             NotificationManagerCompat.from(context).notify((at / 60_000L).toInt(), notification)
@@ -330,8 +351,8 @@ class BootReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                Reminders.reschedule(app)
-                Sync.armBoundary(app)
+                Reminders.reschedule(app, force = true)
+                Sync.redraw(app)
                 Sync.schedule(app)
                 Sync.now(app)
             } finally {

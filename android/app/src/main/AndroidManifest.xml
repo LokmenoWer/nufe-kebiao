@@ -5,9 +5,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Android 13+：上课提醒、实时提醒通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Android 16：Live Updates / 流体云 / 实时动态 -->
+    <!-- Android 16：Live Updates / 流体云 / 实时动态 / 原子岛 / 灵动胶囊 / Now Bar -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
-    <!-- 流体云提醒期间用前台服务保住进程，避免清理后台时通知一起消失 -->
+    <!-- 魅族 Flyme 11+：实况通知状态栏胶囊 -->
+    <uses-permission android:name="flyme.permission.LIVE_NOTIFICATION" />
+    <!-- 灵动提醒期间用前台服务保住进程，避免清理后台时通知一起消失 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Android 12+：精准闹钟，属于特殊权限，需在系统“闹钟和提醒”页面开启 -->
@@ -81,6 +83,7 @@
         <receiver android:name=".remind.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
                 <action android:name="android.intent.action.TIME_SET" />

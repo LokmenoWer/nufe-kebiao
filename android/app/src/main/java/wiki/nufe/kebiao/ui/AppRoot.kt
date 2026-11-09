@@ -98,9 +98,7 @@ internal fun AppRoot(
         mutableStateOf(Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true)
     }
     var promotedOk by remember {
-        mutableStateOf(
-            Build.VERSION.SDK_INT < 36 || notificationManager?.canPostPromotedNotifications() == true,
-        )
+        mutableStateOf(isPromotedPermissionOk(context))
     }
     var batteryOk by remember { mutableStateOf(ignoringBatteryOptimizations(context)) }
     var showPermissions by remember {
@@ -217,7 +215,7 @@ internal fun AppRoot(
     val onResume by rememberUpdatedState {
         notificationsOk = Reminders.canNotify(context)
         exactOk = Build.VERSION.SDK_INT < 31 || exactAlarms?.canScheduleExactAlarms() == true
-        promotedOk = Build.VERSION.SDK_INT < 36 || notificationManager?.canPostPromotedNotifications() == true
+        promotedOk = isPromotedPermissionOk(context)
         batteryOk = ignoringBatteryOptimizations(context)
         updateFlow.onResume()
         reloadLocal()
@@ -417,20 +415,8 @@ internal fun AppRoot(
             onAllowNotifications = {
                 notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             },
-            onOpenExactAlarm = {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                        Uri.parse("package:${context.packageName}"),
-                    ),
-                )
-            },
-            onOpenPromoted = {
-                context.startActivity(
-                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-                )
-            },
+            onOpenExactAlarm = { openExactAlarmSettings(context) },
+            onOpenPromoted = { openPromotedNotificationSettings(context) },
             onOpenAutoStart = { openAutoStartSettings(context) },
             onOpenBattery = { openBatteryOptimizationSettings(context) },
             onDismiss = { markPermissionsSeen() },
