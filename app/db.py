@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import DB_PATH, SESSION_DAYS_SHORT
+from .config import DB_PATH, PASSWORD_STORAGE_ENABLED, SESSION_DAYS_SHORT
 
 log = logging.getLogger("kebiao.db")
 
@@ -16,7 +16,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id               INTEGER PRIMARY KEY,
     student_id       TEXT NOT NULL UNIQUE,
-    name             TEXT,
+    name             BLOB,                             -- AES-GCM(学生姓名)
     created_at       REAL NOT NULL,
     cred_mode        TEXT NOT NULL DEFAULT 'cookie',   -- cookie | password
     enc_cookies      BLOB,                             -- AES-GCM(CAS/教务 cookie JSON)
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_requested_at  REAL,        -- 有人请求尽快刷新（打开了过期的页面 / 同班同学课表有变动）
     refresh_request_reason TEXT,
     next_class_slots TEXT,             -- 下一节课的 slot_key 列表（JSON）：同班同学刚刷过就算检查过
-    recent_changes_json TEXT,          -- 最近 7 天发现的调课（改动前后的排课），小组件据此标出“调”和“停”
+    recent_changes_json BLOB,          -- AES-GCM(最近 7 天发现的调课 JSON)，小组件据此标出“调”和“停”
     -- 小组件代抓：手机用自己的网络向教务要课表，再上传给本站（见 service.widget_fetch_task）
     widget_fetch     INTEGER NOT NULL DEFAULT 1,   -- 用户是否允许
     widget_fetch_ok_at REAL,           -- 最近一次代抓成功
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS timetables (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     semester_id  INTEGER NOT NULL,
     semester_name TEXT,
-    data_json    TEXT NOT NULL,
+    data_json    BLOB NOT NULL,        -- AES-GCM(课表排课与学生信息 JSON)
     fetched_at   REAL NOT NULL,
     PRIMARY KEY (user_id, semester_id)
 );
@@ -130,6 +130,12 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     created_at  REAL NOT NULL,
     expires_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS admin_login_attempts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip          TEXT NOT NULL,
+    at          REAL NOT NULL,
+    ok          INTEGER NOT NULL DEFAULT 0
+);
 -- 2.0 起的本地优先安卓 App：不登录本站，只上报匿名心跳（随机安装 id 的哈希、版本），供管理员统计
 CREATE TABLE IF NOT EXISTS app_installs (
     id_hash        TEXT PRIMARY KEY,   -- sha256(App 生成的随机安装 id)；不含学号等任何个人信息
@@ -150,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_app_installs_seen ON app_installs(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_mobile_devices_user ON mobile_devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_widget_tasks_user ON widget_tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_admin_attempts_at ON admin_login_attempts(at);
 CREATE INDEX IF NOT EXISTS idx_users_next ON users(next_refresh_at);
 CREATE INDEX IF NOT EXISTS idx_log_user ON refresh_log(user_id, at);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
@@ -221,7 +228,7 @@ def init() -> None:
                      ("enc_widget_token", "BLOB"), ("last_seen_at", "REAL"), ("last_change_at", "REAL"),
                      ("next_class_at", "REAL"), ("next_class_checked_at", "REAL"),
                      ("refresh_requested_at", "REAL"), ("refresh_request_reason", "TEXT"),
-                     ("next_class_slots", "TEXT"), ("recent_changes_json", "TEXT"),
+                     ("next_class_slots", "TEXT"), ("recent_changes_json", "BLOB"),
                      ("widget_fetch", "INTEGER NOT NULL DEFAULT 1"), ("widget_fetch_ok_at", "REAL"),
                      ("widget_fetch_fails", "INTEGER NOT NULL DEFAULT 0"), ("widget_fetch_pending_until", "REAL"),
                      ("sso_session_only", "INTEGER NOT NULL DEFAULT 0"), ("keepalive_at", "REAL"),
@@ -240,6 +247,30 @@ def init() -> None:
         # 老会话没记是否“保持登录”：有效期比短会话上限还长的，就是当初勾了的
         conn.execute("UPDATE sessions SET persistent=1 WHERE expires_at - created_at > ?",
                      (SESSION_DAYS_SHORT * 86400 + 3600,))
+    from . import crypto
+    with tx() as c:
+        for r in c.execute("SELECT id, name, recent_changes_json FROM users WHERE typeof(name)='text' OR typeof(recent_changes_json)='text'").fetchall():
+            if isinstance(r["name"], str):
+                enc_n = crypto.encrypt(r["name"].encode(), "user_name", r["id"]) if r["name"] else None
+                c.execute("UPDATE users SET name=? WHERE id=?", (enc_n, r["id"]))
+            if isinstance(r["recent_changes_json"], str):
+                enc_c = crypto.encrypt(r["recent_changes_json"].encode(), "changes", r["id"])
+                c.execute("UPDATE users SET recent_changes_json=? WHERE id=?", (enc_c, r["id"]))
+        for r in c.execute("SELECT user_id, semester_id, data_json FROM timetables WHERE typeof(data_json)='text'").fetchall():
+            if isinstance(r["data_json"], str):
+                enc_d = crypto.encrypt(r["data_json"].encode(), "timetable", r["user_id"])
+                c.execute("UPDATE timetables SET data_json=? WHERE user_id=? AND semester_id=?",
+                          (enc_d, r["user_id"], r["semester_id"]))
+        if not PASSWORD_STORAGE_ENABLED:
+            c.execute("UPDATE users SET cred_mode='cookie', enc_password=NULL, password_consent_at=NULL "
+                      "WHERE enc_password IS NOT NULL OR cred_mode='password'")
+        else:
+            for r in c.execute("SELECT id, student_id, enc_password FROM users WHERE enc_password IS NOT NULL").fetchall():
+                raw_pw = r["enc_password"]
+                if isinstance(raw_pw, bytes | bytearray | memoryview) and bytes(raw_pw)[:1] == b"\x01":
+                    migrated = crypto.migrate_legacy_password(bytes(raw_pw), r["id"], r["student_id"])
+                    if migrated is not None:
+                        c.execute("UPDATE users SET enc_password=? WHERE id=?", (migrated, r["id"]))
 
 
 def now() -> float:

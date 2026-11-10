@@ -21,4 +21,10 @@ playwright-report/
 .ruff_cache/
 .idea/
 andorid_key/
+android_key/
+*.jks
+*.keystore
+*signing*.zip
 /docs/
+.agents/
+/PROJECT.md

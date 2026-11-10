@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import secrets
+import threading
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -92,11 +94,28 @@ def bind_verified(uid: int, public_key: str, name: str) -> str:
     return device_id
 
 
-def signed_message(token: str, device_id: str, timestamp: str) -> bytes:
+_used_signatures: dict[tuple[str, str], float] = globals().get("_used_signatures") or {}
+_sig_lock: threading.Lock = globals().get("_sig_lock") or threading.Lock()
+MAX_USED_SIGNATURES = 16384
+
+
+def signed_message(token: str, device_id: str, timestamp: str,
+                   method: str = "", path: str = "", body_hash: str = "", nonce: str = "") -> bytes:
+    if nonce:
+        return signed_message_v2(token, device_id, timestamp, method, path, body_hash, nonce)
     return f"nufe-kebiao-device-v1\n{token}\n{device_id}\n{timestamp}".encode()
 
 
-def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature: str) -> None:
+def signed_message_v2(token: str, device_id: str, timestamp: str,
+                      method: str, path: str, body_hash: str = "", nonce: str = "") -> bytes:
+    return (
+        f"nufe-kebiao-device-v2\n{token}\n{device_id}\n{timestamp}\n"
+        f"{method.upper()}\n{path}\n{body_hash}\n{nonce}"
+    ).encode()
+
+
+def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature: str,
+                 method: str = "", path: str = "", body_hash: str = "", nonce: str = "") -> None:
     """校验不过抛 AuthError。先验签再比时间：只有真正配对过的设备才会被告知要校正时钟。"""
     row = db.connect().execute("SELECT public_key FROM mobile_devices WHERE id=? AND user_id=?",
                                (device_id, uid)).fetchone()
@@ -107,7 +126,9 @@ def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature
         sig = base64.b64decode(signature, validate=True)
     except (ValueError, binascii.Error) as e:
         raise AuthError from e
-    message = signed_message(token, device_id, timestamp)
+    if not nonce or len(nonce) > 128 or not method or not path:
+        raise AuthError
+    message = signed_message_v2(token, device_id, timestamp, method, path, body_hash, nonce)
     try:
         load_der_public_key(row["public_key"]).verify(sig, message, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature as e:
@@ -115,6 +136,19 @@ def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature
     now = db.now()
     if abs(now - sent_at) > SIG_SKEW:
         raise AuthError(skew=True)
+    sig_digest = hashlib.sha256(sig).hexdigest()
+    replay_keys = [(device_id, f"sig:{sig_digest}"), (device_id, f"nonce:{nonce}")]
+    cutoff = now - SIG_SKEW * 2
+    with _sig_lock:
+        if any(_used_signatures.get(rk, 0) >= cutoff for rk in replay_keys):
+            raise AuthError
+        if len(_used_signatures) >= MAX_USED_SIGNATURES:
+            for k in [k for k, ts in _used_signatures.items() if ts < cutoff]:
+                _used_signatures.pop(k, None)
+            while len(_used_signatures) >= MAX_USED_SIGNATURES:
+                _used_signatures.pop(next(iter(_used_signatures)))
+        for rk in replay_keys:
+            _used_signatures[rk] = now
     with db.tx() as c:
         c.execute("UPDATE mobile_devices SET last_seen_at=? WHERE id=?", (now, device_id))
 

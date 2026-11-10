@@ -8,11 +8,11 @@ Requires=kebiao.socket
 User=kebiao
 Group=kebiao
 WorkingDirectory=/opt/nufe-kebiao
-# 监听 127.0.0.1:8010 的是 kebiao.socket（fd 3 传进来），由反向代理（如 Apache / Nginx）把 https://kebiao.example.com/ 转发到这里。
+# 监听 /run/kebiao/kebiao.sock 的是 kebiao.socket（fd 3 传进来，0660 仅允许 www-data 访问），由反向代理转发到这里。
 # 只能 1 个 worker：后台刷新线程跑在进程内。
 # 重启时正在处理的请求最多再等 5 秒；TimeoutStopSec 兜底，绝不会像默认那样拖到 90 秒。
 ExecStart=/opt/nufe-kebiao/.venv/bin/uvicorn app.main:app --fd 3 \
-    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
+    --workers 1 --proxy-headers --forwarded-allow-ips '*' --no-server-header \
     --timeout-graceful-shutdown 5
 ExecReload=/bin/kill -HUP $MAINPID
 TimeoutStopSec=20

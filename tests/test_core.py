@@ -1050,6 +1050,59 @@ def test_rate_limiter_falls_back_to_oldest_when_all_saturated():
     assert len(lim._hits) == 2 and "a" not in lim._hits
 
 
+def test_rate_limiter_does_not_evict_partially_attacked_key_on_key_flood():
+    from app.security import RateLimiter
+    limiter = RateLimiter(limit=5, window=900, max_keys=100)
+    for _ in range(4):
+        assert limiter.hit("victim_student") is True
+    assert len(limiter._hits["victim_student"]) == 4
+
+    for i in range(100):
+        limiter.hit(f"dummy_{i}")
+
+    assert "victim_student" in limiter._hits
+    assert len(limiter._hits["victim_student"]) == 4
+
+    # 即使攻击者对全部伪造键各发起多次命中填满桶容量，正在被爆破的 victim_student 仍不会被挤出，新伪造键 Fail-Closed
+    for i in range(1, 100):
+        limiter.hit(f"dummy_{i}")
+        limiter.hit(f"dummy_{i}")
+    assert limiter.hit("brand_new_noise") is False
+    assert "victim_student" in limiter._hits
+    assert limiter.hit("victim_student") is True
+    assert limiter.hit("victim_student") is False
+
+
+def test_deploy_script_escapes_ssh_args_and_validates_inputs():
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "deploy" / "deploy.sh"
+    res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+    content = script.read_text("utf-8")
+    assert "PUBLIC_BASE_URL='$PUBLIC_BASE_URL'" not in content
+    assert "printf '%q '" in content
+
+
+def test_credential_envelope_encryption_and_direct_password_encrypt_blocked():
+    import pytest
+
+    from app import crypto
+
+    assert crypto.encrypt(b"MySecretPassword123", "password", 1001)[:1] == b"\x02"
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt(b"\x01" + b"0" * 32, "password", 1001)
+
+    blob = crypto.encrypt_password(b"MySecretPassword123", 1001, "2023001")
+    assert blob[:1] == b"\x02"
+    assert crypto.decrypt_password(blob, 1001, "2023001") == b"MySecretPassword123"
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt_password(blob, 1002, "2023001")
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt_password(blob, 1001, "2023002")
+
+
 def test_dotenv_sync_applies_removals_but_keeps_explicit_env(monkeypatch):
     import os
 
@@ -1094,3 +1147,184 @@ def test_scheduler_start_fills_in_missing_threads(monkeypatch):
         assert not refresh_thread.is_alive() and set(scheduler.alive()) == {"qr-pump"}
     finally:
         scheduler.stop()
+
+
+def test_android_signing_uses_env_and_no_workspace_keystore():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    gradle_kts = (root / "android" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    assert 'System.getenv("ANDROID_KEYSTORE_FILE")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEYSTORE_PASSWORD")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEY_ALIAS")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEY_PASSWORD")' in gradle_kts
+    assert not (root / "android" / "keystore.properties").exists()
+    assert not (root / "android" / "nufe-kebiao-release.jks").exists()
+    assert not (root / "android" / "build" / "nufe-kebiao-signing.zip").exists()
+
+
+def test_frozen_requirements_pinned_with_sha256_hashes():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    frozen = (root / "deploy" / "requirements-frozen.txt").read_text(encoding="utf-8")
+    deploy_sh = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert "--require-hashes" in deploy_sh
+    assert "deploy/requirements-frozen.txt" in deploy_sh
+    pkg_lines = [line for line in frozen.splitlines() if line and not line.startswith("#") and not line.startswith(" ")]
+    assert len(pkg_lines) >= 20
+    for line in pkg_lines:
+        assert "==" in line and ">=" not in line
+    assert "--hash=sha256:" in frozen
+    assert "pytest==" not in frozen
+
+
+def test_smtp_refuses_plaintext_auth_when_encryption_is_none(monkeypatch):
+    import pytest
+
+    from app import mailer
+
+    monkeypatch.setattr(mailer, "MAIL_USERNAME", "user@example.com")
+    monkeypatch.setattr(mailer, "MAIL_PASSWORD", "secret")
+    monkeypatch.setattr(mailer, "MAIL_ENCRYPTION", "none")
+    msg = mailer.build(mailer.Mail(to="dest@example.com", subject="hi", body="body"))
+    with pytest.raises(RuntimeError, match="MAIL_ENCRYPTION=none"):
+        mailer._deliver_smtp(msg)
+
+
+def test_deploy_blocks_root_ssh_by_default():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    example = (root / "deploy" / "deploy.env.example").read_text(encoding="utf-8")
+    deploy_sh = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert "HOST=deployer@" in example
+    assert "HOST=root@" not in example
+    assert "ALLOW_ROOT_DEPLOY" in deploy_sh
+    assert 'SUDO="sudo -n"' in deploy_sh
+
+
+def test_pyproject_and_requirements_consistency():
+    from pathlib import Path
+
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    reqs = [line.strip() for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+    assert sorted(pyproject["project"]["dependencies"]) == sorted(reqs)
+    assert "httpx>=0.27" in pyproject["dependency-groups"]["dev"]
+    assert "httpx2>=0.27" not in pyproject["dependency-groups"]["dev"]
+    assert "pytest>=8" not in reqs
+
+
+def test_gradle_wrapper_has_distribution_sha256_sum():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    props = (root / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties").read_text(encoding="utf-8")
+    assert "distributionSha256Sum=945faee80f55dfbfdc39e24021235492d529fba40784405391c0e3ebce25c83b" in props
+
+
+def test_gradle_verification_metadata_present():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    xml = (root / "android" / "gradle" / "verification-metadata.xml").read_text(encoding="utf-8")
+    assert "<verify-metadata>true</verify-metadata>" in xml
+    assert '<component group="com.squareup.okhttp3" name="okhttp" version="4.12.0">' in xml
+
+
+def test_android_boot_receiver_validates_intent_action_allowlist():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    kt = (root / "android" / "app" / "src" / "main" / "java" / "wiki" / "nufe" / "kebiao" / "remind" / "Reminders.kt").read_text(encoding="utf-8")
+    assert "if (intent.action !in VALID_ACTIONS) return" in kt
+    assert "Intent.ACTION_BOOT_COMPLETED" in kt
+    assert '"android.intent.action.QUICKBOOT_POWERON"' in kt
+
+
+def test_systemd_socket_uses_restricted_unix_domain_socket():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    sock = (root / "deploy" / "kebiao.socket").read_text(encoding="utf-8")
+    apache = (root / "deploy" / "apache-kebiao.conf").read_text(encoding="utf-8")
+    assert "ListenStream=/run/kebiao/kebiao.sock" in sock
+    assert "SocketGroup=www-data" in sock
+    assert "SocketMode=0660" in sock
+    assert "unix:/run/kebiao/kebiao.sock" in apache
+    assert "RequestHeader unset X-Forwarded-For" in apache
+
+
+def test_apache_configs_use_308_redirects_and_global_security_headers():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    apache = (root / "deploy" / "apache-kebiao.conf").read_text(encoding="utf-8")
+    legacy = (root / "deploy" / "apache-kebiao-legacy.conf").read_text(encoding="utf-8")
+    assert "R=308" in apache and "R=permanent" not in apache
+    assert "RedirectMatch 308" in legacy and "RedirectMatch 301" not in legacy
+    assert 'Header always set Strict-Transport-Security "max-age=31536000"' in apache
+    assert 'Header always set X-Content-Type-Options "nosniff"' in apache
+    assert "Header always set Content-Security-Policy" in apache
+
+
+def test_cas_dump_redacts_ticket_and_workspace_debug_cleaned(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app import cas
+    from app.polite import PoliteSession
+
+    root = Path(__file__).resolve().parent.parent
+    assert not (root / "debug").exists()
+    assert not (root / "my.json").exists()
+    assert not (root / ".nufe_device_id").exists()
+
+    flow = cas.LoginFlow(PoliteSession(), "2023001", "pw", debug_dir=tmp_path / "dbg")
+    fake_hist = SimpleNamespace(
+        status_code=302,
+        url="https://jwxt.nufe.edu.cn/student/sso/login?ticket=ST-123456-secret-ticket",
+        raw=SimpleNamespace(headers=SimpleNamespace(getlist=lambda _k: [])),
+    )
+    fake_resp = SimpleNamespace(
+        request=SimpleNamespace(method="GET"),
+        url="https://jwxt.nufe.edu.cn/student/for-std/course-table?ticket=ST-999999-secret",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        text="<html>ok</html>",
+        content=b"<html>ok</html>",
+        history=[fake_hist],
+        raw=SimpleNamespace(headers=SimpleNamespace(getlist=lambda _k: [])),
+    )
+    flow._dump("test", fake_resp)
+    dumped = (tmp_path / "dbg" / "01-test.txt").read_text(encoding="utf-8")
+    assert "ST-123456-secret-ticket" not in dumped
+    assert "ST-999999-secret" not in dumped
+    assert "ticket=<REDACTED>" in dumped
+
+
+def test_uv_lock_uses_official_pypi_registry():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    assert "pypi.tuna.tsinghua.edu.cn" not in lock
+    assert "https://pypi.org/simple" in lock
+    assert "https://files.pythonhosted.org/packages/" in lock
+    assert "httpx2" not in lock
+
+
+
+
+
+
+
+
+
+
+
+
+

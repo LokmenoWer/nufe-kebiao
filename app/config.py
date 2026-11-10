@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -74,6 +76,20 @@ except (binascii.Error, ValueError):
 if len(APP_SECRET_KEY) != 32:
     raise RuntimeError("APP_SECRET_KEY 必须是 32 字节")
 
+_cred_key_b64 = os.getenv("CREDENTIAL_SECRET_KEY", "").strip()
+if _cred_key_b64:
+    try:
+        CREDENTIAL_SECRET_KEY = base64.b64decode(_cred_key_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise RuntimeError("CREDENTIAL_SECRET_KEY 不是合法的 base64") from None
+    if len(CREDENTIAL_SECRET_KEY) != 32:
+        raise RuntimeError("CREDENTIAL_SECRET_KEY 必须是 32 字节")
+else:
+    CREDENTIAL_SECRET_KEY = hmac.new(APP_SECRET_KEY, b"kebiao-credential-master-kek-v2", hashlib.sha256).digest()
+
+# 是否允许在数据库中加密持久化学校密码（生产环境建议设为 false，仅依靠长期 Cookie 与端侧刷新）
+PASSWORD_STORAGE_ENABLED = _bool("PASSWORD_STORAGE_ENABLED", True)
+
 _db_path = os.getenv("DB_PATH", str(ROOT / "data" / "kebiao.db"))
 DB_PATH = _db_path if os.path.isabs(_db_path) else str((ROOT / _db_path).resolve())
 
@@ -121,6 +137,8 @@ MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
 MAIL_ENCRYPTION = os.getenv("MAIL_ENCRYPTION", "ssl").strip().lower()
 if MAIL_ENCRYPTION not in ("ssl", "tls", "starttls", "none", ""):
     raise RuntimeError("MAIL_ENCRYPTION 只能是 ssl / tls / none")
+if MAIL_ENCRYPTION in ("none", "") and MAIL_USERNAME:
+    raise RuntimeError("配置了 MAIL_USERNAME 时禁止使用 MAIL_ENCRYPTION=none（拒绝明文传输 SMTP 密码）")
 MAIL_FROM_ADDRESS = os.getenv("MAIL_FROM_ADDRESS", "").strip() or MAIL_USERNAME
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "南财课表").strip()
 MAIL_ENABLED = MAIL_MAILER == "log" or bool(MAIL_HOST and MAIL_FROM_ADDRESS)

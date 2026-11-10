@@ -74,6 +74,8 @@ def build(mail: Mail) -> EmailMessage:
 
 
 def _deliver_smtp(msg: EmailMessage) -> None:
+    if MAIL_USERNAME and MAIL_ENCRYPTION in ("none", ""):
+        raise RuntimeError("禁止在未加密连接（MAIL_ENCRYPTION=none）下发送 SMTP 认证凭据")
     if MAIL_ENCRYPTION == "ssl":
         server = smtplib.SMTP_SSL(MAIL_HOST, MAIL_PORT, timeout=TIMEOUT, context=ssl.create_default_context())
     else:

@@ -44,6 +44,9 @@ SESSION_TTL = 12 * 3600
 MAX_ADMIN_SESSIONS = 16
 PBKDF2_ITERATIONS = 600_000
 MAX_PBKDF2_ITERATIONS = 5_000_000
+LOGIN_WINDOW = 900
+IP_MAX_ATTEMPTS = 5
+GLOBAL_MAX_FAILS = 15
 LOG_CAPACITY = 2000
 STARTED_AT: float = globals().get("STARTED_AT") or time.time()
 
@@ -76,6 +79,36 @@ def verify_password(password: str, stored: str) -> bool:
 def _session_key(token: str) -> str:
     """把当前密码哈希算进存储键：改密码后旧会话全部对不上，不必等 12 小时过期。"""
     return crypto.token_hash(f"{ADMIN_PASSWORD_HASH}:{token}")
+
+
+def clear_login_attempts() -> None:
+    try:
+        with db.tx() as c:
+            c.execute("DELETE FROM admin_login_attempts")
+    except Exception:
+        pass
+
+
+def login_allowed(ip: str, now: float | None = None) -> bool:
+    now = db.now() if now is None else now
+    cutoff = now - LOGIN_WINDOW
+    with db.tx() as c:
+        c.execute("DELETE FROM admin_login_attempts WHERE at < ?", (cutoff,))
+        global_fails = c.execute(
+            "SELECT COUNT(*) FROM admin_login_attempts WHERE ok=0 AND at >= ?", (cutoff,)
+        ).fetchone()[0]
+        if global_fails >= GLOBAL_MAX_FAILS:
+            return False
+        ip_attempts = c.execute(
+            "SELECT COUNT(*) FROM admin_login_attempts WHERE ip=? AND at >= ?", (ip, cutoff)
+        ).fetchone()[0]
+        return ip_attempts < IP_MAX_ATTEMPTS
+
+
+def record_login_attempt(ip: str, ok: bool, now: float | None = None) -> None:
+    now = db.now() if now is None else now
+    with db.tx() as c:
+        c.execute("INSERT INTO admin_login_attempts(ip, at, ok) VALUES(?,?,?)", (ip, now, int(ok)))
 
 
 def login(response: Response) -> str:
@@ -231,7 +264,8 @@ def schedule(now: float | None = None) -> dict:
             nxt = refresh_policy.next_due(sig, now)
         pending = bool(sig.refresh_requested_at and sig.refresh_requested_at > (sig.last_success_at or 0))
         items.append({
-            "uid": r["id"], "student": mask_id(r["student_id"]), "name": mask_name(r["name"]),
+            "uid": r["id"], "student": mask_id(r["student_id"]),
+            "name": mask_name(service.decrypt_user_name(r["name"], r["id"])),
             "status": r["status"], "fail_count": r["fail_count"], "last_error": r["last_error"],
             "sso_short": service.sso_short(r["cred_mode"], r["sso_session_only"]),
             "keepalive_at": r["keepalive_at"], "sso_touched_at": r["sso_touched_at"], "sso_lost_at": r["sso_lost_at"],
