@@ -3137,3 +3137,19 @@ def test_captcha_and_slider_refresh_rate_limited(up):
     assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": same_flow}).status_code == 429
 
 
+def test_user_name_and_timetable_encrypted_at_rest(up):
+    c = TestClient(app)
+    assert _login(c, "2023001").status_code == 200
+    uid = service_uid("2023001")
+    user_row = db.connect().execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    tt_row = db.connect().execute("SELECT data_json FROM timetables WHERE user_id=?", (uid,)).fetchone()
+    assert isinstance(user_row["name"], bytes)
+    assert isinstance(tt_row["data_json"], bytes)
+    assert "学生1".encode() not in user_row["name"]
+    assert "高数".encode() not in tt_row["data_json"]
+    assert "李四".encode() not in tt_row["data_json"]
+    assert c.get("/api/me").json()["name"] == "学生1"
+    assert c.get("/api/timetable").json()["activities"][0]["courseName"] == "高数"
+
+
+

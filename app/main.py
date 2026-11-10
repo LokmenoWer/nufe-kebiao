@@ -1331,7 +1331,7 @@ async def app_enroll(body: AppEnrollIn, request: Request):
     await asyncio.to_thread(notify.device_bound, uid, body.name.strip()[:64] or "安卓设备")
     row = db.connect().execute("SELECT student_id, name FROM users WHERE id=?", (uid,)).fetchone()
     return JSONResponse({"token": token, "device_id": device_id,
-                         "student": {"code": row["student_id"], "name": row["name"]}},
+                         "student": {"code": row["student_id"], "name": service.decrypt_user_name(row["name"], uid)}},
                         headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 

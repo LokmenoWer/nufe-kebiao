@@ -231,7 +231,8 @@ def schedule(now: float | None = None) -> dict:
             nxt = refresh_policy.next_due(sig, now)
         pending = bool(sig.refresh_requested_at and sig.refresh_requested_at > (sig.last_success_at or 0))
         items.append({
-            "uid": r["id"], "student": mask_id(r["student_id"]), "name": mask_name(r["name"]),
+            "uid": r["id"], "student": mask_id(r["student_id"]),
+            "name": mask_name(service.decrypt_user_name(r["name"], r["id"])),
             "status": r["status"], "fail_count": r["fail_count"], "last_error": r["last_error"],
             "sso_short": service.sso_short(r["cred_mode"], r["sso_session_only"]),
             "keepalive_at": r["keepalive_at"], "sso_touched_at": r["sso_touched_at"], "sso_lost_at": r["sso_lost_at"],
