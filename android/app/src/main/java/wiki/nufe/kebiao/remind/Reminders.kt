@@ -347,6 +347,7 @@ class ReminderReceiver : BroadcastReceiver() {
 /** 开机、更新 App、改时区后闹钟会丢：重排提醒并刷新小组件。 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action !in VALID_ACTIONS) return
         val app = context.applicationContext
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
@@ -359,5 +360,16 @@ class BootReceiver : BroadcastReceiver() {
                 pending.finish()
             }
         }
+    }
+
+    companion object {
+        private val VALID_ACTIONS = setOf(
+            Intent.ACTION_BOOT_COMPLETED,
+            "android.intent.action.QUICKBOOT_POWERON",
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED,
+            AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED,
+        )
     }
 }

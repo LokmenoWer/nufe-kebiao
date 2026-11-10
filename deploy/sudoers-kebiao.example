@@ -1,0 +1,27 @@
+# 配合 deploy/deploy.sh 的非 root 部署账号（HOST=deployer@your-server）使用。
+# 安装：visudo -cf 本文件 && install -m 440 本文件 /etc/sudoers.d/kebiao
+# 按实际情况改：deployer（部署账号）、kebiao（SVC_USER / SERVICE）、/opt/nufe-kebiao（APP_DIR）。
+#
+# 注意这不是沙箱：部署账号本来就能改服务要运行的代码，还能安装 systemd unit，认真想提权是拦不住的。
+# 它的作用是不再开放 root 直连 SSH、把日常部署能做的事收窄到下面这几条，并在 sudo 日志里留痕。
+# 首次部署（创建服务用户、建 APP_DIR 并交给部署账号）请由管理员手工完成：
+#   useradd --system --home-dir /opt/nufe-kebiao --shell /usr/sbin/nologin kebiao
+#   install -d -o deployer -g deployer -m 755 /opt/nufe-kebiao
+
+# 以服务用户身份：删 / 读热重载状态文件、通过 UNIX 套接字做健康检查
+deployer ALL=(kebiao) NOPASSWD: /usr/bin/rm -f /opt/nufe-kebiao/data/reload-status.json, \
+    /opt/nufe-kebiao/.venv/bin/python /opt/nufe-kebiao/deploy/wait_reload.py /opt/nufe-kebiao/data/reload-status.json 45, \
+    /usr/bin/curl --unix-socket /run/kebiao/kebiao.sock *
+
+# 以 root 身份：数据目录与 .env 的属主、systemd unit 的安装与启停
+deployer ALL=(root) NOPASSWD: /usr/bin/chown -R kebiao\:kebiao /opt/nufe-kebiao/data, \
+    /usr/bin/chmod 700 /opt/nufe-kebiao/data, \
+    /usr/bin/chown deployer\:kebiao /opt/nufe-kebiao/.env, \
+    /usr/bin/install -m 644 /opt/nufe-kebiao/deploy/kebiao.socket /etc/systemd/system/kebiao.socket, \
+    /usr/bin/install -m 644 /opt/nufe-kebiao/deploy/kebiao.service /etc/systemd/system/kebiao.service, \
+    /usr/bin/systemctl daemon-reload, \
+    /usr/bin/systemctl enable -q kebiao.socket kebiao, \
+    /usr/bin/systemctl stop kebiao kebiao.socket, \
+    /usr/bin/systemctl start kebiao.socket, \
+    /usr/bin/systemctl reload kebiao, \
+    /usr/bin/systemctl restart kebiao

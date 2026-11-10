@@ -29,6 +29,7 @@ from . import cas, crypto, db, ics, jwxt, notify, refresh_policy, widget
 from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
+    PASSWORD_STORAGE_ENABLED,
     REFRESH_MAX_FAILS,
     SSO_KEEPALIVE_IDLE_DAYS,
     SSO_KEEPALIVE_MINUTES,
@@ -157,7 +158,7 @@ def login_start(student_id: str, password: str, remember_password: bool, keep_lo
     p = PendingLogin(
         flow_id=secrets.token_urlsafe(24),
         flow=cas.LoginFlow(PoliteSession(), student_id, password, device_id=_device_for_login(student_id, hint_uid)),
-        password_to_store=password if remember_password else None,
+        password_to_store=password if (remember_password and PASSWORD_STORAGE_ENABLED) else None,
         expires_at=db.now() + PENDING_TTL,
         keep_login=keep_login,
     )
@@ -468,9 +469,9 @@ def _complete_login(p: PendingLogin) -> int:
                       (crypto.encrypt(p.flow.device_id.encode(), "device", uid), uid))
             if p.keep_creds:
                 pass  # 扫码登录不涉及密码：保留用户原有的凭据设置
-            elif p.password_to_store:
+            elif p.password_to_store and PASSWORD_STORAGE_ENABLED:
                 c.execute("UPDATE users SET cred_mode='password', enc_password=?, password_consent_at=? WHERE id=?",
-                          (crypto.encrypt(p.password_to_store.encode(), "password", uid), db.now(), uid))
+                          (crypto.encrypt_password(p.password_to_store.encode(), uid, student_id), db.now(), uid))
             else:
                 c.execute("UPDATE users SET cred_mode='cookie', enc_password=NULL, password_consent_at=NULL WHERE id=?",
                           (uid,))
@@ -785,13 +786,13 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
         except jwxt.SessionExpired:
             # 先用 CASTGC 静默续期（扫码 / 不存密码的用户也能续上），失败才动用保存的密码
             if not _renew_with_tgc(s, uid):
-                if user["cred_mode"] != "password" or not user["enc_password"]:
+                if not PASSWORD_STORAGE_ENABLED or user["cred_mode"] != "password" or not user["enc_password"]:
                     raise NeedsRebind("登录态已过期，请重新登录本站以续期") from None
                 log.info("user %s: session expired, re-login with stored credential", uid)
                 try:
                     device = (crypto.decrypt(user["enc_device_id"], "device", uid).decode()
                               if user["enc_device_id"] else None)
-                    password = crypto.decrypt(user["enc_password"], "password", uid).decode()
+                    password = crypto.decrypt_password(user["enc_password"], uid, user["student_id"]).decode()
                 except crypto.CryptoError:
                     log.warning("user %s: stored credential unusable", uid)
                     return _save_failure(uid, trigger, "needs_rebind",
@@ -1421,10 +1422,8 @@ def alert_classmates(uid: int, semester_id, old: list, new: list) -> int:
                   AND (s.slot_key IN ({",".join("?" * len(slots))}) OR s.course_key IN ({",".join("?" * len(extra))}))""",
             (semester_id, uid, *slots, *extra)).fetchall()
         for r in rows:
-            try:
-                acts = [a for a in json.loads(r["data_json"]).get("activities") or [] if isinstance(a, dict)]
-            except (TypeError, ValueError, AttributeError):
-                acts = []
+            payload = decrypt_timetable_data(r["data_json"], r["user_id"])
+            acts = [a for a in (payload.get("activities") if payload else None) or [] if isinstance(a, dict)]
             lines = {lesson_line(a) for a in acts}
             mine = {course_key(semester_id, a) for a in acts}
             missing = any(ck in mine and not want <= lines for ck, want in extra.items())
@@ -1441,15 +1440,50 @@ def timetable_diff(old: list, new: list) -> tuple[list[str], list[str]]:
     return sorted(new_lines - old_lines), sorted(old_lines - new_lines)
 
 
+def encrypt_user_name(name: str | None, uid: int) -> bytes | None:
+    if not name or not isinstance(name, str):
+        return None
+    return crypto.encrypt(name.encode(), "user_name", uid)
+
+
+def decrypt_user_name(raw, uid: int) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    try:
+        return crypto.decrypt(raw, "user_name", uid).decode()
+    except (crypto.CryptoError, UnicodeDecodeError):
+        return None
+
+
+def encrypt_timetable_data(payload: dict, uid: int) -> bytes:
+    return crypto.encrypt_json(payload, "timetable", uid)
+
+
+def decrypt_timetable_data(raw, uid: int) -> dict | None:
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    if not isinstance(raw, bytes | bytearray | memoryview):
+        return None
+    try:
+        payload = crypto.decrypt_json(bytes(raw), "timetable", uid)
+    except crypto.CryptoError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _old_activities(c, uid: int, semester_id) -> list | None:
     row = c.execute("SELECT data_json FROM timetables WHERE user_id=? AND semester_id=?",
                     (uid, semester_id)).fetchone()
     if not row:
         return None
-    try:
-        acts = json.loads(row["data_json"]).get("activities")
-    except (TypeError, ValueError, AttributeError):
-        return None
+    payload = decrypt_timetable_data(row["data_json"], uid)
+    acts = payload.get("activities") if payload else None
     return acts if isinstance(acts, list) else None
 
 
@@ -1467,13 +1501,13 @@ def _save_success(c, uid: int, cookies: list[dict], data: dict, trigger: str) ->
            ON CONFLICT(user_id, semester_id) DO UPDATE SET semester_name=excluded.semester_name,
            data_json=excluded.data_json, fetched_at=excluded.fetched_at""",
         (uid, data["semester_id"], data["semester_name"],
-         json.dumps({"student": data["student"], "activities": data["activities"]}, ensure_ascii=False), now))
+         encrypt_timetable_data({"student": data["student"], "activities": data["activities"]}, uid), now))
     c.execute(
         """UPDATE users SET name=?, enc_cookies=?, status='ok', fail_count=0, last_error=NULL,
            last_refresh_at=?, last_success_at=?, current_semester_id=?, semesters_json=?,
            refresh_requested_at=NULL, refresh_request_reason=NULL, sso_session_only=?
            WHERE id=?""",
-        (data["student"].get("name"), crypto.encrypt_json(cookies, "cookies", uid), now, now,
+        (encrypt_user_name(data["student"].get("name"), uid), crypto.encrypt_json(cookies, "cookies", uid), now, now,
          data["current_semester_id"], json.dumps(data["semesters"], ensure_ascii=False),
          int(sso_session_only(cookies)), uid))
     if trigger == "login":
@@ -1600,20 +1634,30 @@ def sso_short(cred_mode: str | None, session_only) -> bool:
     return bool(session_only) and cred_mode != "password"
 
 
+def _decrypt_changes(raw, uid: int) -> list:
+    if isinstance(raw, bytes | bytearray | memoryview):
+        try:
+            value = crypto.decrypt_json(bytes(raw), "changes", uid)
+        except crypto.CryptoError:
+            return []
+        return value if isinstance(value, list) else []
+    return _json_list(raw)
+
+
 def _record_change(c, uid: int, now: float, changes: dict) -> None:
     """记下这次调课（改动前后的排课），小组件在课表上标出“调”和“停”。只留最近几次。"""
     row = c.execute("SELECT recent_changes_json FROM users WHERE id=?", (uid,)).fetchone()
-    events = [ev for ev in _json_list(row["recent_changes_json"] if row else None)
+    events = [ev for ev in _decrypt_changes(row["recent_changes_json"] if row else None, uid)
               if isinstance(ev, dict) and isinstance(ev.get("at"), int | float) and now - ev["at"] < widget.CHANGE_SHOW]
     events.append({"at": now, "semester_id": changes["semester_id"],
                    "removed": changes["old"][:40], "added": changes["new"][:40]})
     c.execute("UPDATE users SET last_change_at=?, recent_changes_json=? WHERE id=?",
-              (now, json.dumps(events[-CHANGE_KEEP:], ensure_ascii=False), uid))
+              (now, crypto.encrypt_json(events[-CHANGE_KEEP:], "changes", uid), uid))
 
 
 def recent_changes(uid: int) -> list:
     row = db.connect().execute("SELECT recent_changes_json FROM users WHERE id=?", (uid,)).fetchone()
-    return _json_list(row["recent_changes_json"] if row else None)
+    return _decrypt_changes(row["recent_changes_json"] if row else None, uid)
 
 
 def _save_failure(uid: int, trigger: str, status: str, message: str) -> dict:
@@ -1699,12 +1743,9 @@ def timetable_view(uid: int, semester_id: int | None) -> dict | None:
         (uid, sid)).fetchone()
     if not row:
         return None
-    try:
-        payload = json.loads(row["data_json"])
-    except (TypeError, ValueError):
+    payload = decrypt_timetable_data(row["data_json"], uid)
+    if not payload:
         log.warning("user %s semester %s: stored timetable is corrupt", uid, sid)
-        return None
-    if not isinstance(payload, dict):
         return None
     return {
         "semester_id": row["semester_id"],
@@ -1726,7 +1767,7 @@ def account_snapshot(uid: int) -> dict | None:
         return None
     return {
         "student_id": row["student_id"],
-        "name": row["name"],
+        "name": decrypt_user_name(row["name"], uid),
         "cred_mode": row["cred_mode"],
         "status": row["status"],
         "last_error": row["last_error"],
@@ -1800,7 +1841,7 @@ def ics_body(uid: int, student_id: str, alarm_minutes: int = 0) -> tuple[str, st
         if not week1:
             continue
         try:
-            payload = json.loads(r["data_json"])
+            payload = decrypt_timetable_data(r["data_json"], uid)
             if not isinstance(payload, dict):
                 raise ValueError("not an object")
             dt.date.fromisoformat(week1)  # 坏日期跳过，不影响其他学期

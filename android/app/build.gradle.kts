@@ -5,7 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// 发布签名：android/keystore.properties（不进仓库）写 storeFile / storePassword / keyAlias / keyPassword
+// 发布签名：优先从环境变量（ANDROID_KEYSTORE_FILE / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD）读取；
+// 本地兼容回退：android/keystore.properties（不进仓库，不应将正式生产密钥明文驻留工作区）
 // 本 App 唯一会联系的项目服务器（心跳、托管、协助刷新、更新检查）。默认官网；
 // 给 beta 站测试的预发布包：./gradlew assembleRelease -PkebiaoSite=https://beta.kebiao.nufe.wiki
 val kebiaoSite = (findProperty("kebiaoSite") as String?)?.trimEnd('/') ?: "https://kebiao.nufe.wiki"
@@ -14,6 +15,10 @@ require(Regex("""^https://[a-z0-9.-]+$""").matches(kebiaoSite)) { "kebiaoSite �
 val keystore = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { file ->
     Properties().apply { file.inputStream().use { load(it) } }
 }
+val envKeystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+val envKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val envKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+val envKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 
 android {
     namespace = "wiki.nufe.kebiao"
@@ -29,7 +34,14 @@ android {
     }
 
     signingConfigs {
-        if (keystore != null) {
+        if (envKeystoreFile != null && envKeystorePassword != null && envKeyAlias != null && envKeyPassword != null) {
+            create("release") {
+                storeFile = file(envKeystoreFile)
+                storePassword = envKeystorePassword
+                keyAlias = envKeyAlias
+                keyPassword = envKeyPassword
+            }
+        } else if (keystore != null) {
             create("release") {
                 storeFile = rootProject.file(keystore.getProperty("storeFile"))
                 storePassword = keystore.getProperty("storePassword")

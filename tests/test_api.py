@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import secrets
 import time
 from types import SimpleNamespace
 
@@ -214,6 +215,7 @@ def up(monkeypatch):
         c.execute("DELETE FROM users")
         c.execute("DELETE FROM semesters")  # 别让上一个用例写的开学日期漏到下一个
         c.execute("DELETE FROM admin_sessions")
+        c.execute("DELETE FROM admin_login_attempts")
     service._locks.clear()
     service._pending.clear()
     service._completed.clear()
@@ -221,7 +223,10 @@ def up(monkeypatch):
     from app import security
     security.login_by_ip._hits.clear()
     security.login_by_student._hits.clear()
+    security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
     main.mobile_pair_by_user._hits.clear()
+    mobile_devices._used_signatures.clear()
     fake = FakeUpstream()
     monkeypatch.setattr(cas, "login", fake.login)
     FakeFlow.up = fake
@@ -2097,15 +2102,24 @@ class _Phone:
             self.device_id = r.json()["device_id"]
         return r
 
-    def signed(self, at=None, key=None, device_id=None):
+    def signed(self, at=None, key=None, device_id=None, method="GET", path=None, body=b"", nonce=None):
         device_id = device_id or self.device_id
         ts = str(int(at if at is not None else time.time()))
-        message = mobile_devices.signed_message(self.token, device_id, ts)
+        path = path or f"/mobile/{self.token}.json"
+        nonce = nonce or secrets.token_urlsafe(12)
+        body_hash = hashlib.sha256(body).hexdigest()
+        message = mobile_devices.signed_message_v2(self.token, device_id, ts, method, path, body_hash, nonce)
         sig = (key or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
-        return {"X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+        return {
+            "X-Device-Id": device_id,
+            "X-Device-Time": ts,
+            "X-Device-Nonce": nonce,
+            "X-Device-Signature": base64.b64encode(sig).decode(),
+        }
 
     def profile(self, **kw):
-        return TestClient(app).get(f"/mobile/{self.token}/profile", headers=self.signed(**kw))
+        path = f"/mobile/{self.token}/profile"
+        return TestClient(app).get(path, headers=self.signed(path=path, **kw))
 
 
 def _pair_code(c):
@@ -2869,10 +2883,19 @@ class HostedApp:
             self.token, self.device_id = r.json()["token"], r.json()["device_id"]
         return r
 
-    def signed(self):
+    def signed(self, method="GET", path=None, body=b"", nonce=None):
         ts = str(int(time.time()))
-        sig = self.key.sign(mobile_devices.signed_message(self.token, self.device_id, ts), ec.ECDSA(hashes.SHA256()))
-        return {"X-Device-Id": self.device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+        path = path or f"/mobile/{self.token}/timetable"
+        nonce = nonce or secrets.token_urlsafe(12)
+        body_hash = hashlib.sha256(body).hexdigest()
+        msg = mobile_devices.signed_message_v2(self.token, self.device_id, ts, method, path, body_hash, nonce)
+        sig = self.key.sign(msg, ec.ECDSA(hashes.SHA256()))
+        return {
+            "X-Device-Id": self.device_id,
+            "X-Device-Time": ts,
+            "X-Device-Nonce": nonce,
+            "X-Device-Signature": base64.b64encode(sig).decode(),
+        }
 
 
 def test_app_enroll_creates_account_and_binds_device(up):
@@ -2932,12 +2955,62 @@ def test_app_timetable_requires_device_signature(up):
 def test_app_leave_forgets_school_session(up):
     phone = HostedApp()
     phone.enroll("2023001")
-    assert TestClient(app).post(f"/mobile/{phone.token}/leave", headers=phone.signed()).json() == {"ok": True}
+    leave_path = f"/mobile/{phone.token}/leave"
+    assert TestClient(app).post(leave_path, headers=phone.signed(method="POST", path=leave_path)).json() == {"ok": True}
     uid = service_uid("2023001")
     row = db.connect().execute("SELECT status, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
     assert row["enc_cookies"] is None and row["status"] == "needs_rebind"
     assert mobile_devices.list_devices(uid) == []
     assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401
+
+
+def test_mobile_signature_replay_and_cross_endpoint_tamper_rejected(up, monkeypatch):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    c = TestClient(app)
+    captured = phone.signed()
+    # 未消费前直接跨接口挪用到写接口（leave / forget-session）即因 method/path 绑定不匹配被拒绝
+    assert c.post(f"/mobile/{phone.token}/leave", headers=captured).status_code == 401
+    assert c.post(f"/mobile/{phone.token}/forget-session", headers=captured).status_code == 401
+    # 兼容期：缺少 X-Device-Nonce 的旧版 v1 签名（已安装的 2.2.0 及更早 App）默认仍被接受，
+    # 否则旧版会收到 401 并清掉本机托管记录；关掉 MOBILE_LEGACY_SIGNATURE 后一律拒绝
+    ts_v1 = str(int(time.time()))
+    sig_v1 = base64.b64encode(
+        phone.key.sign(mobile_devices.signed_message(phone.token, phone.device_id, ts_v1), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    v1_headers = {"X-Device-Id": phone.device_id, "X-Device-Time": ts_v1, "X-Device-Signature": sig_v1}
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=v1_headers).status_code == 200
+    monkeypatch.setattr(mobile_devices, "MOBILE_LEGACY_SIGNATURE", False)
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=v1_headers).status_code == 401
+    assert c.post(f"/mobile/{phone.token}/leave", headers=v1_headers).status_code == 401
+    # 原始合法 GET 签名正常通过，但重放被拒绝
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=captured).status_code == 200
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=captured).status_code == 401
+
+    # v2 签名绑定 method、path、body_hash 与 nonce：篡改任一维度均被拒绝
+    ts = str(int(time.time()))
+    body = _push_body(course="合法推送")
+    raw_bytes = json.dumps(body).encode()
+    body_hash = hashlib.sha256(raw_bytes).hexdigest()
+    path = f"/mobile/{phone.token}/push"
+    msg = mobile_devices.signed_message_v2(phone.token, phone.device_id, ts, "POST", path, body_hash, "nonce-1")
+    sig = base64.b64encode(phone.key.sign(msg, ec.ECDSA(hashes.SHA256()))).decode()
+    v2_headers = {
+        "X-Device-Id": phone.device_id,
+        "X-Device-Time": ts,
+        "X-Device-Nonce": "nonce-1",
+        "X-Device-Signature": sig,
+        "Content-Type": "application/json",
+    }
+    # 篡改请求体后签名不匹配
+    tampered = json.dumps(_push_body(course="被篡改的课")).encode()
+    assert c.post(path, content=tampered, headers=v2_headers).status_code == 401
+    # 跨接口挪用 v2 签名被拒绝
+    assert c.post(f"/mobile/{phone.token}/leave", headers=v2_headers).status_code == 401
+    # 原始合法载荷验签通过，再次使用同一 nonce 被防重放拦截
+    assert c.post(path, content=raw_bytes, headers=v2_headers).status_code == 200
+    sig2 = base64.b64encode(phone.key.sign(msg, ec.ECDSA(hashes.SHA256()))).decode()
+    assert c.post(path, content=raw_bytes, headers={**v2_headers, "X-Device-Signature": sig2}).status_code == 401
 
 
 # ---------- 设备数据源：安卓手机给 iOS 小组件与日历供数 ----------
@@ -2951,7 +3024,13 @@ def _push_body(sid="2023001", course="手机推的课", updated=None, semester_i
 
 
 def _push(phone, body):
-    return TestClient(app).post(f"/mobile/{phone.token}/push", json=body, headers=phone.signed())
+    raw = json.dumps(body).encode()
+    path = f"/mobile/{phone.token}/push"
+    return TestClient(app).post(
+        path,
+        content=raw,
+        headers={**phone.signed(method="POST", path=path, body=raw), "Content-Type": "application/json"},
+    )
 
 
 def test_data_source_only_enroll_keeps_no_school_session(up):
@@ -2969,7 +3048,8 @@ def test_data_source_only_enroll_keeps_no_school_session(up):
     assert service.refresh_user(uid, "manual")["status"] == "device"
     assert db.connect().execute("SELECT status FROM users WHERE id=?", (uid,)).fetchone()["status"] == "ok"
 
-    links = TestClient(app).get(f"/mobile/{phone.token}/links", headers=phone.signed()).json()
+    links_path = f"/mobile/{phone.token}/links"
+    links = TestClient(app).get(links_path, headers=phone.signed(path=links_path)).json()
     assert links["widget_url"].endswith(f"/widget/{phone.token}.json") and links["ics_url"].endswith(".ics")
     assert links["webcal_url"].startswith("webcal://") and links["server_refresh"] is False
 
@@ -3009,7 +3089,8 @@ def test_device_push_checks_owner_shape_and_freshness(up):
 def test_forget_session_keeps_device_as_data_source(up):
     phone = HostedApp()
     phone.enroll("2023001")
-    assert TestClient(app).post(f"/mobile/{phone.token}/forget-session", headers=phone.signed()).json() == {"ok": True}
+    fs_path = f"/mobile/{phone.token}/forget-session"
+    assert TestClient(app).post(fs_path, headers=phone.signed(method="POST", path=fs_path)).json() == {"ok": True}
     row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
     assert (row["cred_mode"], row["enc_cookies"]) == ("device", None)
     assert _push(phone, _push_body()).json()["stored"] is True
@@ -3025,3 +3106,173 @@ def test_data_source_only_enroll_keeps_website_password(up):
     assert r.status_code == 200
     row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
     assert row["cred_mode"] == "password" and row["enc_cookies"] is not None  # 服务器照常刷新
+
+
+def test_global_request_body_size_limit(up):
+    c = TestClient(app)
+    big = c.post(
+        "/api/login",
+        content=b"x" * (main.MAX_REQUEST_BODY + 1),
+        headers={"Origin": "http://testserver", "Content-Type": "application/json"},
+    )
+    assert big.status_code == 413
+
+
+def test_captcha_and_slider_refresh_rate_limited(up):
+    from app import security
+
+    c = TestClient(app)
+    security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
+    for i in range(security.captcha_refresh_by_ip.limit):
+        r = c.post("/api/login/captcha-image", headers=ORIGIN, json={"flow_id": f"flow-{i}"})
+        assert r.status_code == 400
+    assert c.post("/api/login/captcha-image", headers=ORIGIN, json={"flow_id": "flow-next"}).status_code == 429
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": "flow-next"}).status_code == 429
+
+    # 按 flow_id 限速：即便每次换 IP，单个 flow_id 刷新超限也在进入上游线程池前被 429 拦截
+    security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
+    same_flow = "target-flow-id"
+    for _ in range(security.captcha_refresh_by_flow.limit):
+        security.captcha_refresh_by_ip._hits.clear()
+        assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": same_flow}).status_code == 400
+    security.captcha_refresh_by_ip._hits.clear()
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": same_flow}).status_code == 429
+
+
+def test_user_name_and_timetable_encrypted_at_rest(up):
+    c = TestClient(app)
+    assert _login(c, "2023001").status_code == 200
+    uid = service_uid("2023001")
+    user_row = db.connect().execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    tt_row = db.connect().execute("SELECT data_json FROM timetables WHERE user_id=?", (uid,)).fetchone()
+    assert isinstance(user_row["name"], bytes)
+    assert isinstance(tt_row["data_json"], bytes)
+    assert "学生1".encode() not in user_row["name"]
+    assert "高数".encode() not in tt_row["data_json"]
+    assert "李四".encode() not in tt_row["data_json"]
+    assert c.get("/api/me").json()["name"] == "学生1"
+    assert c.get("/api/timetable").json()["activities"][0]["courseName"] == "高数"
+
+
+def test_legacy_token_log_redaction_and_bearer_header_support(up):
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    legacy_conf = (root / "deploy" / "apache-kebiao-legacy.conf").read_text(encoding="utf-8")
+    assert "kebiao_token_path" in legacy_conf
+    assert "env=!kebiao_token_path" in legacy_conf
+    assert main._safe_log_path("/kebiao/ics/secret-token.ics") == "/kebiao/ics/<redacted>"
+    assert main._safe_log_path("/kebiao/widget/secret-token.json") == "/kebiao/widget/<redacted>"
+
+    phone = HostedApp()
+    phone.enroll("2023001")
+    c = TestClient(app)
+    bearer = {"Authorization": f"Bearer {phone.token}"}
+    r = c.get(
+        "/mobile/me/timetable",
+        headers={**phone.signed(path="/mobile/me/timetable"), **bearer},
+    )
+    assert r.status_code == 200
+    assert r.json()["student"]["code"] == "2023001"
+    links = c.get(
+        "/mobile/me/links",
+        headers={**phone.signed(path="/mobile/me/links"), **bearer},
+    )
+    assert links.status_code == 200
+    assert links.json()["widget_url"].endswith(f"/widget/{phone.token}.json")
+    prof = c.get(
+        "/mobile/me/profile",
+        headers={**phone.signed(path="/mobile/me/profile"), **bearer},
+    )
+    assert prof.status_code == 200 and prof.json()["student"]["code"] == "2023001"
+    feed = c.get(
+        "/mobile/me.json",
+        headers={**phone.signed(path="/mobile/me.json"), **bearer},
+    )
+    assert feed.status_code == 200 and feed.json()["delegate"] is True
+
+
+def test_admin_login_persistent_and_global_lockout(up, monkeypatch):
+    from app import admin
+
+    main.admin_login_by_ip._hits.clear()
+    monkeypatch.setattr(main, "_client_ip", lambda req: req.headers.get("x-test-ip", "127.0.0.1"))
+    c = TestClient(app)
+    for i in range(admin.GLOBAL_MAX_FAILS):
+        hdrs = {**ORIGIN, "X-Test-Ip": f"198.51.100.{i + 1}"}
+        assert c.post("/api/admin/login", headers=hdrs, json={"password": "wrong"}).status_code == 401
+    # 全局熔断后：出过错的 IP 哪怕密码正确也被拒（每 IP 每窗口只剩 1 次出错机会）……
+    failed_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.1"}
+    assert c.post("/api/admin/login", headers=failed_hdrs, json={"password": "admin-test-pw"}).status_code == 429
+    # ……新 IP 也只有 1 次出错机会……
+    probe_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.200"}
+    assert c.post("/api/admin/login", headers=probe_hdrs, json={"password": "wrong"}).status_code == 401
+    assert c.post("/api/admin/login", headers=probe_hdrs, json={"password": "wrong"}).status_code == 429
+    # ……但没出过错的管理员不会被别人的失败锁在门外
+    fresh_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.250"}
+    assert c.post("/api/admin/login", headers=fresh_hdrs, json={"password": "admin-test-pw"}).status_code == 200
+    # 失败记录落在 SQLite 里：清掉内存限速器（等同重启）后仍然生效
+    main.admin_login_by_ip._hits.clear()
+    assert c.post("/api/admin/login", headers=failed_hdrs, json={"password": "admin-test-pw"}).status_code == 429
+
+
+def test_reloader_rolls_back_module_dicts_on_swap_failure(monkeypatch):
+    import importlib
+
+    from app import config, reloader
+
+    orig_tz = config.TIMEZONE
+    real_reload = importlib.reload
+
+    def fail_on_service(mod):
+        if mod.__name__ == "app.service":
+            raise RuntimeError("boom during swap")
+        res = real_reload(mod)
+        if mod.__name__ == "app.config":
+            res.TIMEZONE = "UTC"
+        return res
+
+    monkeypatch.setattr(importlib, "reload", fail_on_service)
+    with pytest.raises(RuntimeError, match="boom during swap"):
+        reloader._swap_modules()
+    assert orig_tz == config.TIMEZONE
+    assert reloader._swapping_done.is_set()
+
+
+def test_client_ip_ignores_xff_unless_proxy_is_trusted(up, monkeypatch):
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "client": ("198.51.100.7", 12345),
+        "headers": [(b"x-forwarded-for", b"8.8.8.8, 203.0.113.5")],
+    }
+    # 默认不信 XFF：直连的客户端伪造这个头换不了 IP，绕不过限速
+    assert main._client_ip(Request(scope)) == "198.51.100.7"
+    # 明确声明前面有会追加真实地址的反向代理后，取最右一跳（左边的可能是伪造的）
+    monkeypatch.setattr(main, "TRUST_FORWARDED_FOR", True)
+    assert main._client_ip(Request(scope)) == "203.0.113.5"
+    assert main._client_ip(Request({**scope, "headers": []})) == "198.51.100.7"
+
+
+def test_disabled_password_storage_blocks_background_relogin_and_purges_on_init(up, monkeypatch):
+    c = TestClient(app)
+    assert _login(c, "2023001", remember=True).status_code == 200
+    uid = service_uid("2023001")
+    up.expired.add("2023001")
+    monkeypatch.setattr(service, "PASSWORD_STORAGE_ENABLED", False)
+    res = service.refresh_user(uid, "scheduled")
+    assert res["ok"] is False and res["status"] == "needs_rebind"
+
+    monkeypatch.setattr(db, "PASSWORD_STORAGE_ENABLED", False)
+    db.init()
+    row = db.connect().execute("SELECT cred_mode, enc_password FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["cred_mode"], row["enc_password"]) == ("cookie", None)
+
+
+
+
+
+

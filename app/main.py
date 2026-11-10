@@ -44,10 +44,13 @@ from .config import (
     PUBLIC_BASE_URL,
     ROOT,
     SCHEDULER_ENABLED,
+    TRUST_FORWARDED_FOR,
 )
 from .polite import MAX_CONCURRENCY
 from .security import (
     RateLimiter,
+    captcha_refresh_by_flow,
+    captcha_refresh_by_ip,
     clear_device_hint,
     clear_session_cookie,
     create_session,
@@ -69,7 +72,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("kebiao.web")
 
 
-_TOKEN_PATHS = ("/ics/", "/widget/", "/mobile/")
+_TOKEN_PATHS = ("/ics/", "/widget/", "/mobile/", "/kebiao/ics/", "/kebiao/widget/", "/kebiao/mobile/")
 
 
 def _safe_log_path(path: str) -> str:
@@ -141,7 +144,16 @@ class ReloadableApp:
         self._target = target
 
     async def __call__(self, scope, receive, send) -> None:
-        await self._target(scope, receive, send)
+        if not reloader._swapping_done.is_set():
+            await asyncio.to_thread(reloader.wait_if_swapping)
+        if scope.get("type") == "http":
+            token = reloader.enter_request()
+            try:
+                await self._target(scope, receive, send)
+            finally:
+                reloader.exit_request(token)
+        else:
+            await self._target(scope, receive, send)
 
     def __getattr__(self, name: str):
         return getattr(self._target, name)
@@ -186,6 +198,8 @@ def _widget_post(request: Request) -> bool:
 
 # 安卓 App 的匿名心跳与协助刷新：不用 cookie，凭随机安装 id / 会话 token 认人，同样没有 CSRF 的问题
 _APP_POSTS = frozenset({"/api/app/heartbeat", "/api/app/enroll", "/api/assist/claim", "/api/assist/exchange"})
+MAX_REQUEST_BODY = 1024 * 1024
+WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 
 
 @app.middleware("http")
@@ -199,8 +213,20 @@ async def security_mw(request: Request, call_next):
         if request.url.query:
             target += "?" + request.url.query
         return RedirectResponse(target, 308)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
-        return JSONResponse({"detail": "非法来源"}, 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if not origin_ok(request) and not _widget_post(request):
+            return JSONResponse({"detail": "非法来源"}, 403)
+        max_body = WIDGET_UPLOAD_MAX if request.url.path.endswith("/upload") else MAX_REQUEST_BODY
+        size = request.headers.get("content-length")
+        if size is not None and (not size.isdigit() or int(size) > max_body):
+            return JSONResponse({"detail": "请求体过大"}, 413)
+        if not request.url.path.endswith(("/upload", "/push")) and request.url.path != "/api/assist/exchange":
+            raw = bytearray()
+            async for chunk in request.stream():
+                raw += chunk
+                if len(raw) > max_body:
+                    return JSONResponse({"detail": "请求体过大"}, 413)
+            request._body = bytes(raw)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
                                    and not request.url.path.startswith(("/api/admin/", "/api/app/", "/api/assist/"))):
         presence.mark_visitor(_client_ip(request))
@@ -266,7 +292,7 @@ async def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(400, "请先阅读并同意使用说明")
     if not re.fullmatch(r"[0-9A-Za-z]+", body.student_id):
         raise HTTPException(400, "学号格式不正确")
-    ip = request.client.host if request.client else "?"
+    ip = _client_ip(request)
     if not login_by_ip.hit(ip) or not login_by_student.hit(body.student_id):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试（避免触发学校账号锁定）")
     hint = device_hint_uid(request)
@@ -321,7 +347,7 @@ class QrStartIn(BaseModel):
 async def login_qr_start(body: QrStartIn, request: Request, response: Response):
     if not body.agree_terms:
         raise HTTPException(400, "请先阅读并同意使用说明")
-    ip = request.client.host if request.client else "?"
+    ip = _client_ip(request)
     if not login_by_ip.hit(ip):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试")
     hint = device_hint_uid(request)
@@ -342,7 +368,10 @@ def login_qr_poll(body: FlowIn, response: Response):
 
 
 @app.post("/api/login/qr/refresh")
-async def login_qr_refresh(body: FlowIn, response: Response):
+async def login_qr_refresh(body: FlowIn, request: Request, response: Response):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         r = _login_result(lambda: service.login_qr_refresh(body.flow_id), response)
         if r.get("need") == "qr":
@@ -397,7 +426,10 @@ async def login_captcha(body: CaptchaIn, response: Response):
 
 
 @app.post("/api/login/captcha-image")
-async def login_captcha_image(body: FlowIn):
+async def login_captcha_image(body: FlowIn, request: Request):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         try:
             return {"captcha_image": _captcha_data_url(body.flow_id)}
@@ -417,7 +449,10 @@ async def login_slider(body: SliderIn, response: Response):
 
 
 @app.post("/api/login/slider/refresh")
-async def login_slider_refresh(body: FlowIn):
+async def login_slider_refresh(body: FlowIn, request: Request):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         try:
             return {"slider": _slider_payload(body.flow_id)}
@@ -634,6 +669,11 @@ def _email_call(fn):
 
 
 def _client_ip(request: Request) -> str:
+    if TRUST_FORWARDED_FOR:
+        # 最右一跳是我们自己的反向代理追加的，左边的都可能是客户端伪造的
+        hops = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if hops:
+            return hops[-1]
     return request.client.host if request.client else "?"
 
 
@@ -714,7 +754,19 @@ def _widget_template() -> tuple[str, str]:
 mobile_pair_by_user = RateLimiter(20, 900, prev=globals().get("mobile_pair_by_user"))
 
 
-def _widget_user(token: str):
+def _resolve_bearer_token(token: str, request: Request | None = None) -> str:
+    if request is not None and token == "me":
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        hdr = request.headers.get("x-widget-token", "").strip()
+        if hdr:
+            return hdr
+    return token
+
+
+def _widget_user(token: str, request: Request | None = None):
+    token = _resolve_bearer_token(token, request)
     if not token or len(token) > 128:
         raise HTTPException(404)
     user = db.connect().execute(
@@ -795,15 +847,23 @@ def widget_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1
 
 @app.get("/mobile/{token}.json")
 def mobile_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1)):
-    user = _widget_user(token)
-    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], token, request))
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
+    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], actual_token, request))
+
+
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 def _device_signed(uid: int, token: str, request: Request) -> bool:
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
     try:
-        mobile_devices.authenticate(uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=_EMPTY_BODY_SHA256, nonce=nonce,
+        )
     except mobile_devices.AuthError:
         return False
     return True
@@ -881,8 +941,8 @@ def mobile_device_revoke(device_id: str, sess=Depends(csrf_protected)):
 
 
 @app.post("/mobile/{token}/pair")
-def mobile_pair(token: str, body: MobilePairIn):
-    user = _widget_user(token)
+def mobile_pair(token: str, body: MobilePairIn, request: Request):
+    user = _widget_user(token, request)
     if not mobile_pair_by_user.hit(str(user["id"])):
         raise HTTPException(429, "尝试太频繁，请稍后再试")
     try:
@@ -897,11 +957,16 @@ def mobile_pair(token: str, body: MobilePairIn):
 @app.get("/mobile/{token}/profile")
 def mobile_profile(token: str, request: Request):
     """个人信息：只给配对过的设备，要带设备私钥的签名。链接泄露时这里拿不到东西。"""
-    user = _widget_user(token)
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
     try:
-        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            user["id"], actual_token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=_EMPTY_BODY_SHA256, nonce=nonce,
+        )
     except mobile_devices.AuthError as e:
         body = {"detail": "设备未绑定或签名无效"}
         if e.skew:
@@ -933,7 +998,7 @@ WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 @app.post("/mobile/{token}/upload")
 async def widget_upload(token: str, request: Request):
     """小组件用手机网络抓到的课表页和 print-data。响应带上最新的小组件数据，脚本同一次运行就能画上。"""
-    user = await asyncio.to_thread(_widget_user, token)
+    user = await asyncio.to_thread(_widget_user, token, request)
     size = request.headers.get("content-length") or "0"
     if not size.isdigit() or int(size) > WIDGET_UPLOAD_MAX:
         raise HTTPException(413, "上传内容过大")
@@ -1082,11 +1147,13 @@ def admin_login(body: AdminLoginIn, request: Request, response: Response):
     if not admin.ENABLED:
         raise HTTPException(404)
     ip = _client_ip(request)
-    if not admin_login_by_ip.hit(ip):
+    if not admin_login_by_ip.hit(ip) or not admin.login_allowed(ip):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试")
     if not admin.verify_password(body.password, admin.ADMIN_PASSWORD_HASH):
+        admin.record_login_attempt(ip, ok=False)
         log.warning("admin login failed from %s", ip)
         raise HTTPException(401, "密码错误")
+    admin.record_login_attempt(ip, ok=True)
     log.info("admin login from %s", ip)
     return {"csrf": admin.login(response)}
 
@@ -1295,17 +1362,23 @@ async def app_enroll(body: AppEnrollIn, request: Request):
     await asyncio.to_thread(notify.device_bound, uid, body.name.strip()[:64] or "安卓设备")
     row = db.connect().execute("SELECT student_id, name FROM users WHERE id=?", (uid,)).fetchone()
     return JSONResponse({"token": token, "device_id": device_id,
-                         "student": {"code": row["student_id"], "name": row["name"]}},
+                         "student": {"code": row["student_id"], "name": service.decrypt_user_name(row["name"], uid)}},
                         headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
-def _signed_device(token: str, request: Request):
+def _signed_device(token: str, request: Request, body_hash: str | None = None):
     """/mobile/{token}/… 里要带设备签名的接口：返回 (user, None) 或 (None, 401 响应)。"""
-    user = _widget_user(token)
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
+    bh = body_hash if body_hash is not None else _EMPTY_BODY_SHA256
     try:
-        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            user["id"], actual_token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=bh, nonce=nonce,
+        )
     except mobile_devices.AuthError as e:
         body = {"detail": "设备未绑定或签名无效"}
         if e.skew:
@@ -1331,9 +1404,6 @@ DEVICE_PUSH_MAX = 1024 * 1024
 @app.post("/mobile/{token}/push")
 async def mobile_push(token: str, request: Request):
     """设备数据源：手机把本机刷到的课表推上来，iOS 小组件（/widget/…）和日历订阅（/ics/…）就读这份。"""
-    user, denied = await asyncio.to_thread(_signed_device, token, request)
-    if denied:
-        return denied
     size = request.headers.get("content-length") or "0"
     if not size.isdigit() or int(size) > DEVICE_PUSH_MAX:
         raise HTTPException(413, "内容过大")
@@ -1342,6 +1412,10 @@ async def mobile_push(token: str, request: Request):
         raw += chunk
         if len(raw) > DEVICE_PUSH_MAX:
             raise HTTPException(413, "内容过大")
+    body_hash = hashlib.sha256(bytes(raw)).hexdigest()
+    user, denied = await asyncio.to_thread(_signed_device, token, request, body_hash)
+    if denied:
+        return denied
     try:
         body = json.loads(raw)
     except ValueError:
@@ -1377,6 +1451,7 @@ def _ensure_ics_token(uid: int) -> str | None:
 @app.get("/mobile/{token}/links")
 def mobile_links(token: str, request: Request):
     """给 App 展示的 iOS 小组件与日历订阅链接（只给签名过的本人设备）。"""
+    actual_token = _resolve_bearer_token(token, request)
     user, denied = _signed_device(token, request)
     if denied:
         return denied
@@ -1384,8 +1459,8 @@ def mobile_links(token: str, request: Request):
     row = db.connect().execute("SELECT cred_mode, enc_cookies IS NOT NULL AS hosted, last_success_at FROM users WHERE id=?",
                                (user["id"],)).fetchone()
     return JSONResponse({
-        "widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json",
-        "script_url": f"{PUBLIC_BASE_URL}/widget/{token}.js",
+        "widget_url": f"{PUBLIC_BASE_URL}/widget/{actual_token}.json",
+        "script_url": f"{PUBLIC_BASE_URL}/widget/{actual_token}.js",
         "ics_url": ics,
         "webcal_url": ics.replace("https://", "webcal://", 1).replace("http://", "webcal://", 1) if ics else None,
         "server_refresh": bool(row["hosted"]) or row["cred_mode"] == "password",

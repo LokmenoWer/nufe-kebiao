@@ -9,14 +9,22 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .config import APP_SECRET_KEY
+from .config import APP_SECRET_KEY, CREDENTIAL_SECRET_KEY
+
+log = logging.getLogger("kebiao.crypto")
 
 _VERSION = b"\x01"
+_ENVELOPE_VERSION = b"\x02"
 _NONCE_LEN = 12
+_DEK_LEN = 32
+_WRAPPED_DEK_LEN = _DEK_LEN + 16  # 32-byte DEK + 16-byte GCM tag
 _aes = AESGCM(APP_SECRET_KEY)
 
 
@@ -25,11 +33,15 @@ class CryptoError(Exception):
 
 
 def encrypt(plaintext: bytes, purpose: str, user_id: int) -> bytes:
+    if purpose == "password":
+        return encrypt_password(plaintext, user_id)
     nonce = os.urandom(_NONCE_LEN)
     return _VERSION + nonce + _aes.encrypt(nonce, plaintext, f"{purpose}:{user_id}".encode())
 
 
 def decrypt(blob: bytes, purpose: str, user_id: int) -> bytes:
+    if purpose == "password":
+        return decrypt_password(blob, user_id)
     if not isinstance(blob, bytes | bytearray | memoryview):
         raise CryptoError("ciphertext is not bytes")
     if len(blob) <= 1 + _NONCE_LEN or blob[:1] != _VERSION:
@@ -39,6 +51,66 @@ def decrypt(blob: bytes, purpose: str, user_id: int) -> bytes:
                             f"{purpose}:{user_id}".encode())
     except Exception as e:  # InvalidTag / ValueError 等
         raise CryptoError("cannot decrypt ciphertext") from e
+
+
+def _derive_credential_kek(user_id: int, student_id: str, salt: bytes) -> bytes:
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=f"kebiao-cred-kek-v2:{user_id}:{student_id}".encode(),
+    )
+    return hkdf.derive(CREDENTIAL_SECRET_KEY)
+
+
+def encrypt_password(plaintext: bytes, user_id: int, student_id: str = "") -> bytes:
+    """信封加密（Envelope Encryption）：每条记录生成独立随机 DEK，由 HKDF 派生的独立 KEK 封装。"""
+    salt = os.urandom(16)
+    kek_nonce = os.urandom(_NONCE_LEN)
+    dek_nonce = os.urandom(_NONCE_LEN)
+    dek = os.urandom(_DEK_LEN)
+    kek = _derive_credential_kek(user_id, student_id, salt)
+    aad = f"password-v2:{user_id}:{student_id}".encode()
+    wrapped_dek = AESGCM(kek).encrypt(kek_nonce, dek, aad)
+    ciphertext = AESGCM(dek).encrypt(dek_nonce, plaintext, aad)
+    return _ENVELOPE_VERSION + salt + kek_nonce + dek_nonce + wrapped_dek + ciphertext
+
+
+def decrypt_password(blob: bytes, user_id: int, student_id: str = "") -> bytes:
+    if not isinstance(blob, bytes | bytearray | memoryview):
+        raise CryptoError("ciphertext is not bytes")
+    raw = bytes(blob)
+    header_len = 1 + 16 + _NONCE_LEN + _NONCE_LEN + _WRAPPED_DEK_LEN
+    if len(raw) <= header_len or raw[:1] != _ENVELOPE_VERSION:
+        raise CryptoError("unknown credential envelope format")
+    salt = raw[1:17]
+    kek_nonce = raw[17:17 + _NONCE_LEN]
+    dek_nonce = raw[17 + _NONCE_LEN:17 + 2 * _NONCE_LEN]
+    wrapped_dek = raw[17 + 2 * _NONCE_LEN:header_len]
+    ciphertext = raw[header_len:]
+    aad = f"password-v2:{user_id}:{student_id}".encode()
+    try:
+        kek = _derive_credential_kek(user_id, student_id, salt)
+        dek = AESGCM(kek).decrypt(kek_nonce, wrapped_dek, aad)
+        plaintext = AESGCM(dek).decrypt(dek_nonce, ciphertext, aad)
+    except Exception as e:
+        raise CryptoError("cannot decrypt credential envelope") from e
+    log.info("credential decrypted for background renewal: user_id=%s", user_id)
+    return plaintext
+
+
+def migrate_legacy_password(blob: bytes, user_id: int, student_id: str = "") -> bytes | None:
+    """将旧版 v1 (\\x01) 格式的 enc_password 迁移为 v2 信封加密格式。"""
+    if not isinstance(blob, bytes | bytearray | memoryview):
+        return None
+    raw = bytes(blob)
+    if len(raw) <= 1 + _NONCE_LEN or raw[:1] != _VERSION:
+        return None
+    try:
+        plaintext = _aes.decrypt(raw[1:1 + _NONCE_LEN], raw[1 + _NONCE_LEN:], f"password:{user_id}".encode())
+    except Exception:
+        return None
+    return encrypt_password(plaintext, user_id, student_id)
 
 
 def encrypt_json(obj, purpose: str, user_id: int) -> bytes:

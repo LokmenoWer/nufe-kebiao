@@ -6,7 +6,6 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, deque
-from itertools import islice
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -129,6 +128,13 @@ def current_session(request: Request):
     if not row:
         raise HTTPException(401, "会话已失效")
     presence.mark_user(row["id"], "web")
+    raw_name = row["name"]
+    if isinstance(raw_name, bytes | bytearray | memoryview):
+        try:
+            name = crypto.decrypt(bytes(raw_name), "user_name", row["id"]).decode()
+        except (crypto.CryptoError, UnicodeDecodeError):
+            name = None
+        return {**dict(row), "name": name}
     return row
 
 
@@ -187,20 +193,31 @@ class RateLimiter:
             prev._hits if prev is not None and isinstance(getattr(prev, "_hits", None), OrderedDict)
             else OrderedDict()
         )
+        # 桶满时被挤出去、但窗口内仍有计数的键：记在这里，回来时原样恢复
+        self._evicted: OrderedDict[str, deque] = (
+            prev._evicted if prev is not None and isinstance(getattr(prev, "_evicted", None), OrderedDict)
+            else OrderedDict()
+        )
         self._lock: threading.Lock = getattr(prev, "_lock", None) or threading.Lock()
 
-    def _evict_one(self) -> None:
-        """腾一个位置：优先淘汰还没到限额的键，否则灌入大量新键就能清掉已被限速的目标。只看最老的一小段，保持 O(1)。"""
-        for k, q in islice(self._hits.items(), 16):
-            if len(q) < self.limit:
-                del self._hits[k]
-                return
-        self._hits.popitem(last=False)
+    def _evict_one(self, cutoff: float) -> None:
+        """腾一个位置：挤掉最久没动过的键，O(1)。它在窗口内的计数挪进 _evicted 记账，
+        所以灌入大量新键既清不掉正在被爆破的目标的计数，也不会让桶满后新来的人全部被拒。"""
+        k, q = self._hits.popitem(last=False)
+        while q and q[0] < cutoff:
+            q.popleft()
+        if q:
+            self._evicted[k] = q
+            self._evicted.move_to_end(k)
+            while len(self._evicted) > max(self.max_keys * 4, 16384):
+                self._evicted.popitem(last=False)
 
     def hit(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self.window
         with self._lock:
+            if not self._hits and self._evicted:
+                self._evicted.clear()
             while self._hits:
                 oldest_k, oldest_q = next(iter(self._hits.items()))
                 while oldest_q and oldest_q[0] < cutoff:
@@ -214,9 +231,13 @@ class RateLimiter:
                     q.popleft()
                 self._hits.move_to_end(key)
             else:
+                q = self._evicted.pop(key, None)
+                if not isinstance(q, deque):
+                    q = deque()
+                while q and q[0] < cutoff:
+                    q.popleft()
                 if len(self._hits) >= self.max_keys:
-                    self._evict_one()
-                q = deque()
+                    self._evict_one(cutoff)
                 self._hits[key] = q
             if len(q) >= self.limit:
                 return False
@@ -227,3 +248,5 @@ class RateLimiter:
 # 每次站点登录都会真实打到学校 CAS，必须同时按 IP 和学号限速，避免撞库和触发账号锁定
 login_by_ip = RateLimiter(10, 900, prev=globals().get("login_by_ip"))
 login_by_student = RateLimiter(5, 900, prev=globals().get("login_by_student"))
+captcha_refresh_by_ip = RateLimiter(20, 60, prev=globals().get("captcha_refresh_by_ip"))
+captcha_refresh_by_flow = RateLimiter(12, 300, prev=globals().get("captcha_refresh_by_flow"))

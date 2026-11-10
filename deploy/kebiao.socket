@@ -4,8 +4,10 @@ Description=nufe-kebiao listening socket
 # 端口由 systemd 持有，服务重启期间新连接在内核队列里排队等新进程接手，而不是被拒绝。
 # 反向代理连不上后端时（Apache 默认）会把它判成故障、60 秒内一律回 503，重启一下就会变成停一分钟。
 [Socket]
-ListenStream=127.0.0.1:8010
-NoDelay=true
+ListenStream=/run/kebiao/kebiao.sock
+SocketUser=kebiao
+SocketGroup=www-data
+SocketMode=0660
 
 [Install]
 WantedBy=sockets.target

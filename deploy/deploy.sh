@@ -4,7 +4,7 @@
 #   cp deploy/deploy.env.example deploy/deploy.env   # 填好服务器信息（该文件不进 git）
 #   deploy/deploy.sh
 #   DEPLOY_ENV=deploy/deploy-beta.env deploy/deploy.sh   # 部署到同机的 beta（目录 / 服务 / 端口在该文件里，见 deploy.env.example）
-# 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
+# 也可以直接用环境变量：HOST=deployer@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
 # 部署的是当前提交（HEAD），没提交的改动不会上线。首次部署后服务器上的 .env / data/ 不会被覆盖。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,8 +12,12 @@ cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 DEPLOY_ENV=${DEPLOY_ENV:-deploy/deploy.env}
 [ -f "$DEPLOY_ENV" ] && . "$DEPLOY_ENV"
-: "${HOST:?请设置 HOST，例如 HOST=root@your-server}"
+: "${HOST:?请设置 HOST，例如 HOST=deployer@your-server}"
 : "${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://kebiao.example.com}"
+if [[ "$HOST" == root@* ]] && [ "${ALLOW_ROOT_DEPLOY:-0}" != "1" ]; then
+  echo "禁止使用 root 账号直连 SSH 部署，请改用最小权限 deployer 账号（如 HOST=deployer@...）" >&2
+  exit 1
+fi
 # 默认是正式服；同一台机器上的 beta 等实例在各自的 env 文件里覆盖这几项
 APP_DIR=${APP_DIR:-/opt/nufe-kebiao}
 SERVICE=${SERVICE:-kebiao}
@@ -24,6 +28,14 @@ MANAGE_UNITS=${MANAGE_UNITS:-1}
 # 要确保写进服务器 .env 的非敏感开关，空格分隔的 KEY=VALUE，例如 ENV_SET="ASSIST_ENABLED=1"
 ENV_SET=${ENV_SET:-}
 case "$APP_DIR" in /opt/nufe-kebiao|/opt/nufe-kebiao-*) ;; *) echo "APP_DIR 必须是 /opt/nufe-kebiao 或 /opt/nufe-kebiao-*" >&2; exit 1;; esac
+[[ "$PUBLIC_BASE_URL" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || { echo "PUBLIC_BASE_URL 格式不合法" >&2; exit 1; }
+[[ "$SERVICE" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "SERVICE 格式不合法" >&2; exit 1; }
+[[ "$SVC_USER" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "SVC_USER 格式不合法" >&2; exit 1; }
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "PORT 必须是数字" >&2; exit 1; }
+if [ -n "${ADMIN_PASSWORD_HASH:-}" ] && [[ ! "$ADMIN_PASSWORD_HASH" =~ ^pbkdf2_sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]]; then
+  echo "ADMIN_PASSWORD_HASH 格式不合法" >&2
+  exit 1
+fi
 echo "部署 $(git rev-parse --short HEAD) → $HOST:$APP_DIR（服务 $SERVICE，端口 $PORT）"
 SSH_OPTS=(-o IdentitiesOnly=yes)
 [ -n "${SSH_KEY:-}" ] && SSH_OPTS+=(-i "$SSH_KEY")
@@ -45,17 +57,50 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .ruff_cache --exclude .claude \
   "$SRC/" "$HOST:$APP_DIR/"
 
-"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' FORCE_RESTART='${FORCE_RESTART:-0}' APP_DIR='$APP_DIR' SERVICE='$SERVICE' SVC_USER='$SVC_USER' PORT='$PORT' MANAGE_UNITS='$MANAGE_UNITS' ENV_SET='$ENV_SET' bash -s" <<'REMOTE'
+REMOTE_ARGS=$(printf '%q ' \
+  "$PUBLIC_BASE_URL" \
+  "${ADMIN_PASSWORD_HASH:-}" \
+  "${FORCE_RESTART:-0}" \
+  "$APP_DIR" \
+  "$SERVICE" \
+  "$SVC_USER" \
+  "$PORT" \
+  "$MANAGE_UNITS" \
+  "$ENV_SET")
+
+"${SSH[@]}" "bash -s -- $REMOTE_ARGS" <<'REMOTE'
 set -euo pipefail
-id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
+PUBLIC_BASE_URL="$1"
+ADMIN_PASSWORD_HASH="$2"
+FORCE_RESTART="$3"
+APP_DIR="$4"
+SERVICE="$5"
+SVC_USER="$6"
+PORT="$7"
+MANAGE_UNITS="$8"
+ENV_SET="$9"
+# 非 root 部署：需要 root 的步骤走 sudo；只需读写 data/（700，归服务用户）的步骤以服务用户身份跑。
+# 需要的 sudo 授权见 deploy/sudoers-kebiao.example
+SUDO=""
+AS_SVC=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo -n"
+  AS_SVC="sudo -n -u $SVC_USER"
+fi
+id "$SVC_USER" >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
 mkdir -p "$APP_DIR/data"
-# 代码归 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
-find "$APP_DIR" -path "$APP_DIR/data" -prune -o -exec chown root:root {} +
-chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && chmod 700 "$APP_DIR/data"
+# 代码归部署账号或 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
+# root 部署时 rsync -a 会把本地的 uid/gid 带上来，必须改回 root，否则服务器上碰巧同 uid 的账号就能改代码
+if [ "$(id -u)" -eq 0 ]; then
+  find "$APP_DIR" -path "$APP_DIR/data" -prune -o -exec chown root:root {} +
+fi
+$SUDO chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && $SUDO chmod 700 "$APP_DIR/data"
 
 if [ ! -f "$APP_DIR/.env" ]; then
   (umask 077; cat > "$APP_DIR/.env" <<ENV
 APP_SECRET_KEY=$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')
+CREDENTIAL_SECRET_KEY=$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')
+PASSWORD_STORAGE_ENABLED=false
 PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 DB_PATH=$APP_DIR/data/kebiao.db
 COOKIE_SECURE=true
@@ -64,22 +109,26 @@ SCHEDULER_ENABLED=true
 ENV
   )
 fi
+$SUDO chown "$(id -un):$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 # 管理员页密码：deploy.env 里配了哈希就同步到服务器（只传哈希，不传明文）
 if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
+  [[ "$ADMIN_PASSWORD_HASH" =~ ^pbkdf2_sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]] || { echo "ADMIN_PASSWORD_HASH 格式不合法" >&2; exit 1; }
   (umask 077
    grep -v '^ADMIN_PASSWORD_HASH=' "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
    printf "ADMIN_PASSWORD_HASH='%s'\n" "$ADMIN_PASSWORD_HASH" >> "$APP_DIR/.env.tmp"
    mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 fi
-for kv in $ENV_SET; do
+read -r -a _env_items <<< "$ENV_SET"
+for kv in "${_env_items[@]}"; do
+  [ -z "$kv" ] && continue
+  [[ "$kv" =~ ^[A-Z_][A-Z0-9_]*=[A-Za-z0-9_./:@-]+$ ]] || { echo "ENV_SET 里的 $kv 不是合法的 KEY=VALUE" >&2; exit 1; }
   key=${kv%%=*}
-  case "$key" in [A-Z_]*) ;; *) echo "ENV_SET 里的 $kv 不是 KEY=VALUE" >&2; exit 1;; esac
   (umask 077
    grep -v "^$key=" "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
    printf '%s\n' "$kv" >> "$APP_DIR/.env.tmp"
    mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 done
-chown "root:$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
+$SUDO chown "$(id -un):$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 
 DEPS_CHANGED=0
 if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
@@ -88,8 +137,8 @@ if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
 fi
 if ! sha256sum -c "$APP_DIR/.venv/.requirements.sha256" >/dev/null 2>&1; then
   "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-  "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-  sha256sum "$APP_DIR/requirements.txt" > "$APP_DIR/.venv/.requirements.sha256"
+  "$APP_DIR/.venv/bin/pip" install -q --require-hashes --no-deps -r "$APP_DIR/deploy/requirements-frozen.txt"
+  sha256sum "$APP_DIR/deploy/requirements-frozen.txt" > "$APP_DIR/.venv/.requirements.sha256"
   DEPS_CHANGED=1
 fi
 chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static" "$APP_DIR/scriptable"
@@ -108,36 +157,45 @@ SERVICE_CHANGED=0
 if [ "$MANAGE_UNITS" = 1 ]; then
   cmp -s "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket" || SOCKET_CHANGED=1
   cmp -s "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service" || SERVICE_CHANGED=1
-  install -m 644 "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket"
-  install -m 644 "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service"
-  systemctl daemon-reload
+  $SUDO install -m 644 "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket"
+  $SUDO install -m 644 "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service"
+  $SUDO systemctl daemon-reload
 fi
 # 服务也要开机自启：后台刷新得在没人访问时照样跑，不能等第一个连接才把它拉起来
-systemctl enable -q "$SERVICE.socket" "$SERVICE"
+$SUDO systemctl enable -q "$SERVICE.socket" "$SERVICE"
 if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q "$SERVICE.socket"; then
-  systemctl stop "$SERVICE" "$SERVICE.socket"
-  systemctl start "$SERVICE.socket"
+  $SUDO systemctl stop "$SERVICE" "$SERVICE.socket"
+  $SUDO systemctl start "$SERVICE.socket"
 fi
 START=$(date +%s%N)
 # ENV_SET 改了 .env：配置只在启动时读，必须重启
 if [ "$FORCE_RESTART" != 1 ] && [ -z "$ENV_SET" ] && [ "$SOCKET_CHANGED" = 0 ] && [ "$SERVICE_CHANGED" = 0 ] && [ "$DEPS_CHANGED" = 0 ] && systemctl is-active -q "$SERVICE"; then
   # 信号是异步的：删掉旧结果再发，等服务写出这一次的结果
   STATUS_FILE=$(PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "from app import reloader; print(reloader.status_file())")
-  rm -f "$STATUS_FILE"
-  systemctl reload "$SERVICE"
-  if "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
+  # 状态文件在 data/ 里，部署账号进不去：删和读都以服务用户身份做
+  $AS_SVC rm -f "$STATUS_FILE"
+  $SUDO systemctl reload "$SERVICE"
+  if $AS_SVC "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
     ACTION="reload"
   else
     echo "hot reload did not succeed; restarting" >&2
-    systemctl restart "$SERVICE"
+    $SUDO systemctl restart "$SERVICE"
     ACTION="restart"
   fi
 else
-  systemctl restart "$SERVICE"
+  $SUDO systemctl restart "$SERVICE"
   ACTION="restart"
 fi
-curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
-echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
-systemctl is-active "$SERVICE"
-curl -s -o /dev/null -w "local / -> %{http_code}\n" "http://127.0.0.1:$PORT/"
+SOCK_PATH="/run/$SERVICE/$SERVICE.sock"
+if [ -S "$SOCK_PATH" ]; then
+  $AS_SVC curl --unix-socket "$SOCK_PATH" -s -o /dev/null --max-time 30 "http://localhost/healthz" || true
+  echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
+  systemctl is-active "$SERVICE"
+  $AS_SVC curl --unix-socket "$SOCK_PATH" -s -o /dev/null -w "local / -> %{http_code}\n" "http://localhost/"
+else
+  curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
+  echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
+  systemctl is-active "$SERVICE"
+  curl -s -o /dev/null -w "local / -> %{http_code}\n" "http://127.0.0.1:$PORT/"
+fi
 REMOTE
