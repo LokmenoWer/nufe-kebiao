@@ -3101,3 +3101,14 @@ def test_data_source_only_enroll_keeps_website_password(up):
     assert r.status_code == 200
     row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
     assert row["cred_mode"] == "password" and row["enc_cookies"] is not None  # 服务器照常刷新
+
+
+def test_global_request_body_size_limit(up):
+    c = TestClient(app)
+    big = c.post(
+        "/api/login",
+        content=b"x" * (main.MAX_REQUEST_BODY + 1),
+        headers={"Origin": "http://testserver", "Content-Type": "application/json"},
+    )
+    assert big.status_code == 413
+

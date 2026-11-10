@@ -186,6 +186,8 @@ def _widget_post(request: Request) -> bool:
 
 # 安卓 App 的匿名心跳与协助刷新：不用 cookie，凭随机安装 id / 会话 token 认人，同样没有 CSRF 的问题
 _APP_POSTS = frozenset({"/api/app/heartbeat", "/api/app/enroll", "/api/assist/claim", "/api/assist/exchange"})
+MAX_REQUEST_BODY = 1024 * 1024
+WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 
 
 @app.middleware("http")
@@ -199,8 +201,20 @@ async def security_mw(request: Request, call_next):
         if request.url.query:
             target += "?" + request.url.query
         return RedirectResponse(target, 308)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_ok(request) and not _widget_post(request):
-        return JSONResponse({"detail": "非法来源"}, 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if not origin_ok(request) and not _widget_post(request):
+            return JSONResponse({"detail": "非法来源"}, 403)
+        max_body = WIDGET_UPLOAD_MAX if request.url.path.endswith("/upload") else MAX_REQUEST_BODY
+        size = request.headers.get("content-length")
+        if size is not None and (not size.isdigit() or int(size) > max_body):
+            return JSONResponse({"detail": "请求体过大"}, 413)
+        if not request.url.path.endswith(("/upload", "/push")) and request.url.path != "/api/assist/exchange":
+            raw = bytearray()
+            async for chunk in request.stream():
+                raw += chunk
+                if len(raw) > max_body:
+                    return JSONResponse({"detail": "请求体过大"}, 413)
+            request._body = bytes(raw)
     if request.url.path == "/" or (request.url.path.startswith("/api/")
                                    and not request.url.path.startswith(("/api/admin/", "/api/app/", "/api/assist/"))):
         presence.mark_visitor(_client_ip(request))
