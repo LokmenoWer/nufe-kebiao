@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import importlib
 import json
@@ -75,6 +76,11 @@ class ReloadError(Exception):
 
 
 _reload_lock = threading.Lock()
+_swapping_done = threading.Event()
+_swapping_done.set()
+_inflight_cond = threading.Condition()
+_inflight_requests = 0
+_in_request_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_request_ctx", default=False)
 _generation = 1
 _last_reload_at: float | None = None
 _last_reload_trigger: str | None = None
@@ -181,27 +187,77 @@ def register_post_reload(hook: Callable[[], None]) -> None:
         _post_reload_hooks.append(hook)
 
 
+def wait_if_swapping(timeout: float = 5.0) -> None:
+    """模块交换窗口期暂停新请求进入，防止并发请求读到半新半旧的模块状态。"""
+    _swapping_done.wait(timeout)
+
+
+def enter_request() -> contextvars.Token:
+    global _inflight_requests
+    with _inflight_cond:
+        _inflight_requests += 1
+    return _in_request_ctx.set(True)
+
+
+def exit_request(token: contextvars.Token) -> None:
+    global _inflight_requests
+    _in_request_ctx.reset(token)
+    with _inflight_cond:
+        _inflight_requests = max(0, _inflight_requests - 1)
+        _inflight_cond.notify_all()
+
+
+def _drain_inflight(timeout: float = 2.0) -> None:
+    """等待已进入网关的并发请求排空（若重载由当前 HTTP 请求自身触发，则保留自身 1 个名额）。"""
+    keep = 1 if _in_request_ctx.get() else 0
+    deadline = time.monotonic() + timeout
+    with _inflight_cond:
+        while _inflight_requests > keep:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            _inflight_cond.wait(rem)
+
+
 def _swap_modules() -> None:
     importlib.invalidate_caches()  # 否则运行中新增的模块可能因目录缓存而导入失败
+    snapshots: dict[str, dict] = {}
     for mod_name in _RELOAD_ORDER:
         mod = sys.modules.get(mod_name)
         if mod is not None:
-            importlib.reload(mod)
-        else:
-            importlib.import_module(mod_name)
+            snapshots[mod_name] = dict(mod.__dict__)
+    _swapping_done.clear()
+    _drain_inflight()
+    try:
+        try:
+            for mod_name in _RELOAD_ORDER:
+                mod = sys.modules.get(mod_name)
+                if mod is not None:
+                    importlib.reload(mod)
+                else:
+                    importlib.import_module(mod_name)
+        except Exception:
+            for mod_name, saved_dict in snapshots.items():
+                mod = sys.modules.get(mod_name)
+                if mod is not None:
+                    mod.__dict__.clear()
+                    mod.__dict__.update(saved_dict)
+            raise
 
-    from . import admin, db, mailer, scheduler
+        from . import admin, db, mailer, scheduler
 
-    admin.install_log_capture()
-    db.init()
-    mailer.start()
-    # 没启动过（如单测里没走 lifespan）或正在关停时 alive() 为空，不在这里拉起线程
-    if scheduler.alive():
-        scheduler.start(refresh=config.SCHEDULER_ENABLED)
-    start_watcher()
+        admin.install_log_capture()
+        db.init()
+        mailer.start()
+        # 没启动过（如单测里没走 lifespan）或正在关停时 alive() 为空，不在这里拉起线程
+        if scheduler.alive():
+            scheduler.start(refresh=config.SCHEDULER_ENABLED)
+        start_watcher()
 
-    for hook in list(_post_reload_hooks):
-        hook()
+        for hook in list(_post_reload_hooks):
+            hook()
+    finally:
+        _swapping_done.set()
 
 
 def reload(trigger: str = "manual", wait: bool = False) -> dict:

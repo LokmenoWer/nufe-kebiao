@@ -146,7 +146,14 @@ class ReloadableApp:
     async def __call__(self, scope, receive, send) -> None:
         if not reloader._swapping_done.is_set():
             await asyncio.to_thread(reloader.wait_if_swapping)
-        await self._target(scope, receive, send)
+        if scope.get("type") == "http":
+            token = reloader.enter_request()
+            try:
+                await self._target(scope, receive, send)
+            finally:
+                reloader.exit_request(token)
+        else:
+            await self._target(scope, receive, send)
 
     def __getattr__(self, name: str):
         return getattr(self._target, name)

@@ -3190,3 +3190,71 @@ def test_legacy_token_log_redaction_and_bearer_header_support(up):
     assert feed.status_code == 200 and feed.json()["delegate"] is True
 
 
+def test_admin_login_persistent_and_global_lockout(up, monkeypatch):
+    from app import admin
+
+    main.admin_login_by_ip._hits.clear()
+    monkeypatch.setattr(main, "_client_ip", lambda req: req.headers.get("x-test-ip", "127.0.0.1"))
+    c = TestClient(app)
+    for i in range(admin.GLOBAL_MAX_FAILS):
+        hdrs = {**ORIGIN, "X-Test-Ip": f"198.51.100.{i + 1}"}
+        assert c.post("/api/admin/login", headers=hdrs, json={"password": "wrong"}).status_code == 401
+    # Global circuit breaker trips even for a brand-new IP
+    fresh_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.250"}
+    assert c.post("/api/admin/login", headers=fresh_hdrs, json={"password": "admin-test-pw"}).status_code == 429
+    main.admin_login_by_ip._hits.clear()
+
+
+def test_reloader_rolls_back_module_dicts_on_swap_failure(monkeypatch):
+    import importlib
+
+    from app import config, reloader
+
+    orig_tz = config.TIMEZONE
+    real_reload = importlib.reload
+
+    def fail_on_service(mod):
+        if mod.__name__ == "app.service":
+            raise RuntimeError("boom during swap")
+        res = real_reload(mod)
+        if mod.__name__ == "app.config":
+            res.TIMEZONE = "UTC"
+        return res
+
+    monkeypatch.setattr(importlib, "reload", fail_on_service)
+    with pytest.raises(RuntimeError, match="boom during swap"):
+        reloader._swap_modules()
+    assert orig_tz == config.TIMEZONE
+    assert reloader._swapping_done.is_set()
+
+
+def test_client_ip_uses_rightmost_hop_and_blocks_spoofed_xff(up):
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "client": ("8.8.8.8", 12345),
+        "headers": [(b"x-forwarded-for", b"8.8.8.8, 203.0.113.5")],
+    }
+    assert main._client_ip(Request(scope)) == "203.0.113.5"
+
+
+def test_disabled_password_storage_blocks_background_relogin_and_purges_on_init(up, monkeypatch):
+    c = TestClient(app)
+    assert _login(c, "2023001", remember=True).status_code == 200
+    uid = service_uid("2023001")
+    up.expired.add("2023001")
+    monkeypatch.setattr(service, "PASSWORD_STORAGE_ENABLED", False)
+    res = service.refresh_user(uid, "scheduled")
+    assert res["ok"] is False and res["status"] == "needs_rebind"
+
+    monkeypatch.setattr(db, "PASSWORD_STORAGE_ENABLED", False)
+    db.init()
+    row = db.connect().execute("SELECT cred_mode, enc_password FROM users WHERE id=?", (uid,)).fetchone()
+    assert (row["cred_mode"], row["enc_password"]) == ("cookie", None)
+
+
+
+
+
+
