@@ -26,3 +26,5 @@ android_key/
 *.keystore
 *signing*.zip
 /docs/
+.agents/
+/PROJECT.md
