@@ -991,8 +991,9 @@ def test_rate_limiter_bounded_and_preserves_state():
     lim = security.RateLimiter(limit=2, window=60, max_keys=3)
     assert lim.hit("k1") and lim.hit("k1") and not lim.hit("k1")
     assert lim.hit("k2") and lim.hit("k3") and lim.hit("k4")
-    # 超过 max_keys：淘汰最老的未到限额的 k2；已被限速的 k1 不会被灌入的新键冲掉
-    assert len(lim._hits) == 3 and "k2" not in lim._hits and not lim.hit("k1")
+    # 超过 max_keys：最久没动的 k1 被挤出桶，但计数记在账上，灌入新键冲不掉它的限速
+    assert len(lim._hits) == 3 and "k1" not in lim._hits
+    assert not lim.hit("k1") and len(lim._hits) == 3
     # 热重载时传入旧实例：限流桶原样继承
     reloaded = security.RateLimiter(limit=2, window=60, max_keys=3, prev=lim)
     assert reloaded._hits is lim._hits
@@ -1048,6 +1049,7 @@ def test_rate_limiter_falls_back_to_oldest_when_all_saturated():
     lim = security.RateLimiter(limit=1, window=60, max_keys=2)
     assert lim.hit("a") and lim.hit("b") and lim.hit("c")
     assert len(lim._hits) == 2 and "a" not in lim._hits
+    assert not lim.hit("a")  # 被挤出去的键回来时计数还在
 
 
 def test_rate_limiter_does_not_evict_partially_attacked_key_on_key_flood():
@@ -1060,17 +1062,29 @@ def test_rate_limiter_does_not_evict_partially_attacked_key_on_key_flood():
     for i in range(100):
         limiter.hit(f"dummy_{i}")
 
-    assert "victim_student" in limiter._hits
-    assert len(limiter._hits["victim_student"]) == 4
-
-    # 即使攻击者对全部伪造键各发起多次命中填满桶容量，正在被爆破的 victim_student 仍不会被挤出，新伪造键 Fail-Closed
+    # 攻击者再对全部伪造键各发起多次命中把桶填满：新来的键不能因此被一律拒绝（否则就成了全站拒绝服务）……
     for i in range(1, 100):
         limiter.hit(f"dummy_{i}")
         limiter.hit(f"dummy_{i}")
-    assert limiter.hit("brand_new_noise") is False
-    assert "victim_student" in limiter._hits
+    assert limiter.hit("brand_new_noise") is True
+    assert len(limiter._hits) <= 100
+    # ……而正在被爆破的 victim_student 的 4 次计数也冲不掉：只剩 1 次机会
     assert limiter.hit("victim_student") is True
     assert limiter.hit("victim_student") is False
+
+
+def test_rate_limiter_eviction_is_constant_time_when_saturated():
+    import time as _time
+
+    from app.security import RateLimiter
+    limiter = RateLimiter(limit=12, window=300, max_keys=4096)
+    for i in range(4096):
+        limiter.hit(f"k{i}")
+        limiter.hit(f"k{i}")
+    t0 = _time.perf_counter()
+    assert all(limiter.hit(f"new{i}") for i in range(500))
+    assert _time.perf_counter() - t0 < 0.25  # 之前每次要在锁内全表扫描（约 1 ms / 次）
+    assert len(limiter._hits) == 4096
 
 
 def test_deploy_script_escapes_ssh_args_and_validates_inputs():
@@ -1174,7 +1188,8 @@ def test_frozen_requirements_pinned_with_sha256_hashes():
     pkg_lines = [line for line in frozen.splitlines() if line and not line.startswith("#") and not line.startswith(" ")]
     assert len(pkg_lines) >= 20
     for line in pkg_lines:
-        assert "==" in line and ">=" not in line
+        spec = line.split(";")[0]  # 分号后面是环境标记（如 python_full_version >= '3.11'），不是版本约束
+        assert "==" in spec and ">=" not in spec
     assert "--hash=sha256:" in frozen
     assert "pytest==" not in frozen
 
@@ -1190,6 +1205,60 @@ def test_smtp_refuses_plaintext_auth_when_encryption_is_none(monkeypatch):
     msg = mailer.build(mailer.Mail(to="dest@example.com", subject="hi", body="body"))
     with pytest.raises(RuntimeError, match="MAIL_ENCRYPTION=none"):
         mailer._deliver_smtp(msg)
+
+    # 本机中继（回环）不拦：改走真正的 SMTP 连接
+    class Refused(Exception):
+        pass
+
+    def fake_smtp(*a, **k):
+        raise Refused
+
+    monkeypatch.setattr(mailer, "MAIL_HOST_IS_LOOPBACK", True)
+    monkeypatch.setattr(mailer.smtplib, "SMTP", fake_smtp)
+    with pytest.raises(Refused):
+        mailer._deliver_smtp(msg)
+
+
+def test_frozen_requirements_cover_every_production_dependency():
+    """deploy.sh 用 --require-hashes --no-deps 装依赖：清单里漏一个包，新机器上服务就起不来。"""
+    import re
+    from pathlib import Path
+
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    frozen = {m.group(1).lower().replace("_", "-")
+              for m in re.finditer(r"^([A-Za-z0-9_.-]+)==", (root / "deploy" / "requirements-frozen.txt").read_text(), re.M)}
+    declared = tomllib.loads((root / "pyproject.toml").read_text("utf-8"))["project"]["dependencies"]
+    names = {re.split(r"[\[<>=!~ ]", d, maxsplit=1)[0].lower() for d in declared}
+    assert names <= frozen, names - frozen
+    # uvicorn[standard] 的附加包与 fastapi 的传递依赖也必须在（--no-deps 不会自动带上）
+    assert {"uvloop", "httptools", "starlette", "pydantic", "h11"} <= frozen
+    lock = (root / "uv.lock").read_text("utf-8")
+    assert "tuna.tsinghua" not in lock and 'name = "httpx"\n' not in lock
+
+
+def test_deploy_script_works_for_unprivileged_deployer():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    sh = (root / "deploy" / "deploy.sh").read_text("utf-8")
+    # data/ 是 700 且归服务用户：状态文件的删 / 读必须以服务用户身份做，不能让部署账号直接碰
+    assert '$AS_SVC rm -f "$STATUS_FILE"' in sh and '\n  rm -f "$STATUS_FILE"' not in sh
+    assert 'if $AS_SVC "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py"' in sh
+    # root 部署时 rsync -a 带上来的本地 uid 要改回 root
+    assert "chown root:root" in sh
+    sudoers = (root / "deploy" / "sudoers-kebiao.example").read_text("utf-8")
+    assert "wait_reload.py" in sudoers and "systemctl reload kebiao" in sudoers
+
+
+def test_legacy_apache_conf_does_not_pretend_to_suppress_host_vhost_log():
+    from pathlib import Path
+
+    legacy = (Path(__file__).resolve().parent.parent / "deploy" / "apache-kebiao-legacy.conf").read_text("utf-8")
+    directives = [ln for ln in legacy.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert not any(ln.startswith("CustomLog") for ln in directives)  # 叠加的 CustomLog 抑制不了宿主 vhost 的日志
+    assert any(ln.startswith("SetEnvIf") and "kebiao_token_path" in ln for ln in directives)
 
 
 def test_deploy_blocks_root_ssh_by_default():
@@ -1213,8 +1282,8 @@ def test_pyproject_and_requirements_consistency():
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     reqs = [line.strip() for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
     assert sorted(pyproject["project"]["dependencies"]) == sorted(reqs)
-    assert "httpx>=0.27" in pyproject["dependency-groups"]["dev"]
-    assert "httpx2>=0.27" not in pyproject["dependency-groups"]["dev"]
+    # 测试客户端用的是 httpx2（uv.lock 里锁定的就是它）；不能只改名字不重新解析锁文件
+    assert "httpx2>=0.27" in pyproject["dependency-groups"]["dev"]
     assert "pytest>=8" not in reqs
 
 
@@ -1223,7 +1292,9 @@ def test_gradle_wrapper_has_distribution_sha256_sum():
 
     root = Path(__file__).resolve().parent.parent
     props = (root / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties").read_text(encoding="utf-8")
-    assert "distributionSha256Sum=945faee80f55dfbfdc39e24021235492d529fba40784405391c0e3ebce25c83b" in props
+    # 必须和 https://services.gradle.org/distributions/gradle-9.7.1-bin.zip.sha256 一致，升级 Gradle 时两行一起改
+    assert "distributions/gradle-9.7.1-bin.zip" in props
+    assert "distributionSha256Sum=acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a" in props
 
 
 def test_gradle_verification_metadata_present():
@@ -1314,7 +1385,8 @@ def test_uv_lock_uses_official_pypi_registry():
     assert "pypi.tuna.tsinghua.edu.cn" not in lock
     assert "https://pypi.org/simple" in lock
     assert "https://files.pythonhosted.org/packages/" in lock
-    assert "httpx2" not in lock
+    # 只换镜像地址，包名不能动：把 httpx2 改名成 httpx 会得到 PyPI 上不存在的 httpx 2.x，uv sync 直接 404
+    assert 'name = "httpx2"' in lock and 'name = "httpx"\n' not in lock
 
 
 

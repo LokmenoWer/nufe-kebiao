@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_public_key
 
 from . import crypto, db
+from .config import MOBILE_LEGACY_SIGNATURE
 
 PAIR_TTL = 600        # 秒：配对码有效期
 SIG_SKEW = 300        # 秒：签名时间戳允许的误差
@@ -126,9 +127,16 @@ def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature
         sig = base64.b64decode(signature, validate=True)
     except (ValueError, binascii.Error) as e:
         raise AuthError from e
-    if not nonce or len(nonce) > 128 or not method or not path:
-        raise AuthError
-    message = signed_message_v2(token, device_id, timestamp, method, path, body_hash, nonce)
+    legacy = not nonce
+    if legacy:
+        # 兼容期：旧版 App 的 v1 签名（只绑 token / 设备 / 时间）。行为和升级前完全一致，不做防重放，免得旧版重试被误伤
+        if not MOBILE_LEGACY_SIGNATURE:
+            raise AuthError
+        message = signed_message(token, device_id, timestamp)
+    else:
+        if len(nonce) > 128 or not method or not path:
+            raise AuthError
+        message = signed_message_v2(token, device_id, timestamp, method, path, body_hash, nonce)
     try:
         load_der_public_key(row["public_key"]).verify(sig, message, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature as e:
@@ -137,7 +145,7 @@ def authenticate(uid: int, token: str, device_id: str, timestamp: str, signature
     if abs(now - sent_at) > SIG_SKEW:
         raise AuthError(skew=True)
     sig_digest = hashlib.sha256(sig).hexdigest()
-    replay_keys = [(device_id, f"sig:{sig_digest}"), (device_id, f"nonce:{nonce}")]
+    replay_keys = [] if legacy else [(device_id, f"sig:{sig_digest}"), (device_id, f"nonce:{nonce}")]
     cutoff = now - SIG_SKEW * 2
     with _sig_lock:
         if any(_used_signatures.get(rk, 0) >= cutoff for rk in replay_keys):

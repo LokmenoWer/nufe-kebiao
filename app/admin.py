@@ -97,12 +97,13 @@ def login_allowed(ip: str, now: float | None = None) -> bool:
         global_fails = c.execute(
             "SELECT COUNT(*) FROM admin_login_attempts WHERE ok=0 AND at >= ?", (cutoff,)
         ).fetchone()[0]
-        if global_fails >= GLOBAL_MAX_FAILS:
-            return False
-        ip_attempts = c.execute(
-            "SELECT COUNT(*) FROM admin_login_attempts WHERE ip=? AND at >= ?", (ip, cutoff)
+        ip_fails = c.execute(
+            "SELECT COUNT(*) FROM admin_login_attempts WHERE ip=? AND ok=0 AND at >= ?", (ip, cutoff)
         ).fetchone()[0]
-        return ip_attempts < IP_MAX_ATTEMPTS
+        # 全局熔断不是一刀切拒绝：那样任何人用几个 IP 各错几次，就能把管理员（哪怕密码正确）一直锁在门外。
+        # 熔断后每个 IP 在窗口内只剩 1 次出错机会：分布式爆破被压到每 IP 每窗口 1 次，没出过错的管理员照常能登录。
+        allowed = 1 if global_fails >= GLOBAL_MAX_FAILS else IP_MAX_ATTEMPTS
+        return ip_fails < allowed
 
 
 def record_login_attempt(ip: str, ok: bool, now: float | None = None) -> None:

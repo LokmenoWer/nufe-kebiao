@@ -240,8 +240,10 @@ def _swap_modules() -> None:
             for mod_name, saved_dict in snapshots.items():
                 mod = sys.modules.get(mod_name)
                 if mod is not None:
-                    mod.__dict__.clear()
+                    # 先写回旧值再删多出来的名字：不能先 clear()，否则别的线程正在跑的函数会在空窗里遇到 NameError
                     mod.__dict__.update(saved_dict)
+                    for k in [k for k in mod.__dict__ if k not in saved_dict]:
+                        del mod.__dict__[k]
             raise
 
         from . import admin, db, mailer, scheduler

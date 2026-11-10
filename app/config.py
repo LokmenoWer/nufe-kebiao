@@ -89,6 +89,19 @@ else:
 
 # 是否允许在数据库中加密持久化学校密码（生产环境建议设为 false，仅依靠长期 Cookie 与端侧刷新）
 PASSWORD_STORAGE_ENABLED = _bool("PASSWORD_STORAGE_ENABLED", True)
+if PASSWORD_STORAGE_ENABLED and not _cred_key_b64:
+    # 没单独配 CREDENTIAL_SECRET_KEY 时密码密钥由 APP_SECRET_KEY 派生：拿到 APP_SECRET_KEY 就等于拿到全部，信封加密没有额外保护
+    logging.getLogger("kebiao.config").warning(
+        "CREDENTIAL_SECRET_KEY 未配置，保存的学校密码仅由 APP_SECRET_KEY 派生的密钥保护；建议单独配置或关闭 PASSWORD_STORAGE_ENABLED")
+
+# 兼容期开关：2.2.0 及更早的安卓 App 只会发不带 nonce 的 v1 设备签名。关掉后这些旧版会收到 401 并清掉本机托管记录，
+# 所以要等新版 App 铺开后再设为 false。
+MOBILE_LEGACY_SIGNATURE = _bool("MOBILE_LEGACY_SIGNATURE", True)
+
+# 是否采信 X-Forwarded-For 的最右一跳作为客户端 IP。只有当前面的反向代理一定会追加真实对端地址（如 Nginx 的
+# $proxy_add_x_forwarded_for）时才打开；直连或代理不改这个头时打开它，任何人都能伪造 IP 绕过限速。
+# 仓库自带的 Apache 配置会先清掉客户端带来的 XFF，uvicorn --proxy-headers 给出的地址已经是真实 IP，不需要打开。
+TRUST_FORWARDED_FOR = _bool("TRUST_FORWARDED_FOR", False)
 
 _db_path = os.getenv("DB_PATH", str(ROOT / "data" / "kebiao.db"))
 DB_PATH = _db_path if os.path.isabs(_db_path) else str((ROOT / _db_path).resolve())
@@ -137,8 +150,10 @@ MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
 MAIL_ENCRYPTION = os.getenv("MAIL_ENCRYPTION", "ssl").strip().lower()
 if MAIL_ENCRYPTION not in ("ssl", "tls", "starttls", "none", ""):
     raise RuntimeError("MAIL_ENCRYPTION 只能是 ssl / tls / none")
-if MAIL_ENCRYPTION in ("none", "") and MAIL_USERNAME:
-    raise RuntimeError("配置了 MAIL_USERNAME 时禁止使用 MAIL_ENCRYPTION=none（拒绝明文传输 SMTP 密码）")
+# 本机中继（回环地址）不出网卡，明文认证没有被窃听的问题；其他主机一律拒绝明文传 SMTP 密码
+MAIL_HOST_IS_LOOPBACK = MAIL_HOST.lower() in ("localhost", "127.0.0.1", "::1", "[::1]")
+if MAIL_ENCRYPTION in ("none", "") and MAIL_USERNAME and not MAIL_HOST_IS_LOOPBACK:
+    raise RuntimeError("配置了 MAIL_USERNAME 时禁止对非本机 SMTP 使用 MAIL_ENCRYPTION=none（拒绝明文传输 SMTP 密码）")
 MAIL_FROM_ADDRESS = os.getenv("MAIL_FROM_ADDRESS", "").strip() or MAIL_USERNAME
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "南财课表").strip()
 MAIL_ENABLED = MAIL_MAILER == "log" or bool(MAIL_HOST and MAIL_FROM_ADDRESS)

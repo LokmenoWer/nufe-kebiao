@@ -215,6 +215,7 @@ def up(monkeypatch):
         c.execute("DELETE FROM users")
         c.execute("DELETE FROM semesters")  # 别让上一个用例写的开学日期漏到下一个
         c.execute("DELETE FROM admin_sessions")
+        c.execute("DELETE FROM admin_login_attempts")
     service._locks.clear()
     service._pending.clear()
     service._completed.clear()
@@ -2963,7 +2964,7 @@ def test_app_leave_forgets_school_session(up):
     assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401
 
 
-def test_mobile_signature_replay_and_cross_endpoint_tamper_rejected(up):
+def test_mobile_signature_replay_and_cross_endpoint_tamper_rejected(up, monkeypatch):
     phone = HostedApp()
     phone.enroll("2023001")
     c = TestClient(app)
@@ -2971,12 +2972,15 @@ def test_mobile_signature_replay_and_cross_endpoint_tamper_rejected(up):
     # 未消费前直接跨接口挪用到写接口（leave / forget-session）即因 method/path 绑定不匹配被拒绝
     assert c.post(f"/mobile/{phone.token}/leave", headers=captured).status_code == 401
     assert c.post(f"/mobile/{phone.token}/forget-session", headers=captured).status_code == 401
-    # 缺少 X-Device-Nonce 的旧版 v1 无上下文签名一律被拒绝
+    # 兼容期：缺少 X-Device-Nonce 的旧版 v1 签名（已安装的 2.2.0 及更早 App）默认仍被接受，
+    # 否则旧版会收到 401 并清掉本机托管记录；关掉 MOBILE_LEGACY_SIGNATURE 后一律拒绝
     ts_v1 = str(int(time.time()))
     sig_v1 = base64.b64encode(
         phone.key.sign(mobile_devices.signed_message(phone.token, phone.device_id, ts_v1), ec.ECDSA(hashes.SHA256()))
     ).decode()
     v1_headers = {"X-Device-Id": phone.device_id, "X-Device-Time": ts_v1, "X-Device-Signature": sig_v1}
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=v1_headers).status_code == 200
+    monkeypatch.setattr(mobile_devices, "MOBILE_LEGACY_SIGNATURE", False)
     assert c.get(f"/mobile/{phone.token}/timetable", headers=v1_headers).status_code == 401
     assert c.post(f"/mobile/{phone.token}/leave", headers=v1_headers).status_code == 401
     # 原始合法 GET 签名正常通过，但重放被拒绝
@@ -3199,10 +3203,19 @@ def test_admin_login_persistent_and_global_lockout(up, monkeypatch):
     for i in range(admin.GLOBAL_MAX_FAILS):
         hdrs = {**ORIGIN, "X-Test-Ip": f"198.51.100.{i + 1}"}
         assert c.post("/api/admin/login", headers=hdrs, json={"password": "wrong"}).status_code == 401
-    # Global circuit breaker trips even for a brand-new IP
+    # 全局熔断后：出过错的 IP 哪怕密码正确也被拒（每 IP 每窗口只剩 1 次出错机会）……
+    failed_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.1"}
+    assert c.post("/api/admin/login", headers=failed_hdrs, json={"password": "admin-test-pw"}).status_code == 429
+    # ……新 IP 也只有 1 次出错机会……
+    probe_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.200"}
+    assert c.post("/api/admin/login", headers=probe_hdrs, json={"password": "wrong"}).status_code == 401
+    assert c.post("/api/admin/login", headers=probe_hdrs, json={"password": "wrong"}).status_code == 429
+    # ……但没出过错的管理员不会被别人的失败锁在门外
     fresh_hdrs = {**ORIGIN, "X-Test-Ip": "198.51.100.250"}
-    assert c.post("/api/admin/login", headers=fresh_hdrs, json={"password": "admin-test-pw"}).status_code == 429
+    assert c.post("/api/admin/login", headers=fresh_hdrs, json={"password": "admin-test-pw"}).status_code == 200
+    # 失败记录落在 SQLite 里：清掉内存限速器（等同重启）后仍然生效
     main.admin_login_by_ip._hits.clear()
+    assert c.post("/api/admin/login", headers=failed_hdrs, json={"password": "admin-test-pw"}).status_code == 429
 
 
 def test_reloader_rolls_back_module_dicts_on_swap_failure(monkeypatch):
@@ -3228,15 +3241,20 @@ def test_reloader_rolls_back_module_dicts_on_swap_failure(monkeypatch):
     assert reloader._swapping_done.is_set()
 
 
-def test_client_ip_uses_rightmost_hop_and_blocks_spoofed_xff(up):
+def test_client_ip_ignores_xff_unless_proxy_is_trusted(up, monkeypatch):
     from starlette.requests import Request
 
     scope = {
         "type": "http",
-        "client": ("8.8.8.8", 12345),
+        "client": ("198.51.100.7", 12345),
         "headers": [(b"x-forwarded-for", b"8.8.8.8, 203.0.113.5")],
     }
+    # 默认不信 XFF：直连的客户端伪造这个头换不了 IP，绕不过限速
+    assert main._client_ip(Request(scope)) == "198.51.100.7"
+    # 明确声明前面有会追加真实地址的反向代理后，取最右一跳（左边的可能是伪造的）
+    monkeypatch.setattr(main, "TRUST_FORWARDED_FOR", True)
     assert main._client_ip(Request(scope)) == "203.0.113.5"
+    assert main._client_ip(Request({**scope, "headers": []})) == "198.51.100.7"
 
 
 def test_disabled_password_storage_blocks_background_relogin_and_purges_on_init(up, monkeypatch):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import collections
 import contextvars
 import hashlib
 import hmac
@@ -45,6 +44,7 @@ from .config import (
     PUBLIC_BASE_URL,
     ROOT,
     SCHEDULER_ENABLED,
+    TRUST_FORWARDED_FOR,
 )
 from .polite import MAX_CONCURRENCY
 from .security import (
@@ -669,10 +669,10 @@ def _email_call(fn):
 
 
 def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        hops = [p.strip() for p in xff.split(",") if p.strip()]
-        if hops and (request.client is None or len(hops) > 1):
+    if TRUST_FORWARDED_FOR:
+        # 最右一跳是我们自己的反向代理追加的，左边的都可能是客户端伪造的
+        hops = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if hops:
             return hops[-1]
     return request.client.host if request.client else "?"
 
@@ -1127,16 +1127,7 @@ def index():
 
 # ---------- 服务器管理员页 ----------
 
-
-class _AdminHitsDict(collections.OrderedDict):
-    def clear(self) -> None:
-        super().clear()
-        admin.clear_login_attempts()
-
-
 admin_login_by_ip = RateLimiter(5, 900, prev=globals().get("admin_login_by_ip"))
-if not isinstance(admin_login_by_ip._hits, _AdminHitsDict):
-    admin_login_by_ip._hits = _AdminHitsDict(admin_login_by_ip._hits)
 
 
 class AdminLoginIn(BaseModel):

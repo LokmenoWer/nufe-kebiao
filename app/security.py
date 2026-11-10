@@ -193,29 +193,24 @@ class RateLimiter:
             prev._hits if prev is not None and isinstance(getattr(prev, "_hits", None), OrderedDict)
             else OrderedDict()
         )
-        self._evicted: OrderedDict[str, tuple[int, float]] = (
+        # 桶满时被挤出去、但窗口内仍有计数的键：记在这里，回来时原样恢复
+        self._evicted: OrderedDict[str, deque] = (
             prev._evicted if prev is not None and isinstance(getattr(prev, "_evicted", None), OrderedDict)
             else OrderedDict()
         )
         self._lock: threading.Lock = getattr(prev, "_lock", None) or threading.Lock()
 
-    def _evict_one(self, cutoff: float) -> bool:
-        """腾一个位置：只淘汰已过期键或仅试探 1 次的孤立键，绝不把正在被爆破的多频次目标清掉。"""
-        for k, q in list(self._hits.items()):
-            while q and q[0] < cutoff:
-                q.popleft()
-            if not q:
-                del self._hits[k]
-                return True
-            if len(q) == 1:
-                last_ts = q[-1]
-                del self._hits[k]
-                if self.limit > 1:
-                    self._evicted[k] = (1, last_ts + self.window)
-                    while len(self._evicted) > max(self.max_keys * 4, 16384):
-                        self._evicted.popitem(last=False)
-                return True
-        return False
+    def _evict_one(self, cutoff: float) -> None:
+        """腾一个位置：挤掉最久没动过的键，O(1)。它在窗口内的计数挪进 _evicted 记账，
+        所以灌入大量新键既清不掉正在被爆破的目标的计数，也不会让桶满后新来的人全部被拒。"""
+        k, q = self._hits.popitem(last=False)
+        while q and q[0] < cutoff:
+            q.popleft()
+        if q:
+            self._evicted[k] = q
+            self._evicted.move_to_end(k)
+            while len(self._evicted) > max(self.max_keys * 4, 16384):
+                self._evicted.popitem(last=False)
 
     def hit(self, key: str) -> bool:
         now = time.monotonic()
@@ -236,15 +231,13 @@ class RateLimiter:
                     q.popleft()
                 self._hits.move_to_end(key)
             else:
-                restored = self._evicted.pop(key, None)
-                if len(self._hits) >= self.max_keys and not self._evict_one(cutoff):
-                    if restored is not None and restored[1] > now:
-                        self._evicted[key] = restored
-                    return False
-                q = deque()
-                if restored is not None and restored[1] > now:
-                    ts = max(cutoff, restored[1] - self.window)
-                    q.extend(ts for _ in range(restored[0]))
+                q = self._evicted.pop(key, None)
+                if not isinstance(q, deque):
+                    q = deque()
+                while q and q[0] < cutoff:
+                    q.popleft()
+                if len(self._hits) >= self.max_keys:
+                    self._evict_one(cutoff)
                 self._hits[key] = q
             if len(q) >= self.limit:
                 return False
