@@ -24,6 +24,14 @@ MANAGE_UNITS=${MANAGE_UNITS:-1}
 # 要确保写进服务器 .env 的非敏感开关，空格分隔的 KEY=VALUE，例如 ENV_SET="ASSIST_ENABLED=1"
 ENV_SET=${ENV_SET:-}
 case "$APP_DIR" in /opt/nufe-kebiao|/opt/nufe-kebiao-*) ;; *) echo "APP_DIR 必须是 /opt/nufe-kebiao 或 /opt/nufe-kebiao-*" >&2; exit 1;; esac
+[[ "$PUBLIC_BASE_URL" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || { echo "PUBLIC_BASE_URL 格式不合法" >&2; exit 1; }
+[[ "$SERVICE" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "SERVICE 格式不合法" >&2; exit 1; }
+[[ "$SVC_USER" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "SVC_USER 格式不合法" >&2; exit 1; }
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "PORT 必须是数字" >&2; exit 1; }
+if [ -n "${ADMIN_PASSWORD_HASH:-}" ] && [[ ! "$ADMIN_PASSWORD_HASH" =~ ^pbkdf2_sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]]; then
+  echo "ADMIN_PASSWORD_HASH 格式不合法" >&2
+  exit 1
+fi
 echo "部署 $(git rev-parse --short HEAD) → $HOST:$APP_DIR（服务 $SERVICE，端口 $PORT）"
 SSH_OPTS=(-o IdentitiesOnly=yes)
 [ -n "${SSH_KEY:-}" ] && SSH_OPTS+=(-i "$SSH_KEY")
@@ -45,8 +53,28 @@ rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude .ruff_cache --exclude .claude \
   "$SRC/" "$HOST:$APP_DIR/"
 
-"${SSH[@]}" "PUBLIC_BASE_URL='$PUBLIC_BASE_URL' ADMIN_PASSWORD_HASH='${ADMIN_PASSWORD_HASH:-}' FORCE_RESTART='${FORCE_RESTART:-0}' APP_DIR='$APP_DIR' SERVICE='$SERVICE' SVC_USER='$SVC_USER' PORT='$PORT' MANAGE_UNITS='$MANAGE_UNITS' ENV_SET='$ENV_SET' bash -s" <<'REMOTE'
+REMOTE_ARGS=$(printf '%q ' \
+  "$PUBLIC_BASE_URL" \
+  "${ADMIN_PASSWORD_HASH:-}" \
+  "${FORCE_RESTART:-0}" \
+  "$APP_DIR" \
+  "$SERVICE" \
+  "$SVC_USER" \
+  "$PORT" \
+  "$MANAGE_UNITS" \
+  "$ENV_SET")
+
+"${SSH[@]}" "bash -s -- $REMOTE_ARGS" <<'REMOTE'
 set -euo pipefail
+PUBLIC_BASE_URL="$1"
+ADMIN_PASSWORD_HASH="$2"
+FORCE_RESTART="$3"
+APP_DIR="$4"
+SERVICE="$5"
+SVC_USER="$6"
+PORT="$7"
+MANAGE_UNITS="$8"
+ENV_SET="$9"
 id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
 mkdir -p "$APP_DIR/data"
 # 代码归 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
@@ -66,14 +94,17 @@ ENV
 fi
 # 管理员页密码：deploy.env 里配了哈希就同步到服务器（只传哈希，不传明文）
 if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
+  [[ "$ADMIN_PASSWORD_HASH" =~ ^pbkdf2_sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]] || { echo "ADMIN_PASSWORD_HASH 格式不合法" >&2; exit 1; }
   (umask 077
    grep -v '^ADMIN_PASSWORD_HASH=' "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
    printf "ADMIN_PASSWORD_HASH='%s'\n" "$ADMIN_PASSWORD_HASH" >> "$APP_DIR/.env.tmp"
    mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 fi
-for kv in $ENV_SET; do
+read -r -a _env_items <<< "$ENV_SET"
+for kv in "${_env_items[@]}"; do
+  [ -z "$kv" ] && continue
+  [[ "$kv" =~ ^[A-Z_][A-Z0-9_]*=[A-Za-z0-9_./:@-]+$ ]] || { echo "ENV_SET 里的 $kv 不是合法的 KEY=VALUE" >&2; exit 1; }
   key=${kv%%=*}
-  case "$key" in [A-Z_]*) ;; *) echo "ENV_SET 里的 $kv 不是 KEY=VALUE" >&2; exit 1;; esac
   (umask 077
    grep -v "^$key=" "$APP_DIR/.env" > "$APP_DIR/.env.tmp" || true
    printf '%s\n' "$kv" >> "$APP_DIR/.env.tmp"

@@ -1073,6 +1073,18 @@ def test_rate_limiter_does_not_evict_partially_attacked_key_on_key_flood():
     assert limiter.hit("victim_student") is False
 
 
+def test_deploy_script_escapes_ssh_args_and_validates_inputs():
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "deploy" / "deploy.sh"
+    res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+    content = script.read_text("utf-8")
+    assert "PUBLIC_BASE_URL='$PUBLIC_BASE_URL'" not in content
+    assert "printf '%q '" in content
+
+
 def test_dotenv_sync_applies_removals_but_keeps_explicit_env(monkeypatch):
     import os
 
