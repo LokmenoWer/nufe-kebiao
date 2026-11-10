@@ -1163,3 +1163,20 @@ def test_android_signing_uses_env_and_no_workspace_keystore():
     assert not (root / "android" / "build" / "nufe-kebiao-signing.zip").exists()
 
 
+def test_frozen_requirements_pinned_with_sha256_hashes():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    frozen = (root / "deploy" / "requirements-frozen.txt").read_text(encoding="utf-8")
+    deploy_sh = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert "--require-hashes" in deploy_sh
+    assert "deploy/requirements-frozen.txt" in deploy_sh
+    pkg_lines = [line for line in frozen.splitlines() if line and not line.startswith("#") and not line.startswith(" ")]
+    assert len(pkg_lines) >= 20
+    for line in pkg_lines:
+        assert "==" in line and ">=" not in line
+    assert "--hash=sha256:" in frozen
+    assert "pytest==" not in frozen
+
+
+

@@ -121,8 +121,8 @@ if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
 fi
 if ! sha256sum -c "$APP_DIR/.venv/.requirements.sha256" >/dev/null 2>&1; then
   "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-  "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-  sha256sum "$APP_DIR/requirements.txt" > "$APP_DIR/.venv/.requirements.sha256"
+  "$APP_DIR/.venv/bin/pip" install -q --require-hashes --no-deps -r "$APP_DIR/deploy/requirements-frozen.txt"
+  sha256sum "$APP_DIR/deploy/requirements-frozen.txt" > "$APP_DIR/.venv/.requirements.sha256"
   DEPS_CHANGED=1
 fi
 chmod -R go+rX "$APP_DIR/.venv" "$APP_DIR/app" "$APP_DIR/static" "$APP_DIR/scriptable"
