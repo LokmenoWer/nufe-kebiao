@@ -1226,6 +1226,16 @@ def test_gradle_wrapper_has_distribution_sha256_sum():
     assert "distributionSha256Sum=945faee80f55dfbfdc39e24021235492d529fba40784405391c0e3ebce25c83b" in props
 
 
+def test_gradle_verification_metadata_present():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    xml = (root / "android" / "gradle" / "verification-metadata.xml").read_text(encoding="utf-8")
+    assert "<verify-metadata>true</verify-metadata>" in xml
+    assert '<component group="com.squareup.okhttp3" name="okhttp" version="4.12.0">' in xml
+
+
+
 
 
 
