@@ -1235,6 +1235,17 @@ def test_gradle_verification_metadata_present():
     assert '<component group="com.squareup.okhttp3" name="okhttp" version="4.12.0">' in xml
 
 
+def test_android_boot_receiver_validates_intent_action_allowlist():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    kt = (root / "android" / "app" / "src" / "main" / "java" / "wiki" / "nufe" / "kebiao" / "remind" / "Reminders.kt").read_text(encoding="utf-8")
+    assert "if (intent.action !in VALID_ACTIONS) return" in kt
+    assert "Intent.ACTION_BOOT_COMPLETED" in kt
+    assert '"android.intent.action.QUICKBOOT_POWERON"' in kt
+
+
+
 
 
 
