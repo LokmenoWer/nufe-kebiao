@@ -117,10 +117,14 @@ cp deploy/deploy.env.example deploy/deploy.env   # 填写 HOST / SSH_KEY / PUBLI
 deploy/deploy.sh
 ```
 
-- 代码同步至 `/opt/nufe-kebiao`，由 systemd 服务 `kebiao` 托管（运行用户 `kebiao`，仅监听 `127.0.0.1:8010`，单 worker 进程）。
-- **平滑重启不停服**：`127.0.0.1:8010` 套接字由 `kebiao.socket` 持有，重启服务期间新请求会在内核队列中等待新进程接管（通常在 1 秒以内），不会拒绝连接；正在处理的请求最长等待 5 秒优雅退出。反向代理配置中需为 `ProxyPass` 加上 `retry=0`（示例配置已包含），避免 Apache 因瞬时连接失败而在接下来 60 秒内直接返回 503。
+- 代码同步至 `/opt/nufe-kebiao`，由 systemd 服务 `kebiao` 托管（运行用户 `kebiao`，仅监听 UNIX 套接字 `/run/kebiao/kebiao.sock`，单 worker 进程）。
+- **部署账号**：默认拒绝 `root@` 直连（确需时设 `ALLOW_ROOT_DEPLOY=1`），请使用普通部署账号并按 `deploy/sudoers-kebiao.example` 授权。首次部署前由管理员创建服务用户并把 `/opt/nufe-kebiao` 交给部署账号（步骤见该文件）。这不是沙箱——部署账号本来就能改服务运行的代码——作用是关掉 root SSH 并收窄日常部署的权限。
+- **依赖**：生产环境只安装 `deploy/requirements-frozen.txt`（由 `uv.lock` 导出，带 SHA-256 哈希，`--require-hashes --no-deps`）。改了依赖后先 `uv lock`，再按该文件头部的命令重新导出。
+- **升级注意（不可直接回滚）**：首次启动会把库里明文的学生姓名、课表与调课记录就地加密，旧版代码读不了加密后的数据。升级前请先备份 `data/kebiao.db`，需要回滚时连同数据库一起恢复。
+- **旧版 App 兼容**：2.2.0 及更早的安卓 App 使用 v1 设备签名，服务端默认继续接受（`MOBILE_LEGACY_SIGNATURE=true`）。待新版铺开后再设为 `false`，否则旧版会收到 401 并清掉本机托管记录。
+- **平滑重启不停服**：监听套接字由 `kebiao.socket` 持有，重启服务期间新请求会在内核队列中等待新进程接管（通常在 1 秒以内），不会拒绝连接；正在处理的请求最长等待 5 秒优雅退出。反向代理配置中需为 `ProxyPass` 加上 `retry=0`（示例配置已包含），避免 Apache 因瞬时连接失败而在接下来 60 秒内直接返回 503。
 - 服务器上的 `.env`（含首次自动生成的 `APP_SECRET_KEY`）和 `data/` 目录仅在首次部署时创建，后续部署不会覆盖。
-- **反向代理示例（Apache）**：推荐使用独立域名，`deploy/apache-kebiao.conf` 提供了完整虚拟主机配置（80 跳转 443、全站反代至 8010、访问日志自动忽略含 token 的路径）。也支持挂载在子路径下（如 `PUBLIC_BASE_URL=https://example.com/kebiao`，Cookie Path 会随之设为 `/kebiao/`），前端请求均采用相对路径；若后续从子路径迁移至独立域名，可将旧虚拟主机改为引入 `deploy/apache-kebiao-legacy.conf`，使网页请求 301 跳转至新域名，同时保持已发放的日历订阅和小组件链接原地可用。
+- **反向代理示例（Apache）**：推荐使用独立域名，`deploy/apache-kebiao.conf` 提供了完整虚拟主机配置（80 跳转 443、全站反代至 UNIX 套接字、访问日志自动忽略含 token 的路径）。也支持挂载在子路径下（如 `PUBLIC_BASE_URL=https://example.com/kebiao`，Cookie Path 会随之设为 `/kebiao/`），前端请求均采用相对路径；若后续从子路径迁移至独立域名，可将旧虚拟主机改为引入 `deploy/apache-kebiao-legacy.conf`，使网页请求 308 跳转至新域名，同时保持已发放的日历订阅和小组件链接原地可用。
 - 查看实时日志：`journalctl -u kebiao -f`
 - 查看后台刷新调度状态：`journalctl -u kebiao | grep "tick:"`——当有用户到期、执行刷新或预算发生变化时，每轮 tick 会输出一行摘要，例如 `tick: due=12 refreshed=8 budget=0.65/s (max 0.65)`；因学校服务器报错触发预算减半时也会明确记录。
 - 健康检查：`GET /healthz` 返回 `{"ok": true}`。

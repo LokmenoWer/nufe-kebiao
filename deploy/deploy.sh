@@ -79,11 +79,21 @@ SVC_USER="$6"
 PORT="$7"
 MANAGE_UNITS="$8"
 ENV_SET="$9"
+# 非 root 部署：需要 root 的步骤走 sudo；只需读写 data/（700，归服务用户）的步骤以服务用户身份跑。
+# 需要的 sudo 授权见 deploy/sudoers-kebiao.example
 SUDO=""
-[ "$(id -u)" -eq 0 ] || SUDO="sudo -n"
+AS_SVC=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo -n"
+  AS_SVC="sudo -n -u $SVC_USER"
+fi
 id "$SVC_USER" >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
 mkdir -p "$APP_DIR/data"
 # 代码归部署账号或 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
+# root 部署时 rsync -a 会把本地的 uid/gid 带上来，必须改回 root，否则服务器上碰巧同 uid 的账号就能改代码
+if [ "$(id -u)" -eq 0 ]; then
+  find "$APP_DIR" -path "$APP_DIR/data" -prune -o -exec chown root:root {} +
+fi
 $SUDO chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && $SUDO chmod 700 "$APP_DIR/data"
 
 if [ ! -f "$APP_DIR/.env" ]; then
@@ -162,9 +172,10 @@ START=$(date +%s%N)
 if [ "$FORCE_RESTART" != 1 ] && [ -z "$ENV_SET" ] && [ "$SOCKET_CHANGED" = 0 ] && [ "$SERVICE_CHANGED" = 0 ] && [ "$DEPS_CHANGED" = 0 ] && systemctl is-active -q "$SERVICE"; then
   # 信号是异步的：删掉旧结果再发，等服务写出这一次的结果
   STATUS_FILE=$(PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "from app import reloader; print(reloader.status_file())")
-  rm -f "$STATUS_FILE"
+  # 状态文件在 data/ 里，部署账号进不去：删和读都以服务用户身份做
+  $AS_SVC rm -f "$STATUS_FILE"
   $SUDO systemctl reload "$SERVICE"
-  if "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
+  if $AS_SVC "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
     ACTION="reload"
   else
     echo "hot reload did not succeed; restarting" >&2
@@ -177,10 +188,10 @@ else
 fi
 SOCK_PATH="/run/$SERVICE/$SERVICE.sock"
 if [ -S "$SOCK_PATH" ]; then
-  $SUDO curl --unix-socket "$SOCK_PATH" -s -o /dev/null --max-time 30 "http://localhost/healthz" || true
+  $AS_SVC curl --unix-socket "$SOCK_PATH" -s -o /dev/null --max-time 30 "http://localhost/healthz" || true
   echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
   systemctl is-active "$SERVICE"
-  $SUDO curl --unix-socket "$SOCK_PATH" -s -o /dev/null -w "local / -> %{http_code}\n" "http://localhost/"
+  $AS_SVC curl --unix-socket "$SOCK_PATH" -s -o /dev/null -w "local / -> %{http_code}\n" "http://localhost/"
 else
   curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
   echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
