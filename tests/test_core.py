@@ -1192,5 +1192,18 @@ def test_smtp_refuses_plaintext_auth_when_encryption_is_none(monkeypatch):
         mailer._deliver_smtp(msg)
 
 
+def test_deploy_blocks_root_ssh_by_default():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    example = (root / "deploy" / "deploy.env.example").read_text(encoding="utf-8")
+    deploy_sh = (root / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    assert "HOST=deployer@" in example
+    assert "HOST=root@" not in example
+    assert "ALLOW_ROOT_DEPLOY" in deploy_sh
+    assert 'SUDO="sudo -n"' in deploy_sh
+
+
+
 
 

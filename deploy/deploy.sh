@@ -4,7 +4,7 @@
 #   cp deploy/deploy.env.example deploy/deploy.env   # 填好服务器信息（该文件不进 git）
 #   deploy/deploy.sh
 #   DEPLOY_ENV=deploy/deploy-beta.env deploy/deploy.sh   # 部署到同机的 beta（目录 / 服务 / 端口在该文件里，见 deploy.env.example）
-# 也可以直接用环境变量：HOST=root@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
+# 也可以直接用环境变量：HOST=deployer@your-server PUBLIC_BASE_URL=https://kebiao.example.com deploy/deploy.sh
 # 部署的是当前提交（HEAD），没提交的改动不会上线。首次部署后服务器上的 .env / data/ 不会被覆盖。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,8 +12,12 @@ cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 DEPLOY_ENV=${DEPLOY_ENV:-deploy/deploy.env}
 [ -f "$DEPLOY_ENV" ] && . "$DEPLOY_ENV"
-: "${HOST:?请设置 HOST，例如 HOST=root@your-server}"
+: "${HOST:?请设置 HOST，例如 HOST=deployer@your-server}"
 : "${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://kebiao.example.com}"
+if [[ "$HOST" == root@* ]] && [ "${ALLOW_ROOT_DEPLOY:-0}" != "1" ]; then
+  echo "禁止使用 root 账号直连 SSH 部署，请改用最小权限 deployer 账号（如 HOST=deployer@...）" >&2
+  exit 1
+fi
 # 默认是正式服；同一台机器上的 beta 等实例在各自的 env 文件里覆盖这几项
 APP_DIR=${APP_DIR:-/opt/nufe-kebiao}
 SERVICE=${SERVICE:-kebiao}
@@ -75,11 +79,12 @@ SVC_USER="$6"
 PORT="$7"
 MANAGE_UNITS="$8"
 ENV_SET="$9"
-id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO="sudo -n"
+id "$SVC_USER" >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SVC_USER"
 mkdir -p "$APP_DIR/data"
-# 代码归 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
-find "$APP_DIR" -path "$APP_DIR/data" -prune -o -exec chown root:root {} +
-chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && chmod 700 "$APP_DIR/data"
+# 代码归部署账号或 root；data/（数据库）必须整体归服务用户，否则 SQLite 只读、服务起不来
+$SUDO chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && $SUDO chmod 700 "$APP_DIR/data"
 
 if [ ! -f "$APP_DIR/.env" ]; then
   (umask 077; cat > "$APP_DIR/.env" <<ENV
@@ -94,6 +99,7 @@ SCHEDULER_ENABLED=true
 ENV
   )
 fi
+$SUDO chown "$(id -un):$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 # 管理员页密码：deploy.env 里配了哈希就同步到服务器（只传哈希，不传明文）
 if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
   [[ "$ADMIN_PASSWORD_HASH" =~ ^pbkdf2_sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]] || { echo "ADMIN_PASSWORD_HASH 格式不合法" >&2; exit 1; }
@@ -112,7 +118,7 @@ for kv in "${_env_items[@]}"; do
    printf '%s\n' "$kv" >> "$APP_DIR/.env.tmp"
    mv "$APP_DIR/.env.tmp" "$APP_DIR/.env")
 done
-chown "root:$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
+$SUDO chown "$(id -un):$SVC_USER" "$APP_DIR/.env" && chmod 640 "$APP_DIR/.env"
 
 DEPS_CHANGED=0
 if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
@@ -141,15 +147,15 @@ SERVICE_CHANGED=0
 if [ "$MANAGE_UNITS" = 1 ]; then
   cmp -s "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket" || SOCKET_CHANGED=1
   cmp -s "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service" || SERVICE_CHANGED=1
-  install -m 644 "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket"
-  install -m 644 "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service"
-  systemctl daemon-reload
+  $SUDO install -m 644 "$APP_DIR/deploy/kebiao.socket" "/etc/systemd/system/$SERVICE.socket"
+  $SUDO install -m 644 "$APP_DIR/deploy/kebiao.service" "/etc/systemd/system/$SERVICE.service"
+  $SUDO systemctl daemon-reload
 fi
 # 服务也要开机自启：后台刷新得在没人访问时照样跑，不能等第一个连接才把它拉起来
-systemctl enable -q "$SERVICE.socket" "$SERVICE"
+$SUDO systemctl enable -q "$SERVICE.socket" "$SERVICE"
 if [ "$SOCKET_CHANGED" = 1 ] || ! systemctl is-active -q "$SERVICE.socket"; then
-  systemctl stop "$SERVICE" "$SERVICE.socket"
-  systemctl start "$SERVICE.socket"
+  $SUDO systemctl stop "$SERVICE" "$SERVICE.socket"
+  $SUDO systemctl start "$SERVICE.socket"
 fi
 START=$(date +%s%N)
 # ENV_SET 改了 .env：配置只在启动时读，必须重启
@@ -157,20 +163,28 @@ if [ "$FORCE_RESTART" != 1 ] && [ -z "$ENV_SET" ] && [ "$SOCKET_CHANGED" = 0 ] &
   # 信号是异步的：删掉旧结果再发，等服务写出这一次的结果
   STATUS_FILE=$(PYTHONDONTWRITEBYTECODE=1 "$APP_DIR/.venv/bin/python" -c "from app import reloader; print(reloader.status_file())")
   rm -f "$STATUS_FILE"
-  systemctl reload "$SERVICE"
+  $SUDO systemctl reload "$SERVICE"
   if "$APP_DIR/.venv/bin/python" "$APP_DIR/deploy/wait_reload.py" "$STATUS_FILE" 45; then
     ACTION="reload"
   else
     echo "hot reload did not succeed; restarting" >&2
-    systemctl restart "$SERVICE"
+    $SUDO systemctl restart "$SERVICE"
     ACTION="restart"
   fi
 else
-  systemctl restart "$SERVICE"
+  $SUDO systemctl restart "$SERVICE"
   ACTION="restart"
 fi
-curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
-echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
-systemctl is-active "$SERVICE"
-curl -s -o /dev/null -w "local / -> %{http_code}\n" "http://127.0.0.1:$PORT/"
+SOCK_PATH="/run/$SERVICE/$SERVICE.sock"
+if [ -S "$SOCK_PATH" ]; then
+  $SUDO curl --unix-socket "$SOCK_PATH" -s -o /dev/null --max-time 30 "http://localhost/healthz" || true
+  echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
+  systemctl is-active "$SERVICE"
+  $SUDO curl --unix-socket "$SOCK_PATH" -s -o /dev/null -w "local / -> %{http_code}\n" "http://localhost/"
+else
+  curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PORT/healthz" || true
+  echo "$ACTION: $(( ($(date +%s%N) - START) / 1000000 )) ms until /healthz answered"
+  systemctl is-active "$SERVICE"
+  curl -s -o /dev/null -w "local / -> %{http_code}\n" "http://127.0.0.1:$PORT/"
+fi
 REMOTE
