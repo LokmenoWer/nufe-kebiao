@@ -214,14 +214,27 @@ object Hosting {
             .remove(KEY_SERVER_OK).apply { if (error != null) putString(KEY_ERROR, error) else remove(KEY_ERROR) }.apply()
     }
 
-    /** 和服务器 mobile_devices.signed_message 同一格式。 */
+    /** 和服务器 mobile_devices.signed_message_v2 同一格式：绑定 method、path、body 摘要与防重放 nonce。 */
     private fun signed(context: Context, builder: Request.Builder): Request.Builder {
         val p = prefs(context)
         val token = p.getString(KEY_TOKEN, null).orEmpty()
         val device = p.getString(KEY_DEVICE, null).orEmpty()
         val ts = (System.currentTimeMillis() / 1000).toString()
-        val sig = DeviceKeys.sign("nufe-kebiao-device-v1\n$token\n$device\n$ts".toByteArray())
+        val probe = builder.build()
+        val method = probe.method.uppercase()
+        val path = probe.url.encodedPath
+        val bodyBytes = okio.Buffer().also { probe.body?.writeTo(it) }.readByteArray()
+        val bodyHash = java.security.MessageDigest.getInstance("SHA-256").digest(bodyBytes)
+            .joinToString("") { "%02x".format(it) }
+        val nonceBytes = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+        val nonce = android.util.Base64.encodeToString(
+            nonceBytes,
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
+        )
+        val msg = "nufe-kebiao-device-v2\n$token\n$device\n$ts\n$method\n$path\n$bodyHash\n$nonce"
+        val sig = DeviceKeys.sign(msg.toByteArray())
         return builder.header("User-Agent", "nufe-kebiao-android/2")
-            .header("X-Device-Id", device).header("X-Device-Time", ts).header("X-Device-Signature", sig)
+            .header("X-Device-Id", device).header("X-Device-Time", ts)
+            .header("X-Device-Nonce", nonce).header("X-Device-Signature", sig)
     }
 }

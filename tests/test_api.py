@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import secrets
 import time
 from types import SimpleNamespace
 
@@ -221,7 +222,9 @@ def up(monkeypatch):
     from app import security
     security.login_by_ip._hits.clear()
     security.login_by_student._hits.clear()
+    security.captcha_refresh_by_ip._hits.clear()
     main.mobile_pair_by_user._hits.clear()
+    mobile_devices._used_signatures.clear()
     fake = FakeUpstream()
     monkeypatch.setattr(cas, "login", fake.login)
     FakeFlow.up = fake
@@ -2097,15 +2100,24 @@ class _Phone:
             self.device_id = r.json()["device_id"]
         return r
 
-    def signed(self, at=None, key=None, device_id=None):
+    def signed(self, at=None, key=None, device_id=None, method="GET", path=None, body=b"", nonce=None):
         device_id = device_id or self.device_id
         ts = str(int(at if at is not None else time.time()))
-        message = mobile_devices.signed_message(self.token, device_id, ts)
+        path = path or f"/mobile/{self.token}.json"
+        nonce = nonce or secrets.token_urlsafe(12)
+        body_hash = hashlib.sha256(body).hexdigest()
+        message = mobile_devices.signed_message_v2(self.token, device_id, ts, method, path, body_hash, nonce)
         sig = (key or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
-        return {"X-Device-Id": device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+        return {
+            "X-Device-Id": device_id,
+            "X-Device-Time": ts,
+            "X-Device-Nonce": nonce,
+            "X-Device-Signature": base64.b64encode(sig).decode(),
+        }
 
     def profile(self, **kw):
-        return TestClient(app).get(f"/mobile/{self.token}/profile", headers=self.signed(**kw))
+        path = f"/mobile/{self.token}/profile"
+        return TestClient(app).get(path, headers=self.signed(path=path, **kw))
 
 
 def _pair_code(c):
@@ -2869,10 +2881,19 @@ class HostedApp:
             self.token, self.device_id = r.json()["token"], r.json()["device_id"]
         return r
 
-    def signed(self):
+    def signed(self, method="GET", path=None, body=b"", nonce=None):
         ts = str(int(time.time()))
-        sig = self.key.sign(mobile_devices.signed_message(self.token, self.device_id, ts), ec.ECDSA(hashes.SHA256()))
-        return {"X-Device-Id": self.device_id, "X-Device-Time": ts, "X-Device-Signature": base64.b64encode(sig).decode()}
+        path = path or f"/mobile/{self.token}/timetable"
+        nonce = nonce or secrets.token_urlsafe(12)
+        body_hash = hashlib.sha256(body).hexdigest()
+        msg = mobile_devices.signed_message_v2(self.token, self.device_id, ts, method, path, body_hash, nonce)
+        sig = self.key.sign(msg, ec.ECDSA(hashes.SHA256()))
+        return {
+            "X-Device-Id": self.device_id,
+            "X-Device-Time": ts,
+            "X-Device-Nonce": nonce,
+            "X-Device-Signature": base64.b64encode(sig).decode(),
+        }
 
 
 def test_app_enroll_creates_account_and_binds_device(up):
@@ -2932,12 +2953,59 @@ def test_app_timetable_requires_device_signature(up):
 def test_app_leave_forgets_school_session(up):
     phone = HostedApp()
     phone.enroll("2023001")
-    assert TestClient(app).post(f"/mobile/{phone.token}/leave", headers=phone.signed()).json() == {"ok": True}
+    leave_path = f"/mobile/{phone.token}/leave"
+    assert TestClient(app).post(leave_path, headers=phone.signed(method="POST", path=leave_path)).json() == {"ok": True}
     uid = service_uid("2023001")
     row = db.connect().execute("SELECT status, enc_cookies FROM users WHERE id=?", (uid,)).fetchone()
     assert row["enc_cookies"] is None and row["status"] == "needs_rebind"
     assert mobile_devices.list_devices(uid) == []
     assert TestClient(app).get(f"/mobile/{phone.token}/timetable", headers=phone.signed()).status_code == 401
+
+
+def test_mobile_signature_replay_and_cross_endpoint_tamper_rejected(up):
+    phone = HostedApp()
+    phone.enroll("2023001")
+    c = TestClient(app)
+    captured = phone.signed()
+    # 未消费前直接跨接口挪用到写接口（leave / forget-session）即因 method/path 绑定不匹配被拒绝
+    assert c.post(f"/mobile/{phone.token}/leave", headers=captured).status_code == 401
+    assert c.post(f"/mobile/{phone.token}/forget-session", headers=captured).status_code == 401
+    # 缺少 X-Device-Nonce 的旧版 v1 无上下文签名一律被拒绝
+    ts_v1 = str(int(time.time()))
+    sig_v1 = base64.b64encode(
+        phone.key.sign(mobile_devices.signed_message(phone.token, phone.device_id, ts_v1), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    v1_headers = {"X-Device-Id": phone.device_id, "X-Device-Time": ts_v1, "X-Device-Signature": sig_v1}
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=v1_headers).status_code == 401
+    assert c.post(f"/mobile/{phone.token}/leave", headers=v1_headers).status_code == 401
+    # 原始合法 GET 签名正常通过，但重放被拒绝
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=captured).status_code == 200
+    assert c.get(f"/mobile/{phone.token}/timetable", headers=captured).status_code == 401
+
+    # v2 签名绑定 method、path、body_hash 与 nonce：篡改任一维度均被拒绝
+    ts = str(int(time.time()))
+    body = _push_body(course="合法推送")
+    raw_bytes = json.dumps(body).encode()
+    body_hash = hashlib.sha256(raw_bytes).hexdigest()
+    path = f"/mobile/{phone.token}/push"
+    msg = mobile_devices.signed_message_v2(phone.token, phone.device_id, ts, "POST", path, body_hash, "nonce-1")
+    sig = base64.b64encode(phone.key.sign(msg, ec.ECDSA(hashes.SHA256()))).decode()
+    v2_headers = {
+        "X-Device-Id": phone.device_id,
+        "X-Device-Time": ts,
+        "X-Device-Nonce": "nonce-1",
+        "X-Device-Signature": sig,
+        "Content-Type": "application/json",
+    }
+    # 篡改请求体后签名不匹配
+    tampered = json.dumps(_push_body(course="被篡改的课")).encode()
+    assert c.post(path, content=tampered, headers=v2_headers).status_code == 401
+    # 跨接口挪用 v2 签名被拒绝
+    assert c.post(f"/mobile/{phone.token}/leave", headers=v2_headers).status_code == 401
+    # 原始合法载荷验签通过，再次使用同一 nonce 被防重放拦截
+    assert c.post(path, content=raw_bytes, headers=v2_headers).status_code == 200
+    sig2 = base64.b64encode(phone.key.sign(msg, ec.ECDSA(hashes.SHA256()))).decode()
+    assert c.post(path, content=raw_bytes, headers={**v2_headers, "X-Device-Signature": sig2}).status_code == 401
 
 
 # ---------- 设备数据源：安卓手机给 iOS 小组件与日历供数 ----------
@@ -2951,7 +3019,13 @@ def _push_body(sid="2023001", course="手机推的课", updated=None, semester_i
 
 
 def _push(phone, body):
-    return TestClient(app).post(f"/mobile/{phone.token}/push", json=body, headers=phone.signed())
+    raw = json.dumps(body).encode()
+    path = f"/mobile/{phone.token}/push"
+    return TestClient(app).post(
+        path,
+        content=raw,
+        headers={**phone.signed(method="POST", path=path, body=raw), "Content-Type": "application/json"},
+    )
 
 
 def test_data_source_only_enroll_keeps_no_school_session(up):
@@ -2969,7 +3043,8 @@ def test_data_source_only_enroll_keeps_no_school_session(up):
     assert service.refresh_user(uid, "manual")["status"] == "device"
     assert db.connect().execute("SELECT status FROM users WHERE id=?", (uid,)).fetchone()["status"] == "ok"
 
-    links = TestClient(app).get(f"/mobile/{phone.token}/links", headers=phone.signed()).json()
+    links_path = f"/mobile/{phone.token}/links"
+    links = TestClient(app).get(links_path, headers=phone.signed(path=links_path)).json()
     assert links["widget_url"].endswith(f"/widget/{phone.token}.json") and links["ics_url"].endswith(".ics")
     assert links["webcal_url"].startswith("webcal://") and links["server_refresh"] is False
 
@@ -3009,7 +3084,8 @@ def test_device_push_checks_owner_shape_and_freshness(up):
 def test_forget_session_keeps_device_as_data_source(up):
     phone = HostedApp()
     phone.enroll("2023001")
-    assert TestClient(app).post(f"/mobile/{phone.token}/forget-session", headers=phone.signed()).json() == {"ok": True}
+    fs_path = f"/mobile/{phone.token}/forget-session"
+    assert TestClient(app).post(fs_path, headers=phone.signed(method="POST", path=fs_path)).json() == {"ok": True}
     row = db.connect().execute("SELECT cred_mode, enc_cookies FROM users WHERE student_id='2023001'").fetchone()
     assert (row["cred_mode"], row["enc_cookies"]) == ("device", None)
     assert _push(phone, _push_body()).json()["stored"] is True

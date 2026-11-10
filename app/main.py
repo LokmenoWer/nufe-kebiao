@@ -799,11 +799,18 @@ def mobile_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1
     return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], token, request))
 
 
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
 def _device_signed(uid: int, token: str, request: Request) -> bool:
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
     try:
-        mobile_devices.authenticate(uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            uid, token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=_EMPTY_BODY_SHA256, nonce=nonce,
+        )
     except mobile_devices.AuthError:
         return False
     return True
@@ -899,9 +906,13 @@ def mobile_profile(token: str, request: Request):
     """个人信息：只给配对过的设备，要带设备私钥的签名。链接泄露时这里拿不到东西。"""
     user = _widget_user(token)
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
     try:
-        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=_EMPTY_BODY_SHA256, nonce=nonce,
+        )
     except mobile_devices.AuthError as e:
         body = {"detail": "设备未绑定或签名无效"}
         if e.skew:
@@ -1299,13 +1310,18 @@ async def app_enroll(body: AppEnrollIn, request: Request):
                         headers={"Cache-Control": "no-store", **_WIDGET_HEADERS})
 
 
-def _signed_device(token: str, request: Request):
+def _signed_device(token: str, request: Request, body_hash: str | None = None):
     """/mobile/{token}/… 里要带设备签名的接口：返回 (user, None) 或 (None, 401 响应)。"""
     user = _widget_user(token)
     h = request.headers
+    nonce = h.get("x-device-nonce", "")
+    bh = body_hash if body_hash is not None else _EMPTY_BODY_SHA256
     try:
-        mobile_devices.authenticate(user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
-                                    h.get("x-device-signature", ""))
+        mobile_devices.authenticate(
+            user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            h.get("x-device-signature", ""), method=request.method, path=request.url.path,
+            body_hash=bh, nonce=nonce,
+        )
     except mobile_devices.AuthError as e:
         body = {"detail": "设备未绑定或签名无效"}
         if e.skew:
@@ -1331,9 +1347,6 @@ DEVICE_PUSH_MAX = 1024 * 1024
 @app.post("/mobile/{token}/push")
 async def mobile_push(token: str, request: Request):
     """设备数据源：手机把本机刷到的课表推上来，iOS 小组件（/widget/…）和日历订阅（/ics/…）就读这份。"""
-    user, denied = await asyncio.to_thread(_signed_device, token, request)
-    if denied:
-        return denied
     size = request.headers.get("content-length") or "0"
     if not size.isdigit() or int(size) > DEVICE_PUSH_MAX:
         raise HTTPException(413, "内容过大")
@@ -1342,6 +1355,10 @@ async def mobile_push(token: str, request: Request):
         raw += chunk
         if len(raw) > DEVICE_PUSH_MAX:
             raise HTTPException(413, "内容过大")
+    body_hash = hashlib.sha256(bytes(raw)).hexdigest()
+    user, denied = await asyncio.to_thread(_signed_device, token, request, body_hash)
+    if denied:
+        return denied
     try:
         body = json.loads(raw)
     except ValueError:
