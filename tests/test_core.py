@@ -1204,6 +1204,21 @@ def test_deploy_blocks_root_ssh_by_default():
     assert 'SUDO="sudo -n"' in deploy_sh
 
 
+def test_pyproject_and_requirements_consistency():
+    from pathlib import Path
+
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    reqs = [line.strip() for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+    assert sorted(pyproject["project"]["dependencies"]) == sorted(reqs)
+    assert "httpx>=0.27" in pyproject["dependency-groups"]["dev"]
+    assert "httpx2>=0.27" not in pyproject["dependency-groups"]["dev"]
+    assert "pytest>=8" not in reqs
+
+
+
 
 
 
