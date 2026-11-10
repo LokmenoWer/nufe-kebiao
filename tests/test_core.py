@@ -1258,6 +1258,20 @@ def test_systemd_socket_uses_restricted_unix_domain_socket():
     assert "RequestHeader unset X-Forwarded-For" in apache
 
 
+def test_apache_configs_use_308_redirects_and_global_security_headers():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    apache = (root / "deploy" / "apache-kebiao.conf").read_text(encoding="utf-8")
+    legacy = (root / "deploy" / "apache-kebiao-legacy.conf").read_text(encoding="utf-8")
+    assert "R=308" in apache and "R=permanent" not in apache
+    assert "RedirectMatch 308" in legacy and "RedirectMatch 301" not in legacy
+    assert 'Header always set Strict-Transport-Security "max-age=31536000"' in apache
+    assert 'Header always set X-Content-Type-Options "nosniff"' in apache
+    assert "Header always set Content-Security-Policy" in apache
+
+
+
 
 
 
