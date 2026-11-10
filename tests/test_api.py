@@ -3152,4 +3152,41 @@ def test_user_name_and_timetable_encrypted_at_rest(up):
     assert c.get("/api/timetable").json()["activities"][0]["courseName"] == "高数"
 
 
+def test_legacy_token_log_redaction_and_bearer_header_support(up):
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    legacy_conf = (root / "deploy" / "apache-kebiao-legacy.conf").read_text(encoding="utf-8")
+    assert "kebiao_token_path" in legacy_conf
+    assert "env=!kebiao_token_path" in legacy_conf
+    assert main._safe_log_path("/kebiao/ics/secret-token.ics") == "/kebiao/ics/<redacted>"
+    assert main._safe_log_path("/kebiao/widget/secret-token.json") == "/kebiao/widget/<redacted>"
+
+    phone = HostedApp()
+    phone.enroll("2023001")
+    c = TestClient(app)
+    bearer = {"Authorization": f"Bearer {phone.token}"}
+    r = c.get(
+        "/mobile/me/timetable",
+        headers={**phone.signed(path="/mobile/me/timetable"), **bearer},
+    )
+    assert r.status_code == 200
+    assert r.json()["student"]["code"] == "2023001"
+    links = c.get(
+        "/mobile/me/links",
+        headers={**phone.signed(path="/mobile/me/links"), **bearer},
+    )
+    assert links.status_code == 200
+    assert links.json()["widget_url"].endswith(f"/widget/{phone.token}.json")
+    prof = c.get(
+        "/mobile/me/profile",
+        headers={**phone.signed(path="/mobile/me/profile"), **bearer},
+    )
+    assert prof.status_code == 200 and prof.json()["student"]["code"] == "2023001"
+    feed = c.get(
+        "/mobile/me.json",
+        headers={**phone.signed(path="/mobile/me.json"), **bearer},
+    )
+    assert feed.status_code == 200 and feed.json()["delegate"] is True
+
 

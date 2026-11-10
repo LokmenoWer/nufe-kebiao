@@ -103,8 +103,8 @@ object Hosting {
     /** 读本站那份课表与状态。设备已被撤销（401/404）时清掉本机的托管记录。 */
     fun pull(context: Context): JSONObject {
         val app = context.applicationContext
-        val token = prefs(app).getString(KEY_TOKEN, null) ?: throw HostingRejected("未托管")
-        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/timetable").get())
+        prefs(app).getString(KEY_TOKEN, null) ?: throw HostingRejected("未托管")
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/timetable").get())
         Community.http.newCall(request.build()).execute().use { response ->
             if (response.code == 401 || response.code == 404) {
                 forget(app, "服务器上的托管已失效，重新导入课表时勾选托管即可恢复")
@@ -129,8 +129,8 @@ object Hosting {
     /** 关掉服务器托管但保留数据源：本站删掉学校登录态，设备与链接不动。 */
     fun forgetSession(context: Context) {
         val app = context.applicationContext
-        val token = prefs(app).getString(KEY_TOKEN, null) ?: return
-        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/forget-session")
+        prefs(app).getString(KEY_TOKEN, null) ?: return
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/forget-session")
             .post(ByteArray(0).toRequestBody(null)))
         Community.http.newCall(request.build()).execute().use { if (!it.isSuccessful) throw IOException("HTTP ${it.code}") }
         prefs(app).edit().putBoolean(KEY_KEEP, false).putBoolean(KEY_WANTED, false).remove(KEY_STATUS).apply()
@@ -145,12 +145,12 @@ object Hosting {
         if (!dataSource(app)) return false
         val updated = timetable.optLong("updated_at")
         if (updated <= 0 || updated <= prefs(app).getLong(KEY_PUSHED, 0L)) return false
-        val token = prefs(app).getString(KEY_TOKEN, null) ?: return false
+        prefs(app).getString(KEY_TOKEN, null) ?: return false
         val body = JSONObject()
         for (key in listOf("semester_id", "semester_name", "week1_monday", "activities", "student", "updated_at")) {
             body.put(key, timetable.opt(key))
         }
-        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/push")
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/push")
             .post(body.toString().toRequestBody(Community.JSON)))
         Community.http.newCall(request.build()).execute().use { response ->
             if (response.code == 401 || response.code == 404) {
@@ -166,8 +166,8 @@ object Hosting {
     /** iOS 小组件 / 日历订阅链接（本人设备签名才给）。 */
     fun links(context: Context): JSONObject {
         val app = context.applicationContext
-        val token = prefs(app).getString(KEY_TOKEN, null) ?: throw HostingRejected("未绑定")
-        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/links").get())
+        prefs(app).getString(KEY_TOKEN, null) ?: throw HostingRejected("未绑定")
+        val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/links").get())
         Community.http.newCall(request.build()).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             return JSONObject(response.body?.string().orEmpty())
@@ -177,9 +177,9 @@ object Hosting {
     /** 取消托管：让服务器删掉登录态、撤销这台设备。网络失败也清本机记录，服务器那边的设备之后会因签名失效无人使用。 */
     fun leave(context: Context): Boolean {
         val app = context.applicationContext
-        val token = prefs(app).getString(KEY_TOKEN, null) ?: return true
+        prefs(app).getString(KEY_TOKEN, null) ?: return true
         val ok = runCatching {
-            val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/leave")
+            val request = signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/leave")
                 .post(ByteArray(0).toRequestBody(null)))
             Community.http.newCall(request.build()).execute().use { it.isSuccessful }
         }.getOrDefault(false)
@@ -194,7 +194,7 @@ object Hosting {
         val token = prefs(app).getString(KEY_TOKEN, null)
         val request = if (token != null) {
             runCatching {
-                signed(app, Request.Builder().url("${Community.site(app)}/mobile/$token/leave")
+                signed(app, Request.Builder().url("${Community.site(app)}/mobile/me/leave")
                     .post(ByteArray(0).toRequestBody(null))).build()
             }.getOrNull()
         } else null
@@ -234,6 +234,7 @@ object Hosting {
         val msg = "nufe-kebiao-device-v2\n$token\n$device\n$ts\n$method\n$path\n$bodyHash\n$nonce"
         val sig = DeviceKeys.sign(msg.toByteArray())
         return builder.header("User-Agent", "nufe-kebiao-android/2")
+            .header("Authorization", "Bearer $token")
             .header("X-Device-Id", device).header("X-Device-Time", ts)
             .header("X-Device-Nonce", nonce).header("X-Device-Signature", sig)
     }

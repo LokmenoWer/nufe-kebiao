@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextvars
 import hashlib
 import hmac
@@ -71,7 +72,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("kebiao.web")
 
 
-_TOKEN_PATHS = ("/ics/", "/widget/", "/mobile/")
+_TOKEN_PATHS = ("/ics/", "/widget/", "/mobile/", "/kebiao/ics/", "/kebiao/widget/", "/kebiao/mobile/")
 
 
 def _safe_log_path(path: str) -> str:
@@ -143,6 +144,8 @@ class ReloadableApp:
         self._target = target
 
     async def __call__(self, scope, receive, send) -> None:
+        if not reloader._swapping_done.is_set():
+            await asyncio.to_thread(reloader.wait_if_swapping)
         await self._target(scope, receive, send)
 
     def __getattr__(self, name: str):
@@ -739,7 +742,19 @@ def _widget_template() -> tuple[str, str]:
 mobile_pair_by_user = RateLimiter(20, 900, prev=globals().get("mobile_pair_by_user"))
 
 
-def _widget_user(token: str):
+def _resolve_bearer_token(token: str, request: Request | None = None) -> str:
+    if request is not None and token == "me":
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        hdr = request.headers.get("x-widget-token", "").strip()
+        if hdr:
+            return hdr
+    return token
+
+
+def _widget_user(token: str, request: Request | None = None):
+    token = _resolve_bearer_token(token, request)
     if not token or len(token) > 128:
         raise HTTPException(404)
     user = db.connect().execute(
@@ -820,8 +835,9 @@ def widget_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1
 
 @app.get("/mobile/{token}.json")
 def mobile_feed(token: str, request: Request, refresh: int = Query(0, ge=0, le=1)):
-    user = _widget_user(token)
-    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], token, request))
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
+    return _feed(user, refresh, "mobile", delegate=_device_signed(user["id"], actual_token, request))
 
 
 _EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -913,8 +929,8 @@ def mobile_device_revoke(device_id: str, sess=Depends(csrf_protected)):
 
 
 @app.post("/mobile/{token}/pair")
-def mobile_pair(token: str, body: MobilePairIn):
-    user = _widget_user(token)
+def mobile_pair(token: str, body: MobilePairIn, request: Request):
+    user = _widget_user(token, request)
     if not mobile_pair_by_user.hit(str(user["id"])):
         raise HTTPException(429, "尝试太频繁，请稍后再试")
     try:
@@ -929,12 +945,13 @@ def mobile_pair(token: str, body: MobilePairIn):
 @app.get("/mobile/{token}/profile")
 def mobile_profile(token: str, request: Request):
     """个人信息：只给配对过的设备，要带设备私钥的签名。链接泄露时这里拿不到东西。"""
-    user = _widget_user(token)
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
     h = request.headers
     nonce = h.get("x-device-nonce", "")
     try:
         mobile_devices.authenticate(
-            user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            user["id"], actual_token, h.get("x-device-id", ""), h.get("x-device-time", ""),
             h.get("x-device-signature", ""), method=request.method, path=request.url.path,
             body_hash=_EMPTY_BODY_SHA256, nonce=nonce,
         )
@@ -969,7 +986,7 @@ WIDGET_UPLOAD_MAX = 4 * 1024 * 1024
 @app.post("/mobile/{token}/upload")
 async def widget_upload(token: str, request: Request):
     """小组件用手机网络抓到的课表页和 print-data。响应带上最新的小组件数据，脚本同一次运行就能画上。"""
-    user = await asyncio.to_thread(_widget_user, token)
+    user = await asyncio.to_thread(_widget_user, token, request)
     size = request.headers.get("content-length") or "0"
     if not size.isdigit() or int(size) > WIDGET_UPLOAD_MAX:
         raise HTTPException(413, "上传内容过大")
@@ -1098,7 +1115,16 @@ def index():
 
 # ---------- 服务器管理员页 ----------
 
+
+class _AdminHitsDict(collections.OrderedDict):
+    def clear(self) -> None:
+        super().clear()
+        admin.clear_login_attempts()
+
+
 admin_login_by_ip = RateLimiter(5, 900, prev=globals().get("admin_login_by_ip"))
+if not isinstance(admin_login_by_ip._hits, _AdminHitsDict):
+    admin_login_by_ip._hits = _AdminHitsDict(admin_login_by_ip._hits)
 
 
 class AdminLoginIn(BaseModel):
@@ -1118,11 +1144,13 @@ def admin_login(body: AdminLoginIn, request: Request, response: Response):
     if not admin.ENABLED:
         raise HTTPException(404)
     ip = _client_ip(request)
-    if not admin_login_by_ip.hit(ip):
+    if not admin_login_by_ip.hit(ip) or not admin.login_allowed(ip):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试")
     if not admin.verify_password(body.password, admin.ADMIN_PASSWORD_HASH):
+        admin.record_login_attempt(ip, ok=False)
         log.warning("admin login failed from %s", ip)
         raise HTTPException(401, "密码错误")
+    admin.record_login_attempt(ip, ok=True)
     log.info("admin login from %s", ip)
     return {"csrf": admin.login(response)}
 
@@ -1337,13 +1365,14 @@ async def app_enroll(body: AppEnrollIn, request: Request):
 
 def _signed_device(token: str, request: Request, body_hash: str | None = None):
     """/mobile/{token}/… 里要带设备签名的接口：返回 (user, None) 或 (None, 401 响应)。"""
-    user = _widget_user(token)
+    actual_token = _resolve_bearer_token(token, request)
+    user = _widget_user(actual_token)
     h = request.headers
     nonce = h.get("x-device-nonce", "")
     bh = body_hash if body_hash is not None else _EMPTY_BODY_SHA256
     try:
         mobile_devices.authenticate(
-            user["id"], token, h.get("x-device-id", ""), h.get("x-device-time", ""),
+            user["id"], actual_token, h.get("x-device-id", ""), h.get("x-device-time", ""),
             h.get("x-device-signature", ""), method=request.method, path=request.url.path,
             body_hash=bh, nonce=nonce,
         )
@@ -1419,6 +1448,7 @@ def _ensure_ics_token(uid: int) -> str | None:
 @app.get("/mobile/{token}/links")
 def mobile_links(token: str, request: Request):
     """给 App 展示的 iOS 小组件与日历订阅链接（只给签名过的本人设备）。"""
+    actual_token = _resolve_bearer_token(token, request)
     user, denied = _signed_device(token, request)
     if denied:
         return denied
@@ -1426,8 +1456,8 @@ def mobile_links(token: str, request: Request):
     row = db.connect().execute("SELECT cred_mode, enc_cookies IS NOT NULL AS hosted, last_success_at FROM users WHERE id=?",
                                (user["id"],)).fetchone()
     return JSONResponse({
-        "widget_url": f"{PUBLIC_BASE_URL}/widget/{token}.json",
-        "script_url": f"{PUBLIC_BASE_URL}/widget/{token}.js",
+        "widget_url": f"{PUBLIC_BASE_URL}/widget/{actual_token}.json",
+        "script_url": f"{PUBLIC_BASE_URL}/widget/{actual_token}.js",
         "ics_url": ics,
         "webcal_url": ics.replace("https://", "webcal://", 1).replace("http://", "webcal://", 1) if ics else None,
         "server_refresh": bool(row["hosted"]) or row["cred_mode"] == "password",
