@@ -1306,6 +1306,18 @@ def test_cas_dump_redacts_ticket_and_workspace_debug_cleaned(tmp_path):
     assert "ticket=<REDACTED>" in dumped
 
 
+def test_uv_lock_uses_official_pypi_registry():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    assert "pypi.tuna.tsinghua.edu.cn" not in lock
+    assert "https://pypi.org/simple" in lock
+    assert "https://files.pythonhosted.org/packages/" in lock
+    assert "httpx2" not in lock
+
+
+
 
 
 
