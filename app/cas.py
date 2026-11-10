@@ -342,17 +342,22 @@ class LoginFlow:
     def _dump(self, name: str, r: requests.Response) -> None:
         if not self.debug_dir:
             return
-        self.debug_dir.mkdir(parents=True, exist_ok=True)
+        self.debug_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._step += 1
         p = self.debug_dir / f"{self._step:02d}-{name}"
         body = r.content if "image" in r.headers.get("content-type", "") else r.text.encode()
         set_cookies = [c.split("=", 1)[0] for h in [*r.history, r]
                        for c in h.raw.headers.getlist("Set-Cookie")] if hasattr(r.raw, "headers") else []
-        p.with_suffix(".txt").write_text(
-            f"{r.request.method} {r.url}\nstatus={r.status_code}\n"
-            + "\n".join(f"  redirect: {h.status_code} {h.url}" for h in r.history)
+        redact = lambda u: re.sub(r"([?&]ticket=)[^&#\s]+", r"\1<REDACTED>", str(u), flags=re.I)  # noqa: E731
+        txt_path = p.with_suffix(".txt")
+        html_path = p.with_suffix(".html")
+        txt_path.write_text(
+            f"{r.request.method} {redact(r.url)}\nstatus={r.status_code}\n"
+            + "\n".join(f"  redirect: {h.status_code} {redact(h.url)}" for h in r.history)
             + f"\n  set-cookie: {set_cookies}\n  jar: {sorted({c.name for c in self.session.cookies})}\n", "utf-8")
-        p.with_suffix(".html").write_bytes(body)
+        html_path.write_bytes(body)
+        txt_path.chmod(0o600)
+        html_path.chmod(0o600)
 
     def wipe_password(self) -> None:
         self.password = ""

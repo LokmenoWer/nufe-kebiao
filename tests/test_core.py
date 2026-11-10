@@ -1271,6 +1271,42 @@ def test_apache_configs_use_308_redirects_and_global_security_headers():
     assert "Header always set Content-Security-Policy" in apache
 
 
+def test_cas_dump_redacts_ticket_and_workspace_debug_cleaned(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app import cas
+    from app.polite import PoliteSession
+
+    root = Path(__file__).resolve().parent.parent
+    assert not (root / "debug").exists()
+    assert not (root / "my.json").exists()
+    assert not (root / ".nufe_device_id").exists()
+
+    flow = cas.LoginFlow(PoliteSession(), "2023001", "pw", debug_dir=tmp_path / "dbg")
+    fake_hist = SimpleNamespace(
+        status_code=302,
+        url="https://jwxt.nufe.edu.cn/student/sso/login?ticket=ST-123456-secret-ticket",
+        raw=SimpleNamespace(headers=SimpleNamespace(getlist=lambda _k: [])),
+    )
+    fake_resp = SimpleNamespace(
+        request=SimpleNamespace(method="GET"),
+        url="https://jwxt.nufe.edu.cn/student/for-std/course-table?ticket=ST-999999-secret",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        text="<html>ok</html>",
+        content=b"<html>ok</html>",
+        history=[fake_hist],
+        raw=SimpleNamespace(headers=SimpleNamespace(getlist=lambda _k: [])),
+    )
+    flow._dump("test", fake_resp)
+    dumped = (tmp_path / "dbg" / "01-test.txt").read_text(encoding="utf-8")
+    assert "ST-123456-secret-ticket" not in dumped
+    assert "ST-999999-secret" not in dumped
+    assert "ticket=<REDACTED>" in dumped
+
+
+
 
 
 

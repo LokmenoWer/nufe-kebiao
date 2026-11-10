@@ -90,6 +90,7 @@ def main() -> int:
     dev_file = Path(__file__).resolve().parent.parent / ".nufe_device_id"
     if not dev_file.exists():
         dev_file.write_text(cas.new_device_id())
+        dev_file.chmod(0o600)
     s = PoliteSession()
     flow = cas.LoginFlow(s, args.username, password, device_id=dev_file.read_text().strip(), debug_dir=args.dump)
     del password
@@ -112,8 +113,9 @@ def main() -> int:
               f"{a['courseName']} @{a['room']} {'/'.join(a['teachers'])} [{a['weeksStr']}]", file=sys.stderr)
     out = json.dumps(data, ensure_ascii=False, indent=2)
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(out)
+        out_path = Path(args.output)
+        out_path.write_text(out, encoding="utf-8")
+        out_path.chmod(0o600)
         print("已保存到", args.output, file=sys.stderr)
     else:
         print(out)
