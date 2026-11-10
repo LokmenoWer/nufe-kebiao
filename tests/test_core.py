@@ -1179,4 +1179,18 @@ def test_frozen_requirements_pinned_with_sha256_hashes():
     assert "pytest==" not in frozen
 
 
+def test_smtp_refuses_plaintext_auth_when_encryption_is_none(monkeypatch):
+    import pytest
+
+    from app import mailer
+
+    monkeypatch.setattr(mailer, "MAIL_USERNAME", "user@example.com")
+    monkeypatch.setattr(mailer, "MAIL_PASSWORD", "secret")
+    monkeypatch.setattr(mailer, "MAIL_ENCRYPTION", "none")
+    msg = mailer.build(mailer.Mail(to="dest@example.com", subject="hi", body="body"))
+    with pytest.raises(RuntimeError, match="MAIL_ENCRYPTION=none"):
+        mailer._deliver_smtp(msg)
+
+
+
 

@@ -137,6 +137,8 @@ MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
 MAIL_ENCRYPTION = os.getenv("MAIL_ENCRYPTION", "ssl").strip().lower()
 if MAIL_ENCRYPTION not in ("ssl", "tls", "starttls", "none", ""):
     raise RuntimeError("MAIL_ENCRYPTION 只能是 ssl / tls / none")
+if MAIL_ENCRYPTION in ("none", "") and MAIL_USERNAME:
+    raise RuntimeError("配置了 MAIL_USERNAME 时禁止使用 MAIL_ENCRYPTION=none（拒绝明文传输 SMTP 密码）")
 MAIL_FROM_ADDRESS = os.getenv("MAIL_FROM_ADDRESS", "").strip() or MAIL_USERNAME
 MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "南财课表").strip()
 MAIL_ENABLED = MAIL_MAILER == "log" or bool(MAIL_HOST and MAIL_FROM_ADDRESS)
