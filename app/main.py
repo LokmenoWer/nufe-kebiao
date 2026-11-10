@@ -285,7 +285,7 @@ async def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(400, "请先阅读并同意使用说明")
     if not re.fullmatch(r"[0-9A-Za-z]+", body.student_id):
         raise HTTPException(400, "学号格式不正确")
-    ip = request.client.host if request.client else "?"
+    ip = _client_ip(request)
     if not login_by_ip.hit(ip) or not login_by_student.hit(body.student_id):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试（避免触发学校账号锁定）")
     hint = device_hint_uid(request)
@@ -340,7 +340,7 @@ class QrStartIn(BaseModel):
 async def login_qr_start(body: QrStartIn, request: Request, response: Response):
     if not body.agree_terms:
         raise HTTPException(400, "请先阅读并同意使用说明")
-    ip = request.client.host if request.client else "?"
+    ip = _client_ip(request)
     if not login_by_ip.hit(ip):
         raise HTTPException(429, "尝试过于频繁，请 15 分钟后再试")
     hint = device_hint_uid(request)
@@ -662,6 +662,11 @@ def _email_call(fn):
 
 
 def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        hops = [p.strip() for p in xff.split(",") if p.strip()]
+        if hops and (request.client is None or len(hops) > 1):
+            return hops[-1]
     return request.client.host if request.client else "?"
 
 

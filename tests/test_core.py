@@ -1245,6 +1245,20 @@ def test_android_boot_receiver_validates_intent_action_allowlist():
     assert '"android.intent.action.QUICKBOOT_POWERON"' in kt
 
 
+def test_systemd_socket_uses_restricted_unix_domain_socket():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    sock = (root / "deploy" / "kebiao.socket").read_text(encoding="utf-8")
+    apache = (root / "deploy" / "apache-kebiao.conf").read_text(encoding="utf-8")
+    assert "ListenStream=/run/kebiao/kebiao.sock" in sock
+    assert "SocketGroup=www-data" in sock
+    assert "SocketMode=0660" in sock
+    assert "unix:/run/kebiao/kebiao.sock" in apache
+    assert "RequestHeader unset X-Forwarded-For" in apache
+
+
+
 
 
 
