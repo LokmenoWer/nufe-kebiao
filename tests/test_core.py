@@ -1050,6 +1050,29 @@ def test_rate_limiter_falls_back_to_oldest_when_all_saturated():
     assert len(lim._hits) == 2 and "a" not in lim._hits
 
 
+def test_rate_limiter_does_not_evict_partially_attacked_key_on_key_flood():
+    from app.security import RateLimiter
+    limiter = RateLimiter(limit=5, window=900, max_keys=100)
+    for _ in range(4):
+        assert limiter.hit("victim_student") is True
+    assert len(limiter._hits["victim_student"]) == 4
+
+    for i in range(100):
+        limiter.hit(f"dummy_{i}")
+
+    assert "victim_student" in limiter._hits
+    assert len(limiter._hits["victim_student"]) == 4
+
+    # 即使攻击者对全部伪造键各发起多次命中填满桶容量，正在被爆破的 victim_student 仍不会被挤出，新伪造键 Fail-Closed
+    for i in range(1, 100):
+        limiter.hit(f"dummy_{i}")
+        limiter.hit(f"dummy_{i}")
+    assert limiter.hit("brand_new_noise") is False
+    assert "victim_student" in limiter._hits
+    assert limiter.hit("victim_student") is True
+    assert limiter.hit("victim_student") is False
+
+
 def test_dotenv_sync_applies_removals_but_keeps_explicit_env(monkeypatch):
     import os
 
