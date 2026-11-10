@@ -1218,6 +1218,15 @@ def test_pyproject_and_requirements_consistency():
     assert "pytest>=8" not in reqs
 
 
+def test_gradle_wrapper_has_distribution_sha256_sum():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    props = (root / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties").read_text(encoding="utf-8")
+    assert "distributionSha256Sum=945faee80f55dfbfdc39e24021235492d529fba40784405391c0e3ebce25c83b" in props
+
+
+
 
 
 
