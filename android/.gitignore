@@ -6,6 +6,8 @@ local.properties
 .kotlin/
 keystore.properties
 *.jks
+*.keystore
+*signing*.zip
 app/release/
 gradle/gradle-daemon-jvm.properties
 

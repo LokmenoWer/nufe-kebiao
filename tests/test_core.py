@@ -1148,3 +1148,18 @@ def test_scheduler_start_fills_in_missing_threads(monkeypatch):
     finally:
         scheduler.stop()
 
+
+def test_android_signing_uses_env_and_no_workspace_keystore():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    gradle_kts = (root / "android" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+    assert 'System.getenv("ANDROID_KEYSTORE_FILE")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEYSTORE_PASSWORD")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEY_ALIAS")' in gradle_kts
+    assert 'System.getenv("ANDROID_KEY_PASSWORD")' in gradle_kts
+    assert not (root / "android" / "keystore.properties").exists()
+    assert not (root / "android" / "nufe-kebiao-release.jks").exists()
+    assert not (root / "android" / "build" / "nufe-kebiao-signing.zip").exists()
+
+
