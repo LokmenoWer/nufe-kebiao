@@ -1085,6 +1085,24 @@ def test_deploy_script_escapes_ssh_args_and_validates_inputs():
     assert "printf '%q '" in content
 
 
+def test_credential_envelope_encryption_and_direct_password_encrypt_blocked():
+    import pytest
+
+    from app import crypto
+
+    assert crypto.encrypt(b"MySecretPassword123", "password", 1001)[:1] == b"\x02"
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt(b"\x01" + b"0" * 32, "password", 1001)
+
+    blob = crypto.encrypt_password(b"MySecretPassword123", 1001, "2023001")
+    assert blob[:1] == b"\x02"
+    assert crypto.decrypt_password(blob, 1001, "2023001") == b"MySecretPassword123"
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt_password(blob, 1002, "2023001")
+    with pytest.raises(crypto.CryptoError):
+        crypto.decrypt_password(blob, 1001, "2023002")
+
+
 def test_dotenv_sync_applies_removals_but_keeps_explicit_env(monkeypatch):
     import os
 
@@ -1129,3 +1147,4 @@ def test_scheduler_start_fills_in_missing_threads(monkeypatch):
         assert not refresh_thread.is_alive() and set(scheduler.alive()) == {"qr-pump"}
     finally:
         scheduler.stop()
+

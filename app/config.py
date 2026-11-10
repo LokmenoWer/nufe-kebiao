@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -73,6 +75,20 @@ except (binascii.Error, ValueError):
     raise RuntimeError("APP_SECRET_KEY 不是合法的 base64") from None
 if len(APP_SECRET_KEY) != 32:
     raise RuntimeError("APP_SECRET_KEY 必须是 32 字节")
+
+_cred_key_b64 = os.getenv("CREDENTIAL_SECRET_KEY", "").strip()
+if _cred_key_b64:
+    try:
+        CREDENTIAL_SECRET_KEY = base64.b64decode(_cred_key_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise RuntimeError("CREDENTIAL_SECRET_KEY 不是合法的 base64") from None
+    if len(CREDENTIAL_SECRET_KEY) != 32:
+        raise RuntimeError("CREDENTIAL_SECRET_KEY 必须是 32 字节")
+else:
+    CREDENTIAL_SECRET_KEY = hmac.new(APP_SECRET_KEY, b"kebiao-credential-master-kek-v2", hashlib.sha256).digest()
+
+# 是否允许在数据库中加密持久化学校密码（生产环境建议设为 false，仅依靠长期 Cookie 与端侧刷新）
+PASSWORD_STORAGE_ENABLED = _bool("PASSWORD_STORAGE_ENABLED", True)
 
 _db_path = os.getenv("DB_PATH", str(ROOT / "data" / "kebiao.db"))
 DB_PATH = _db_path if os.path.isabs(_db_path) else str((ROOT / _db_path).resolve())

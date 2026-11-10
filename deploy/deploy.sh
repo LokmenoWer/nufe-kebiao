@@ -84,6 +84,8 @@ chown -R "$SVC_USER:$SVC_USER" "$APP_DIR/data" && chmod 700 "$APP_DIR/data"
 if [ ! -f "$APP_DIR/.env" ]; then
   (umask 077; cat > "$APP_DIR/.env" <<ENV
 APP_SECRET_KEY=$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')
+CREDENTIAL_SECRET_KEY=$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')
+PASSWORD_STORAGE_ENABLED=false
 PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 DB_PATH=$APP_DIR/data/kebiao.db
 COOKIE_SECURE=true

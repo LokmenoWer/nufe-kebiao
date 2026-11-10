@@ -29,6 +29,7 @@ from . import cas, crypto, db, ics, jwxt, notify, refresh_policy, widget
 from .config import (
     MANUAL_REFRESH_FRESH_SECONDS,
     MANUAL_REFRESH_MIN_GAP,
+    PASSWORD_STORAGE_ENABLED,
     REFRESH_MAX_FAILS,
     SSO_KEEPALIVE_IDLE_DAYS,
     SSO_KEEPALIVE_MINUTES,
@@ -157,7 +158,7 @@ def login_start(student_id: str, password: str, remember_password: bool, keep_lo
     p = PendingLogin(
         flow_id=secrets.token_urlsafe(24),
         flow=cas.LoginFlow(PoliteSession(), student_id, password, device_id=_device_for_login(student_id, hint_uid)),
-        password_to_store=password if remember_password else None,
+        password_to_store=password if (remember_password and PASSWORD_STORAGE_ENABLED) else None,
         expires_at=db.now() + PENDING_TTL,
         keep_login=keep_login,
     )
@@ -468,9 +469,9 @@ def _complete_login(p: PendingLogin) -> int:
                       (crypto.encrypt(p.flow.device_id.encode(), "device", uid), uid))
             if p.keep_creds:
                 pass  # 扫码登录不涉及密码：保留用户原有的凭据设置
-            elif p.password_to_store:
+            elif p.password_to_store and PASSWORD_STORAGE_ENABLED:
                 c.execute("UPDATE users SET cred_mode='password', enc_password=?, password_consent_at=? WHERE id=?",
-                          (crypto.encrypt(p.password_to_store.encode(), "password", uid), db.now(), uid))
+                          (crypto.encrypt_password(p.password_to_store.encode(), uid, student_id), db.now(), uid))
             else:
                 c.execute("UPDATE users SET cred_mode='cookie', enc_password=NULL, password_consent_at=NULL WHERE id=?",
                           (uid,))
@@ -785,13 +786,13 @@ def _refresh_locked(uid: int, trigger: str, semester_id: int | None,
         except jwxt.SessionExpired:
             # 先用 CASTGC 静默续期（扫码 / 不存密码的用户也能续上），失败才动用保存的密码
             if not _renew_with_tgc(s, uid):
-                if user["cred_mode"] != "password" or not user["enc_password"]:
+                if not PASSWORD_STORAGE_ENABLED or user["cred_mode"] != "password" or not user["enc_password"]:
                     raise NeedsRebind("登录态已过期，请重新登录本站以续期") from None
                 log.info("user %s: session expired, re-login with stored credential", uid)
                 try:
                     device = (crypto.decrypt(user["enc_device_id"], "device", uid).decode()
                               if user["enc_device_id"] else None)
-                    password = crypto.decrypt(user["enc_password"], "password", uid).decode()
+                    password = crypto.decrypt_password(user["enc_password"], uid, user["student_id"]).decode()
                 except crypto.CryptoError:
                     log.warning("user %s: stored credential unusable", uid)
                     return _save_failure(uid, trigger, "needs_rebind",
