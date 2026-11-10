@@ -48,6 +48,8 @@ from .config import (
 from .polite import MAX_CONCURRENCY
 from .security import (
     RateLimiter,
+    captcha_refresh_by_flow,
+    captcha_refresh_by_ip,
     clear_device_hint,
     clear_session_cookie,
     create_session,
@@ -356,7 +358,10 @@ def login_qr_poll(body: FlowIn, response: Response):
 
 
 @app.post("/api/login/qr/refresh")
-async def login_qr_refresh(body: FlowIn, response: Response):
+async def login_qr_refresh(body: FlowIn, request: Request, response: Response):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         r = _login_result(lambda: service.login_qr_refresh(body.flow_id), response)
         if r.get("need") == "qr":
@@ -411,7 +416,10 @@ async def login_captcha(body: CaptchaIn, response: Response):
 
 
 @app.post("/api/login/captcha-image")
-async def login_captcha_image(body: FlowIn):
+async def login_captcha_image(body: FlowIn, request: Request):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         try:
             return {"captcha_image": _captcha_data_url(body.flow_id)}
@@ -431,7 +439,10 @@ async def login_slider(body: SliderIn, response: Response):
 
 
 @app.post("/api/login/slider/refresh")
-async def login_slider_refresh(body: FlowIn):
+async def login_slider_refresh(body: FlowIn, request: Request):
+    if not captcha_refresh_by_ip.hit(_client_ip(request)) or not captcha_refresh_by_flow.hit(body.flow_id):
+        raise HTTPException(429, "刷新过于频繁，请稍后再试")
+
     def run():
         try:
             return {"slider": _slider_payload(body.flow_id)}

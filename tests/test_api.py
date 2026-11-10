@@ -223,6 +223,7 @@ def up(monkeypatch):
     security.login_by_ip._hits.clear()
     security.login_by_student._hits.clear()
     security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
     main.mobile_pair_by_user._hits.clear()
     mobile_devices._used_signatures.clear()
     fake = FakeUpstream()
@@ -3111,4 +3112,28 @@ def test_global_request_body_size_limit(up):
         headers={"Origin": "http://testserver", "Content-Type": "application/json"},
     )
     assert big.status_code == 413
+
+
+def test_captcha_and_slider_refresh_rate_limited(up):
+    from app import security
+
+    c = TestClient(app)
+    security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
+    for i in range(security.captcha_refresh_by_ip.limit):
+        r = c.post("/api/login/captcha-image", headers=ORIGIN, json={"flow_id": f"flow-{i}"})
+        assert r.status_code == 400
+    assert c.post("/api/login/captcha-image", headers=ORIGIN, json={"flow_id": "flow-next"}).status_code == 429
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": "flow-next"}).status_code == 429
+
+    # 按 flow_id 限速：即便每次换 IP，单个 flow_id 刷新超限也在进入上游线程池前被 429 拦截
+    security.captcha_refresh_by_ip._hits.clear()
+    security.captcha_refresh_by_flow._hits.clear()
+    same_flow = "target-flow-id"
+    for _ in range(security.captcha_refresh_by_flow.limit):
+        security.captcha_refresh_by_ip._hits.clear()
+        assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": same_flow}).status_code == 400
+    security.captcha_refresh_by_ip._hits.clear()
+    assert c.post("/api/login/slider/refresh", headers=ORIGIN, json={"flow_id": same_flow}).status_code == 429
+
 

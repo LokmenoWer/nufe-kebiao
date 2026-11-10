@@ -256,3 +256,4 @@ class RateLimiter:
 login_by_ip = RateLimiter(10, 900, prev=globals().get("login_by_ip"))
 login_by_student = RateLimiter(5, 900, prev=globals().get("login_by_student"))
 captcha_refresh_by_ip = RateLimiter(20, 60, prev=globals().get("captcha_refresh_by_ip"))
+captcha_refresh_by_flow = RateLimiter(12, 300, prev=globals().get("captcha_refresh_by_flow"))
