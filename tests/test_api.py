@@ -1,5 +1,6 @@
 """Web 层端到端测试：上游（CAS/教务）全部打桩，不访问学校服务器。"""
 import base64
+import contextlib
 import hashlib
 import json
 import secrets
@@ -145,6 +146,26 @@ class FakeFlow:
 
     def captcha_image(self):
         return b"\x89PNG fake", "image/png"
+
+    def auto_solve(self, max_rounds: int = 4):
+        """与 cas.LoginFlow.auto_solve 同形：真实求解器解不了假图时就停在当前步，
+        恰好模拟“自动识别失败→回退真人”的分支，后面的真人步骤照旧。"""
+        from app import captcha_solver
+        for _ in range(max_rounds):
+            if self.stage == "captcha":
+                code = captcha_solver.solve_image_captcha(self.captcha_image()[0])
+                if not code:
+                    break
+                with contextlib.suppress(cas.CasError):
+                    self.stage = self.submit(code)
+            elif self.stage == "slider":
+                try:
+                    self.stage = self.submit_slider(*captcha_solver.solve_slider(self.slider_challenge()))
+                except (cas.CasError, ValueError):
+                    break
+            else:
+                break
+        return self.stage
 
     def start_qr(self):
         self.stage, self.qr_status = "qr", "waiting"

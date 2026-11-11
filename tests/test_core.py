@@ -1328,3 +1328,101 @@ def test_uv_lock_uses_official_pypi_registry():
 
 
 
+
+
+# ---------- LoginFlow.auto_solve（真实求解器 + 假 session） ----------
+
+
+class _SessResp:
+    def __init__(self, url="", body=b"", payload=None):  # noqa: N805
+        self.url, self.content, self.status_code = url, body, 200
+        if isinstance(body, bytes):
+            try:
+                self.text = body.decode()
+            except UnicodeDecodeError:
+                self.text = ""
+        else:
+            self.text = str(body)
+        self._payload = payload
+        self.headers = {"content-type": "image/png" if body[:8] == b"\x89PNG\r\n\x1a\n" else
+                        "image/jpeg" if body[:2] == b"\xff\xd8" else "text/html"}
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError
+        return self._payload
+
+
+class _AutoSolveSession:
+    """按 URL 前缀分发：验证码图片 / 滑块 JSON / 登录 POST / 课表页。"""
+
+    def __init__(self, replies_get, replies_post):  # noqa: N805
+        self.gets, self.posts, self._g, self._p = [], [], list(replies_get), list(replies_post)
+
+    def get(self, url, **kw):
+        self.gets.append(url)
+        return self._g.pop(0)
+
+    def post(self, url, data=None, headers=None):
+        self.posts.append((url, data))
+        return self._p.pop(0)
+
+
+def _png_rows(w, h, ct, rows):
+    import struct
+    raw = b"".join(bytes([0]) + bytes(r) for r in rows)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, ct, 0, 0, 0)
+
+    def ch(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", __import__("zlib").crc32(t + d))
+
+    return b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", ihdr) + ch(b"IDAT", __import__("zlib").compress(raw)) + ch(b"IEND", b"")
+
+
+_COURSE_HTML = "<script>var personId = 7; var currentSemester = {'id': 161};</script>"
+
+
+def test_auto_solve_image_captcha_completes():
+    font = {"1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+            "0": [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."]}
+    W, H = 13, 7
+    img = [255] * (W * H)
+    for gi, off in (("1", 1), ("0", 7)):
+        for r, row in enumerate(font[gi]):
+            for c, ch_ in enumerate(row):
+                if ch_ == "#":
+                    img[r * W + off + c] = 0
+    cap = _png_rows(W, H, 0, [bytes(img[r * W:(r + 1) * W]) for r in range(H)])
+    s = _AutoSolveSession(
+        [_SessResp("cap", cap), _SessResp(cas.COURSE_TABLE_URL, _COURSE_HTML)],
+        [_SessResp(cas.COURSE_TABLE_URL, _COURSE_HTML)],
+    )
+    flow = cas.LoginFlow(s, "2023001", "pw")
+    flow.login_url = "https://authserver.nufe.edu.cn/authserver/login?service=x"
+    flow.fields = {"salt": "A" * 16, "execution": "E", "lt": ""}
+    flow.stage = "captcha"
+    assert flow.auto_solve() == "done"
+    assert s.posts[0][1]["captcha"] == "10"  # 真实识别结果进了提交表单
+
+
+def test_auto_solve_slider_completes():
+    row0 = [0, 0, 0, 0, 180, 0, 60, 0, 0, 0, 0, 0]
+    row1 = [0, 0, 0, 0, 0, 90, 0, 0, 0, 0, 0, 0]
+    big = _png_rows(12, 2, 0, [bytes(row0), bytes(row1)])
+    px0 = [180, 180, 180, 255, 0, 0, 0, 255, 60, 60, 60, 255]
+    px1 = [0, 0, 0, 255, 90, 90, 90, 255, 0, 0, 0, 255]
+    small = _png_rows(3, 2, 6, [bytes(px0), bytes(px1)]) + b"0123456789ABCDEF"
+    payload = {"bigImage": base64.b64encode(big).decode(),
+               "smallImage": base64.b64encode(small).decode()}
+    s = _AutoSolveSession(
+        [_SessResp("open", payload=payload), _SessResp(cas.COURSE_TABLE_URL, _COURSE_HTML)],
+        [_SessResp("verify", payload={"errorCode": 1}), _SessResp(cas.COURSE_TABLE_URL, _COURSE_HTML)],
+    )
+    flow = cas.LoginFlow(s, "2023001", "pw")
+    flow.login_url = "https://authserver.nufe.edu.cn/authserver/login?service=x"
+    flow.fields = {"salt": "A" * 16, "execution": "E", "lt": ""}
+    flow.stage = "slider"
+    flow.slider_page_loaded = True
+    assert flow.auto_solve() == "done"
+    # 签名只出现在 verify 的 POST 里；课表页不再重复请求
+    assert s.posts[0][0].endswith("verifySliderCaptcha.htl") and "sign" in s.posts[0][1]
