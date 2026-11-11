@@ -164,7 +164,16 @@ def login_start(student_id: str, password: str, remember_password: bool, keep_lo
     )
     _track(p)
     with p.lock:
-        return _advance(p, p.flow.start)
+
+        def step():
+            stage = p.flow.start()
+            if stage in ("captcha", "slider"):
+                # 先试自动识别，失败则保留当前阶段给真人重做
+                with contextlib.suppress(cas.CasError):
+                    stage = p.flow.auto_solve()
+            return stage
+
+        return _advance(p, step)
 
 
 # 扫码登录：前端约每 2 秒轮询一次，单个流程最多轮询这么多次（≈二维码有效期），防止无限打学校接口

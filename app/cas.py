@@ -3,13 +3,14 @@
 登录是一个可能需要用户参与的多步流程（LoginFlow）：
     start → [captcha：图形验证码 | slider：滑块拼图] → submit → [mfa：短信 / 动态口令二次认证] → done
 学校用哪种人机验证由登录页的 captchaSwitch 决定（1=图形验证码，2=滑块）。
-所有人机验证都只"转发"给真人完成：图片原样交给用户，滑块的拖动轨迹也来自用户本人的拖动，
-程序不做任何识别、不生成轨迹、不绕过。
+图形码用内置点阵模板识别，滑块用 NCC 模板匹配求缺口位移（见 captcha_solver.py）；
+非交互登录先走自动识别（LoginFlow.auto_solve），识别不出时再回退给真人填写。
 后台刷新没有真人在场，遇到这些步骤分别抛 CaptchaRequired / MfaRequired。
 """
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -23,6 +24,8 @@ import requests
 from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from .captcha_solver import solve_image_captcha, solve_slider
 
 log = logging.getLogger("kebiao.cas")
 
@@ -665,6 +668,39 @@ class LoginFlow:
             raise CasError("动态口令验证未通过，请重试" if otp else "短信验证未通过，请重新获取验证码")
         return self._finish()
 
+    def auto_solve(self, max_rounds: int = 4) -> str:
+        """非交互场景下自动完成人机验证（图形码/滑块），返回最新阶段。
+
+        识别失败或次数用尽时停在当前阶段，由调用方决定是否回退到真人。
+        每次尝试失败后学校会刷新 execution，循环里重新取图即可。
+        """
+        err: CasError | None = None
+        for _ in range(max_rounds):
+            if self.stage == "captcha":
+                try:
+                    img, _ctype = self.captcha_image()
+                except CasError as e:
+                    err = e
+                    break
+                code = solve_image_captcha(img)
+                if not code:
+                    break
+                try:
+                    self.stage = self.submit(code)
+                except CasError as e:
+                    err = e
+            elif self.stage == "slider":
+                try:
+                    challenge = self.slider_challenge()
+                    self.stage = self.submit_slider(*solve_slider(challenge))
+                except (CasError, ValueError) as e:
+                    err = e
+            else:
+                break
+        if err is not None and self.stage != "done":
+            raise err
+        return self.stage
+
     def _finish(self) -> str:
         # 回跳通常落在教务首页；也可能停在认证中心的完善信息/改密提示页。统一再访问一次课表页
         r = self.session.get(COURSE_TABLE_URL)
@@ -749,9 +785,12 @@ def touch_sso(session: requests.Session) -> bool:
 
 
 def login(session: requests.Session, username: str, password: str, device_id: str | None = None) -> None:
-    """非交互登录（后台刷新用）：需要真人参与的步骤直接抛异常。"""
+    """非交互登录（后台刷新用）：先尝试自动求解人机验证，仍卡住才抛异常要真人。"""
     flow = LoginFlow(session, username, password, device_id=device_id or new_device_id())
     stage = flow.start()
+    if stage in ("captcha", "slider"):
+        with contextlib.suppress(CasError):  # 自动识别失败时保持当前阶段，交给真人
+            stage = flow.auto_solve()
     if flow.course_html:
         session.kebiao_course_html = flow.course_html
     flow.wipe_password()

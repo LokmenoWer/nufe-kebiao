@@ -54,6 +54,7 @@ _RELOAD_ORDER = (
     "app.ics",
     "app.widget",
     "app.refresh_policy",
+    "app.captcha_solver",
     "app.cas",
     "app.jwxt",
     "app.security",
